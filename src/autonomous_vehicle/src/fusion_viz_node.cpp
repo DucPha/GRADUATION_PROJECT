@@ -254,7 +254,7 @@ public:
     FusionVizNode()
         : Node("fusion_viz_node"),
           cam_index_(declare_parameter("cam_index", 0)),
-          fps_(declare_parameter("camera_fps", 120)),
+          fps_(declare_parameter("camera_fps", 30)),
           cam_fps_(0.0), lidar_fps_(0.0),
           last_frame_id_(-1),
           last_frame_time_(std::chrono::steady_clock::now()),
@@ -269,7 +269,7 @@ public:
         cam_ = std::make_unique<CameraLane>(cam_index_, fps_, true);
         if (!cam_->start()) RCLCPP_WARN(get_logger(), "Failed to open camera");
 
-        std::string serial_port = declare_parameter("serial_port", "/dev/ttyESP32");
+        std::string serial_port = declare_parameter("serial_port", "/dev/ttyUSB0");
         serial_ = std::make_unique<SerialESP32>(serial_port);
 
         RCLCPP_INFO(get_logger(), "Waiting 2s for ESP32 to boot...");

@@ -69,8 +69,10 @@ bool CameraLane::start() {
     cap_.set(CAP_PROP_FOURCC, VideoWriter::fourcc('M', 'J', 'P', 'G'));
     cap_.set(CAP_PROP_FPS, fps_);
     cap_.set(CAP_PROP_BUFFERSIZE, 1);
+#ifdef _WIN32
     cap_.set(CAP_PROP_AUTO_EXPOSURE, 0.25);
     cap_.set(CAP_PROP_EXPOSURE, -6);
+#endif
 
     const int actual_w = static_cast<int>(std::round(cap_.get(CAP_PROP_FRAME_WIDTH)));
     const int actual_h = static_cast<int>(std::round(cap_.get(CAP_PROP_FRAME_HEIGHT)));
