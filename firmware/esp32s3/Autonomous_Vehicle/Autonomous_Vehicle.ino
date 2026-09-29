@@ -15,17 +15,18 @@
 constexpr uint8_t PIN_STEER = 13;  // Chân PWM xuất ra Servo bẻ lái
 constexpr uint8_t PIN_HALL = 23;   // Chân ngắt đọc xung Cảm biến Hall đo tốc độ
 constexpr uint8_t PIN_TURN_L = 21; // Đèn LED xi-nhan trái
-constexpr uint8_t PIN_TURN_R = 18; // Đèn LED xi-nhan phải (Tránh chân 19 là USB_D- của ESP32-S3)
-constexpr uint8_t PIN_BRAKE = 15;  // Đèn LED phanh đít
-constexpr uint8_t PIN_ESC = 14;    // Chân PWM xuất ra Động cơ (ESC)
+constexpr uint8_t PIN_TURN_R =
+    18; // Đèn LED xi-nhan phải (Tránh chân 19 là USB_D- của ESP32-S3)
+constexpr uint8_t PIN_BRAKE = 15; // Đèn LED phanh đít
+constexpr uint8_t PIN_ESC = 14;   // Chân PWM xuất ra Động cơ (ESC)
 
 // ============================================================================
-    // [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
-    // ============================================================================
-    // --- Hệ thống lái (Steering) ---
-    constexpr int STEER_CENTER = 90; // Góc Servo khi xe đi thẳng
-constexpr int STEER_MIN = 45;        // Giới hạn góc Servo rẽ phải tối đa
-constexpr int STEER_MAX = 135;       // Giới hạn góc Servo rẽ trái tối đa
+// [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
+// ============================================================================
+// --- Hệ thống lái (Steering) ---
+constexpr int STEER_CENTER = 90; // Góc Servo khi xe đi thẳng
+constexpr int STEER_MIN = 45;    // Giới hạn góc Servo rẽ phải tối đa
+constexpr int STEER_MAX = 135;   // Giới hạn góc Servo rẽ trái tối đa
 
 constexpr float CAM_DEADZONE =
     10.0f; // Vùng chết (pixel): Lệch dưới mức này xem như đi thẳng
