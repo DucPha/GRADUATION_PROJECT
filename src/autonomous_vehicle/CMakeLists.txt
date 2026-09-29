@@ -48,6 +48,9 @@ install(TARGETS autonomous_vehicle_node
 install(DIRECTORY include/
 	DESTINATION include
 )
+install(DIRECTORY launch/
+	DESTINATION share/${PROJECT_NAME}/launch
+)
 
 ament_export_include_directories(include)
 ament_export_dependencies(rclcpp sensor_msgs std_msgs cv_bridge)

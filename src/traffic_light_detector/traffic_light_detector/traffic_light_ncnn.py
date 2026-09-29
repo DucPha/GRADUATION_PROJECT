@@ -90,6 +90,8 @@ class TrafficLightDetectorNCNNVulkan(Node):
         self.sub = self.create_subscription(Image, "/image_raw", self.image_callback, 10)
         self.pub_img = self.create_publisher(Image, "/traffic_light/image_debug", 10)
         self.pub_state = self.create_publisher(String, "/traffic_light/decision", 10)
+        self.model_param = self.declare_parameter("model_param", MODEL_PARAM).value
+        self.model_bin = self.declare_parameter("model_bin", MODEL_BIN).value
 
         # ==== Params ====
         self.declare_parameter("infer_hz", 30.0)
@@ -143,8 +145,8 @@ class TrafficLightDetectorNCNNVulkan(Node):
         self.net = ncnn.Net()
         self.net.opt.use_vulkan_compute = True
         self.net.opt.num_threads = 4
-        self.net.load_param(MODEL_PARAM)
-        self.net.load_model(MODEL_BIN)
+        self.net.load_param(self.model_param)
+        self.net.load_model(self.model_bin)
 
         self.get_logger().info(" TrafficLightDetector NCNN Vulkan STARTED (iGPU/Vulkan)")
         self.timer = self.create_timer(1.0 / max(1.0, self.infer_hz), self.process_latest)

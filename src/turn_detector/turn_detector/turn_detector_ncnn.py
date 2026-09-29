@@ -61,6 +61,8 @@ class TurnDetectorNCNNVulkan(Node):
         self.sub = self.create_subscription(Image, "/image_raw", self.image_callback, 10)
         self.pub_decision = self.create_publisher(String, "/turn_detector/decision", 10)
         self.pub_img = self.create_publisher(Image, "/traffic_light/image_debug", 10)
+        self.model_param = self.declare_parameter("model_param", MODEL_PARAM).value
+        self.model_bin = self.declare_parameter("model_bin", MODEL_BIN).value
 
         self.history = deque(maxlen=5)
         self.last_frame = None
@@ -100,8 +102,8 @@ class TurnDetectorNCNNVulkan(Node):
         self.net.opt.use_vulkan_compute = True
         self.net.opt.num_threads = 4
 
-        self.net.load_param(MODEL_PARAM)
-        self.net.load_model(MODEL_BIN)
+        self.net.load_param(self.model_param)
+        self.net.load_model(self.model_bin)
 
         self.logged_once = False
         self.last_log_ns = 0

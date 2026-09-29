@@ -31,6 +31,7 @@ struct LaneOutput {
 
     int pixels_used = 0;
     cv::Mat vis;
+    cv::Mat raw;
 
     float curve_angle_deg = 0.0f;
     float curvature = 0.0f;
@@ -57,7 +58,7 @@ public:
     // Cơ chế Latest-Frame (Zero Latency Accumulation)
     static constexpr size_t FRAME_BUFFER_COUNT = 2;
 
-    static constexpr bool ENABLE_VISUALIZATION = false;
+    static constexpr bool ENABLE_VISUALIZATION = true;
     static constexpr bool ENABLE_DEBUG_LOG = false;
 
     // Ngưỡng Canny tối ưu riêng cho vạch làn màu đen

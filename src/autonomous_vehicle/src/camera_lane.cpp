@@ -108,6 +108,7 @@ bool CameraLane::start() {
         latest_output_.frame_id = 0;
         latest_output_.processing_ms = 0.0f;
         latest_output_.vis.release();
+        latest_output_.raw.release();
         output_ready_ = false;
     }
 
@@ -421,6 +422,7 @@ void CameraLane::detect_lanes(const cv::Mat& bgr, float current_speed_kmh, LaneO
     out.curvature = 0.0f;
     out.speed_factor = 0;
     out.vis.release();
+    out.raw.release();
 
     if (bgr.empty()) {
         target_speed_initialized_ = false;
@@ -651,6 +653,8 @@ void CameraLane::detect_lanes(const cv::Mat& bgr, float current_speed_kmh, LaneO
         target_speed_initialized_ = false;
         speed_state_ = SpeedState::STRAIGHT;
     }
+
+    out.raw = bgr.clone();
 
     if constexpr (ENABLE_VISUALIZATION) {
         out.vis = bgr.clone();

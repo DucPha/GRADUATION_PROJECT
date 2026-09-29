@@ -323,6 +323,7 @@ public:
 
         pub_img_ = create_publisher<sensor_msgs::msg::Image>(
             declare_parameter("image_topic", "/fusion_viz/image"), 1);
+        pub_raw_img_ = create_publisher<sensor_msgs::msg::Image>("/image_raw", 1);
 
         double hz = declare_parameter("viz_hz", 120.0);
         auto period_ns = std::chrono::nanoseconds(
@@ -458,6 +459,11 @@ private:
                 traffic_light_decision_, turn_decision_);
         auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", full_img).toImageMsg();
         pub_img_->publish(*msg);
+
+        if (has_cam && !lo.raw.empty()) {
+            auto raw_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", lo.raw).toImageMsg();
+            pub_raw_img_->publish(*raw_msg);
+        }
     }
 
 
@@ -490,6 +496,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_turn_detector_;   
 
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_img_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_raw_img_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 
