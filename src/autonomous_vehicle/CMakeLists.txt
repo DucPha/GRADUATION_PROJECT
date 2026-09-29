@@ -27,6 +27,7 @@ target_include_directories(autonomous_vehicle_node PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 	$<INSTALL_INTERFACE:include>
 	${OpenCV_INCLUDE_DIRS}
+	${JSONCPP_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(autonomous_vehicle_node
