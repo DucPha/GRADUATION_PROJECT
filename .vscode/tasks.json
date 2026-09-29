@@ -1,0 +1,24 @@
+{
+    "tasks": [
+        {
+            "label": "ROS 2: colcon build",
+            "type": "shell",
+            "command": "colcon",
+            "args": [
+                "build",
+                "--symlink-install",
+                "--base-paths",
+                "src"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ],
+    "version": "2.0.0"
+}

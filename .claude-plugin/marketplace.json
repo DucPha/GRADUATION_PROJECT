@@ -1,0 +1,23 @@
+{
+  "name": "graduation-project-claude-sync",
+  "owner": {
+    "name": "Duc Pham"
+  },
+  "metadata": {
+    "description": "Project-local Claude Code configuration for an autonomous vehicle graduation project",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "coding-guidelines",
+      "description": "Coding discipline, debugging protocol, and planning workflow for the autonomous vehicle project.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/karpathy-guidelines",
+        "./skills/superpowers",
+        "./skills/planning-with-files"
+      ]
+    }
+  ]
+}

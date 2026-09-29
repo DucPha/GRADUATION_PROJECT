@@ -1,0 +1,19 @@
+# ROS 2 / CMake build output
+/build/
+/install/
+/log/
+**/build/
+**/install/
+**/log/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# PlatformIO generated dependencies and build output
+.pio/
+**/.pio/
+
+# Local virtual environments
+.venv/
+venv/

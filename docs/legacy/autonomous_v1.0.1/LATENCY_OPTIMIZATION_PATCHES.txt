@@ -1,0 +1,262 @@
+// ============================================================================
+// LATENCY OPTIMIZATION PATCHES
+// ============================================================================
+// Apply these changes to reduce UART communication latency
+// From ~50ms average to ~10ms average
+// ============================================================================
+
+// ============================================================================
+// PATCH 1: ESP32 - Send feedback immediately after speed calculation
+// ============================================================================
+// File: autonomous_REFACTORED.ino
+// Location: In calculateSpeed() function
+
+void calculateSpeed() {
+  unsigned long now_ms = millis();
+  unsigned long now_us = micros();
+
+  if (now_ms - hall_sensor.last_calc_time_ms < SPEED_CALC_INTERVAL_MS) {
+    return;
+  }
+
+  float raw_diff_rpm = 0;
+
+  noInterrupts();
+  unsigned long pulses = hall_sensor.pulse_count;
+  hall_sensor.pulse_count = 0;
+  interrupts();
+
+  if (pulses >= 1) {
+    float delta_t_s = (now_ms - hall_sensor.last_calc_time_ms) / 1000.0;
+    raw_diff_rpm = (pulses / (float)HALL_PULSES_PER_REV) * (60.0 / delta_t_s);
+
+    if (SPEED_USE_MEDIAN_FILTER) {
+      raw_diff_rpm = medianFilter3(raw_diff_rpm);
+    }
+    float filtered_diff_rpm = movingAverageFilter(raw_diff_rpm);
+
+    float wheel_rpm = filtered_diff_rpm / TOTAL_GEAR_RATIO;
+    speed_ctrl.current_kmh = (wheel_rpm * WHEEL_CIRCUMFERENCE_M * 60.0) / 1000.0;
+
+    // ✅ NEW: Gửi feedback ngay sau khi tính xong
+    sendFeedbackToMiniPC();
+
+  } else if ((now_us - hall_sensor.last_pulse_time_us) >= (SPEED_TIMEOUT_MS * 1000)) {
+    speed_ctrl.current_kmh = 0;
+
+    for (int i = 0; i < SPEED_FILTER_SIZE; i++) {
+      hall_sensor.rpm_filter_buffer[i] = 0;
+    }
+    hall_sensor.filter_index = 0;
+    hall_sensor.filter_filled = false;
+
+    // ✅ NEW: Gửi feedback ngay cả khi timeout
+    sendFeedbackToMiniPC();
+  }
+
+  hall_sensor.last_calc_time_ms = now_ms;
+}
+
+// ============================================================================
+// PATCH 2: ESP32 - Remove periodic feedback from loop()
+// ============================================================================
+// File: autonomous_REFACTORED.ino
+// Location: In loop() function
+
+void loop() {
+  calculateSpeed();
+  receiveCommandsFromMiniPC();
+
+  static bool prev_emergency = false;
+
+  if (vehicle_cmd.emergency_stop) {
+    if (!prev_emergency && !emergency_brake.in_progress && speed_ctrl.current_kmh > 0.5) {
+      performEmergencyBrake();
+    }
+
+    if (emergency_brake.in_progress) {
+      performEmergencyBrake();
+    } else {
+      esc_motor.write(ESC_ANGLE_STOP);
+      speed_ctrl.current_esc_angle = ESC_ANGLE_STOP;
+    }
+  } else {
+    speed_ctrl.current_esc_angle = calculateSpeedPID(
+      speed_ctrl.target_kmh,
+      speed_ctrl.current_kmh
+    );
+    esc_motor.write(speed_ctrl.current_esc_angle);
+  }
+
+  prev_emergency = vehicle_cmd.emergency_stop;
+
+  controlSteering(vehicle_cmd.lane_deviation_px);
+  updateSignalLights();
+  updateBrakeLight();
+
+  // ❌ REMOVE: Periodic feedback (now sent from calculateSpeed)
+  // static unsigned long last_feedback_ms = 0;
+  // unsigned long now_ms = millis();
+  //
+  // if (now_ms - last_feedback_ms >= FEEDBACK_SEND_INTERVAL_MS) {
+  //   sendFeedbackToMiniPC();
+  //   last_feedback_ms = now_ms;
+  // }
+
+  // Debug print (keep this)
+  static unsigned long last_debug_ms = 0;
+  unsigned long now_ms = millis();
+
+  if (now_ms - last_debug_ms >= DEBUG_PRINT_INTERVAL_MS) {
+    printDebugInfo();
+    last_debug_ms = now_ms;
+  }
+}
+
+// ============================================================================
+// PATCH 3: MiniPC - Reduce select() timeout
+// ============================================================================
+// File: serial_esp32.cpp
+// Location: In read_feedback_once() function, line ~150
+
+ESP32Feedback SerialESP32::read_feedback_once() {
+    std::lock_guard<std::mutex> lock(mtx_);
+    ESP32Feedback fb;
+    fb.valid = false;
+
+    if (fd_ < 0) return fb;
+
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(fd_, &read_fds);
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 5000;  // ✅ CHANGED: 50000 → 5000 (50ms → 5ms)
+
+    int ret = select(fd_ + 1, &read_fds, nullptr, nullptr, &timeout);
+    if (ret <= 0) {
+        return fb;
+    }
+
+    uint8_t buffer[7];
+    ssize_t n = read(fd_, buffer, sizeof(buffer));
+
+    if (n == 7) {
+        if (buffer[0] == 0xDC && buffer[1] == 0xBA) {
+            uint8_t calc_checksum = calculate_checksum(&buffer[2], 4);
+            if (calc_checksum == buffer[6]) {
+                memcpy(&fb.velocity_kmh, &buffer[2], sizeof(float));
+                fb.valid = true;
+            }
+        }
+    }
+
+    return fb;
+}
+
+// ============================================================================
+// PATCH 4 (OPTIONAL): MiniPC - Reduce feedback loop sleep
+// ============================================================================
+// File: serial_esp32.cpp
+// Location: In feedback_loop() function, line ~135
+
+void SerialESP32::feedback_loop() {
+    while (running_) {
+        ESP32Feedback fb = read_feedback_once();
+        if (fb.valid) {
+            std::lock_guard<std::mutex> lock(feedback_mtx_);
+            latest_feedback_ = fb;
+        }
+        // ✅ CHANGED: 33ms → 10ms (faster polling, optional if CPU allows)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+// ============================================================================
+// EXPECTED RESULTS
+// ============================================================================
+// Before patches:
+//   - Average latency: 50-60ms
+//   - Jitter: ±50ms
+//   - Data freshness: 0-99ms old when sent
+//
+// After Patch 1+2 (ESP32 only):
+//   - Average latency: 20-30ms
+//   - Jitter: ±20ms
+//   - Data freshness: < 1ms (always fresh)
+//
+// After Patch 1+2+3 (ESP32 + MiniPC):
+//   - Average latency: 5-10ms
+//   - Jitter: ±5ms
+//   - Data freshness: < 1ms
+//
+// After All patches (1+2+3+4):
+//   - Average latency: 3-8ms
+//   - Jitter: ±3ms
+//   - Data freshness: < 1ms
+//   - CPU usage: +5-10% on MiniPC
+// ============================================================================
+
+// ============================================================================
+// TESTING
+// ============================================================================
+// Add timestamp logging to measure actual latency:
+
+// ESP32: In sendFeedbackToMiniPC()
+void sendFeedbackToMiniPC() {
+  uint8_t packet[UART_TX_PACKET_SIZE];
+
+  packet[0] = 0xDC;
+  packet[1] = 0xBA;
+
+  memcpy(&packet[2], &speed_ctrl.current_kmh, sizeof(float));
+
+  packet[6] = 0;
+  for (int i = 2; i < 6; i++) {
+    packet[6] ^= packet[i];
+  }
+
+  if (Serial.availableForWrite() >= UART_TX_PACKET_SIZE) {
+    Serial.write(packet, UART_TX_PACKET_SIZE);
+
+    // ✅ TEST: Log send timestamp
+    Serial.print("[TX] t=");
+    Serial.print(millis());
+    Serial.print("ms, speed=");
+    Serial.println(speed_ctrl.current_kmh, 2);
+  }
+}
+
+// MiniPC: In feedback_loop()
+void SerialESP32::feedback_loop() {
+    while (running_) {
+        auto t_start = std::chrono::steady_clock::now();
+
+        ESP32Feedback fb = read_feedback_once();
+        if (fb.valid) {
+            auto t_end = std::chrono::steady_clock::now();
+            auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                t_end - t_start
+            ).count();
+
+            std::lock_guard<std::mutex> lock(feedback_mtx_);
+            latest_feedback_ = fb;
+
+            // ✅ TEST: Log receive timestamp and latency
+            std::cout << "[RX] latency=" << latency_us
+                      << "us, speed=" << fb.velocity_kmh << std::endl;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+// ============================================================================
+// NOTES
+// ============================================================================
+// 1. Patch 1+2 (ESP32) không cần rebuild MiniPC code
+// 2. Patch 3+4 (MiniPC) cần rebuild và test CPU usage
+// 3. Nếu CPU MiniPC > 80% sau patch 4, revert về 33ms
+// 4. Test latency bằng cách log timestamp trên cả 2 đầu
+// 5. Với tốc độ 15 km/h, latency 10-20ms là đủ tốt
+// ============================================================================

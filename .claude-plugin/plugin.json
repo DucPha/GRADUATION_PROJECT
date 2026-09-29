@@ -1,0 +1,30 @@
+{
+  "name": "graduation-project-claude-sync",
+  "description": "Local Claude Code configuration for the autonomous vehicle graduation project.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Duc Pham"
+  },
+  "license": "MIT",
+  "keywords": [
+    "embedded",
+    "autonomous-vehicle",
+    "esp32",
+    "ros2",
+    "claude-code"
+  ],
+  "skills": [
+    "./skills/karpathy-guidelines",
+    "./skills/superpowers",
+    "./skills/planning-with-files"
+  ],
+  "metadata": {
+    "projectType": "embedded-autonomous-vehicle",
+    "platforms": [
+      "ESP32-S3",
+      "Raspberry Pi 4B",
+      "ROS2"
+    ],
+    "status": "project-local-config"
+  }
+}
