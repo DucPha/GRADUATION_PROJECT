@@ -8,7 +8,18 @@
 #include <cv_bridge/cv_bridge.h>
 #endif
 #include <opencv2/opencv.hpp>
-#include <json/json.h>
+
+// Các kiểu dùng trực tiếp trong file này: std::map (sign_map),
+// std::optional (fmt), std::istringstream (on_signs), std::min/max, std::tan.
+#include <algorithm>
+#include <cmath>
+#include <chrono>
+#include <map>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "camera_lane.hpp"
 #include "lidar_module.hpp"
@@ -24,6 +35,7 @@ constexpr int RIGHT_PANEL_W = 400;
 
 void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& lidar,
                 double cam_fps, double lidar_fps, bool serial_ok, const ESP32Feedback& esp_fb,
+                 size_t cam_queue,
                 BypassState bypass_state, int16_t dev_final,
                 const std::string& traffic_light_decision,  
                 const std::string& turn_decision) {       
@@ -44,8 +56,16 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     int x1 = 15, y1 = 25;
     cv::putText(full_img, "LIDAR", {x1, y1}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(100, 255, 255), 2, cv::LINE_AA);
     y1 += 23;
-    snprintf(text, sizeof(text), "FPS: %.0f | Status: %s", lidar_fps, lidar.has_data ? "OK" : "---");
-    cv::putText(full_img, text, {x1, y1}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
+    // Dùng luôn alert/detail của LidarStatus (trước đây chỉ ghi, không ai đọc)
+    // để thấy ngay trạng thái an toàn trên HUD.
+    cv::Scalar alert_color = cv::Scalar(200, 200, 200);
+    if (lidar.alert == "DANGER")      alert_color = cv::Scalar(0, 0, 255);
+    else if (lidar.alert == "WARNING") alert_color = cv::Scalar(0, 165, 255);
+    else if (lidar.alert == "CLEAR")   alert_color = cv::Scalar(0, 255, 0);
+    snprintf(text, sizeof(text), "FPS: %.0f | %s: %s", lidar_fps,
+             lidar.has_data ? lidar.alert.c_str() : "NO DATA",
+             lidar.has_data ? lidar.detail.c_str() : "check /scan");
+    cv::putText(full_img, text, {x1, y1}, cv::FONT_HERSHEY_SIMPLEX, 0.55, alert_color, 1, cv::LINE_AA);
     y1 += 22;
     snprintf(text, sizeof(text), "Front: %s | Rear: %s",
             fmt(lidar.front_min_cm).c_str(),
@@ -56,7 +76,7 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
             fmt(lidar.left_min_cm).c_str(),
             fmt(lidar.right_min_cm).c_str());
     cv::putText(full_img, text, {x1, y1}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
-    int x2 = 300, y2 = 25;
+    int x2 = 15 + ((RIGHT_PANEL_W + LidarModule::MAP_W) / 5), y2 = 25;
     cv::putText(full_img, "OBSTACLE AVOIDANCE", {x2, y2}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 100), 2, cv::LINE_AA);
     y2 += 23;
 
@@ -80,13 +100,15 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     y2 += 22;
     snprintf(text, sizeof(text), "Dev Final: %d px", dev_final);
     cv::putText(full_img, text, {x2, y2}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
-    int x3 = 615, y3 = 25;
+    int x3 = 15 + 2 * ((RIGHT_PANEL_W + LidarModule::MAP_W) / 5), y3 = 25;
     cv::putText(full_img, "LANE DETECTION", {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(100, 255, 100), 2, cv::LINE_AA);
     y3 += 23;
 
     double cam_fps_display = std::min(cam_fps, 250.0);
     char fps_text[64];
-    snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", cam_fps_display);
+    // Kèm số frame đang chờ: giá trị >1 nghĩa là capture thread nhanh hơn
+    // vòng xử lý -> camera là nút thắt, không phải viz.
+    snprintf(fps_text, sizeof(fps_text), "FPS: %.1f | Q: %zu", cam_fps_display, cam_queue);
     cv::putText(full_img, fps_text, {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
     y3 += 22;
 
@@ -95,10 +117,10 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     cv::putText(full_img, text, {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
     y3 += 22;
 
-    snprintf(text, sizeof(text), "Dev: %d px", lane ? lane->dev_px : 0);
+    snprintf(text, sizeof(text), "Dev: %d px", lane ? lane->dev_final_px : 0);
     cv::putText(full_img, text, {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
 
-    int x4 = 865, y4 = 25;
+    int x4 = 15 + 3 * ((RIGHT_PANEL_W + LidarModule::MAP_W) / 5), y4 = 25;
     cv::putText(full_img, "ESP32", {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 100), 2, cv::LINE_AA);
     y4 += 23;
     snprintf(text, sizeof(text), "Status: %s", serial_ok ? "OK" : "FAIL");
@@ -107,9 +129,13 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     snprintf(text, sizeof(text), "V: %.1f km/h", esp_fb.valid ? esp_fb.velocity_kmh : 0.0f);
     cv::putText(full_img, text, {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
 
-    int x5 = 1050, y5 = 25;
+    // Ảnh rộng MAP_W + RIGHT_PANEL_W. Các cột trước đây là 615 / 865 / 1050;
+// cột 1050 nằm NGOÀI ảnh nên toàn bộ khung "AI DETECTION" không bao giờ
+// hiện. Bố trí lại 5 cột đều nằm trong ảnh.
+    const int col_w = (RIGHT_PANEL_W + LidarModule::MAP_W) / 5;
+    int x5 = 15 + 4 * col_w, y5 = 25;
     cv::putText(full_img, "AI DETECTION", {x5, y5}, 
-                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 100, 255), 2, cv::LINE_AA);
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 100, 255), 2, cv::LINE_AA);
     y5 += 23;
 
     cv::Scalar traffic_color;
@@ -262,9 +288,10 @@ public:
           last_lidar_time_(now()),
           serial_ok_(false),
           bypass_state_(BypassState::NORMAL),
-          last_signs_update_(now()),
-          traffic_light_decision_("NONE"),   
-          turn_decision_("NONE")             
+          traffic_light_time_(now()),
+          turn_time_(now()),
+          traffic_light_decision_("NONE"),
+          turn_decision_("NONE")
     {
         cam_ = std::make_unique<CameraLane>(cam_index_, fps_, true);
         if (!cam_->start()) RCLCPP_WARN(get_logger(), "Failed to open camera");
@@ -299,18 +326,9 @@ public:
             std::bind(&FusionVizNode::on_scan, this, _1)
         );
 
-        sub_signs_ = create_subscription<std_msgs::msg::String>(
-            "/autocar/sign_detection",
-            rclcpp::QoS(10),
-            std::bind(&FusionVizNode::on_signs, this, _1)
-        );
-
-        sub_signs_img_ = create_subscription<sensor_msgs::msg::Image>(
-            "/autocar/sign_image",
-            rclcpp::QoS(10),
-            std::bind(&FusionVizNode::on_signs_img, this, _1)
-        );
-
+        // /autocar/sign_detection và /autocar/sign_image không có publisher
+    // nào trong workspace (kiểm tra toàn bộ src/ và firmware/). Giữ lại
+    // sub_ + last_signs_* chỉ là code chết và kéo theo dependency jsoncpp.
         sub_traffic_light_ = create_subscription<std_msgs::msg::String>(
             "/traffic_light/decision",
             rclcpp::QoS(10),
@@ -352,30 +370,13 @@ private:
             if (inst <= 250.0) lidar_fps_ = 0.85 * lidar_fps_ + 0.15 * inst;
         }
         last_lidar_time_ = t;
-        last_lidar_ = lidar_.update(*msg);
+        // Dùng API zero-allocation: giữ buffer của last_lidar_ thay vì tạo
+        // LidarStatus tạm (bản cũ reserve 1024 điểm mỗi vòng scan).
+        lidar_.update(*msg, last_lidar_);
     }
 
-    void on_signs(const std_msgs::msg::String::SharedPtr msg) {
-        try {
-            Json::CharReaderBuilder reader;
-            std::string errors;
-            std::istringstream s(msg->data);
-            Json::parseFromStream(reader, s, &last_signs_json_, &errors);
-            last_signs_update_ = now();
-        } catch (const std::exception& e) {
-            RCLCPP_WARN(get_logger(), "Failed to parse signs JSON");
-        }
-    }
-
-    void on_signs_img(const sensor_msgs::msg::Image::SharedPtr msg) {
-        try {
-            auto cv_ptr = cv_bridge::toCvCopy(msg, "bgr8");
-            last_signs_img_ = cv_ptr->image.clone();
-        } catch (cv_bridge::Exception& e) {
-            RCLCPP_ERROR(get_logger(), "cv_bridge exception: %s", e.what());
-        }
-    }
     void on_traffic_light(const std_msgs::msg::String::SharedPtr msg) {
+        traffic_light_time_ = now();
         traffic_light_decision_ = msg->data;
         
         static std::string last_decision = "NONE";
@@ -386,6 +387,7 @@ private:
     }
     void on_turn_detector(const std_msgs::msg::String::SharedPtr msg) {
         turn_decision_ = msg->data;
+        turn_time_ = now();
         
         static std::string last_turn = "NONE";
         if (msg->data != last_turn && msg->data != "NONE") {
@@ -419,34 +421,85 @@ private:
             for (const auto& p : last_lidar_.points_px)
                 circle(map, p, 2, Scalar(0,180,255), FILLED, LINE_AA);
         }
+        // Check for stale AI decisions (timeout = 2 seconds)
+        const double ai_timeout_s = 2.0;
+        const auto t_now = now();
+        if ((t_now - traffic_light_time_).seconds() > ai_timeout_s) {
+            if (traffic_light_decision_ != "NONE") {
+                RCLCPP_WARN(get_logger(), "Traffic light decision stale >%.1fs, clearing", ai_timeout_s);
+                traffic_light_decision_ = "NONE";
+            }
+        }
+        if ((t_now - turn_time_).seconds() > ai_timeout_s) {
+            if (turn_decision_ != "NONE") {
+                RCLCPP_WARN(get_logger(), "Turn decision stale >%.1fs, clearing", ai_timeout_s);
+                turn_decision_ = "NONE";
+            }
+        }
+
         ESP32Feedback esp_fb = serial_->get_latest_feedback();
+        
+        // Check for stale ESP32 feedback (> 100ms = stale)
+        if (esp_fb.is_stale(100)) {
+            esp_fb.valid = false;
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "ESP32 feedback stale, using 0 km/h");
+        }
+        
         float current_speed = esp_fb.valid ? esp_fb.velocity_kmh : 0.0f;
+        if (!std::isfinite(current_speed)) current_speed = 0.0f;
         LaneOutput lo;
         bool has_cam = (cam_ && cam_->get_latest(lo, current_speed));
+        // FPS camera phải đo bằng frame_id (số frame THỰC SỰ xử lý),
+        // không đo bằng nhịp timer. Nhịp timer luôn khớp viz_hz nên
+        // cách cũ luôn hiện ~120 bất kể camera chạy bao nhiêu.
         if (has_cam) {
-            auto t = now();
-            double dt = (t - last_cam_time_).seconds();
-            if (dt > 0.001) {
-                double inst = 1.0/dt;
-                if (inst <= 250.0) cam_fps_ = 0.9 * cam_fps_ + 0.1 * inst;
+            if (last_frame_id_ >= 0 && lo.frame_id > static_cast<uint64_t>(last_frame_id_)) {
+                auto t = now();
+                double dt = (t - last_cam_time_).seconds();
+                if (dt > 0.001) {
+                    double inst = 1.0 / dt;
+                    if (inst <= 250.0) cam_fps_ = 0.9 * cam_fps_ + 0.1 * inst;
+                }
+                last_cam_time_ = t;
             }
-            last_cam_time_ = t;
+            last_frame_id_ = static_cast<int>(lo.frame_id);
         }
         Mat panel1 = full_img(Rect(map_w, HEADER_H, RIGHT_PANEL_W, 250));
         draw_camera_panel(panel1, has_cam ? lo.vis : cv::Mat());
 
         Mat panel2 = full_img(Rect(map_w, HEADER_H + 250, RIGHT_PANEL_W, 350));
         draw_ai_detection_panel(panel2, traffic_light_decision_, turn_decision_);
-        int16_t deviation = has_cam ? lo.dev_px : 0;
-        bool is_dual_lane = has_cam && (!lo.left.empty() && !lo.right.empty());
-        float dominant_slope = has_cam ? lo.curve_angle_deg / 57.3f : 0.0f;
+        // Camera không nhận diện được làn (valid=false) thì coi như mất trắc,
+        // KHÔNG được dùng làn cũ. dev = 0, is_dual_lane = false.
+        const bool cam_valid = has_cam && lo.valid;
+        int16_t deviation = cam_valid ? lo.dev_final_px : 0;
+        bool is_dual_lane = cam_valid && !lo.left.empty() && !lo.right.empty();
+
+        // curve_angle_deg là ĐỘ (atan của slope). obstacle_avoidance so sánh
+        // với ngưỡng dạng slope, nên phải tan(độ) chứ không chia cho 57.3.
+        float dominant_slope = cam_valid
+            ? std::tan(lo.curve_angle_deg * static_cast<float>(CV_PI) / 180.0f)
+            : 0.0f;
         auto bypass_cmd = obstacle_avoidance_.update(last_lidar_, deviation, dominant_slope, is_dual_lane, traffic_light_decision_, current_speed );
         bypass_state_ = bypass_cmd.state;
         int16_t dev_final = bypass_cmd.dev_final_px;
+
+        // Gộp tốc độ của camera (theo độ cong) và trần của obstacle
+        // avoidance (theo vật cản), rồi mới gửi xuống ESP32.
+        // Trước đây target_speed_x10 của camera bị BỎ QUA hoàn toàn nên xe
+        // chạy đúng 3.5 km/h mọi lúc dù camera đã tính ra 8.5 km/h.
+        uint8_t speed_control = bypass_cmd.speed_control;
+        if (cam_valid && !bypass_cmd.emergency_stop && lo.target_speed_x10 > 0) {
+            speed_control = std::min(lo.target_speed_x10, speed_control);
+        }
+        if (bypass_cmd.emergency_stop) {
+            speed_control = 0;
+        }
+
         if (serial_ok_ && serial_->is_open()) {
             SerialCommand scmd;
             scmd.dev_final_px = dev_final;
-            scmd.speed_control = bypass_cmd.speed_control;
+            scmd.speed_control = speed_control;
             scmd.emergency_stop = bypass_cmd.emergency_stop;
 
             if (!serial_->send_command(scmd)) {
@@ -459,6 +512,7 @@ private:
         }
         draw_header(full_img, has_cam ? &lo : nullptr, last_lidar_,
                 cam_fps_, lidar_fps_, serial_ok_, esp_fb,
+                cam_ ? cam_->buffered_frames() : 0,
                 bypass_state_, dev_final,
                 traffic_light_decision_, turn_decision_);
         auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", full_img).toImageMsg();
@@ -486,17 +540,16 @@ private:
     ObstacleAvoidance obstacle_avoidance_;
     BypassState bypass_state_;
 
-    Json::Value last_signs_json_;
-    cv::Mat last_signs_img_;
-    rclcpp::Time last_signs_update_;
+    std::string traffic_light_decision_;
+    std::string turn_decision_;
 
-    std::string traffic_light_decision_; 
-    std::string turn_decision_;          
+    // Mốc thời gian nhận quyết định AI. Nếu node AI chết, quyết định cũ
+    // sẽ kẹt vĩnh viễn (ví dụ GREEN mặc xe đi thẳng vào chỗ tối).
+    rclcpp::Time traffic_light_time_;
+    rclcpp::Time turn_time_;
 
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr sub_scan_;
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_signs_;
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_signs_img_;
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_traffic_light_;  
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_traffic_light_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_turn_detector_;   
 
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_img_;

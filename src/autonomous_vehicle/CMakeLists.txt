@@ -11,8 +11,6 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
 find_package(Threads REQUIRED)
 
 add_executable(autonomous_vehicle_node
@@ -27,7 +25,6 @@ target_include_directories(autonomous_vehicle_node PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 	$<INSTALL_INTERFACE:include>
 	${OpenCV_INCLUDE_DIRS}
-	${JSONCPP_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(autonomous_vehicle_node
@@ -39,7 +36,6 @@ ament_target_dependencies(autonomous_vehicle_node
 
 target_link_libraries(autonomous_vehicle_node
 	${OpenCV_LIBS}
-	PkgConfig::JSONCPP
 	Threads::Threads
 )
 
@@ -52,7 +48,8 @@ install(DIRECTORY include/
 install(DIRECTORY launch/
 	DESTINATION share/${PROJECT_NAME}/launch
 )
+install(DIRECTORY rviz/
+	DESTINATION share/${PROJECT_NAME}/rviz
+)
 
-ament_export_include_directories(include)
-ament_export_dependencies(rclcpp sensor_msgs std_msgs cv_bridge)
 ament_package()

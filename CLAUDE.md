@@ -29,7 +29,7 @@ Autonomous vehicle graduation project. **Mini PC (x86/ARM64, Linux/ROS2) + ESP32
 /
   README.md                    ← project map and Linux/ROS2 setup
   src/
-    PhamMinhDuc/                ← main C++ ROS 2 package: camera + LiDAR + obstacle avoidance + UART
+    autonomous_vehicle/         ← main C++ ROS 2 package: camera + LiDAR + obstacle avoidance + UART
     traffic_light_detector/    ← NCNN traffic-light detector
     turn_detector/             ← NCNN turn-direction detector
   firmware/

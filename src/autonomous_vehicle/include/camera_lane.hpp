@@ -26,9 +26,6 @@ struct LaneOutput {
     uint8_t target_speed_x10 = 0;
     bool valid = false;
 
-    cv::Scalar lane_color_bgr = {0, 0, 0};
-    std::string lane_color_name = "black";
-
     int pixels_used = 0;
     cv::Mat vis;
     cv::Mat raw;
@@ -59,7 +56,6 @@ public:
     static constexpr size_t FRAME_BUFFER_COUNT = 2;
 
     static constexpr bool ENABLE_VISUALIZATION = true;
-    static constexpr bool ENABLE_DEBUG_LOG = false;
 
     // Ngưỡng Canny tối ưu riêng cho vạch làn màu đen
     static constexpr int CANNY_LOW = 30;
@@ -75,7 +71,12 @@ public:
     static constexpr float SINGLE_ROI_FACTOR = 0.85f;
 
     static constexpr int MIN_PRELIM_POINTS = 15;
-    static constexpr int MIN_FINAL_POINTS = 5;
+    // calculate_slope() cần >= SLOPE_MIN_POINTS mới trả về slope khác 0.
+    // Trước đây MIN_FINAL_POINTS=5 cho phép lane "hợp lệ" với 5 điểm nhưng
+    // slope luôn bằng 0 => coi như đường thẳng và chạy tốc độ tối đa khi
+    // đang vào cua. Hai ngưỡng phải khớp nhau.
+    static constexpr int SLOPE_MIN_POINTS = 10;
+    static constexpr int MIN_FINAL_POINTS = SLOPE_MIN_POINTS;
     static constexpr int MIN_COMMON_POINTS = 10;
 
     static constexpr float MIN_LANE_WIDTH_PX = 200.0f;
@@ -100,8 +101,6 @@ public:
     static constexpr uint8_t SPEED_CURVE_X10 = 60;
     static constexpr uint8_t SPEED_SHARP_X10 = 45;
 
-    static constexpr float SPEED_CURVE_SLOPE = 0.65f;
-    static constexpr float SPEED_SHARP_SLOPE = 0.85f;
     static constexpr float ALPHA_TARGET_SPEED = 0.70f;
 
     // Hysteresis chống chập chờn tốc độ khi qua lại giữa các khúc cua
@@ -137,6 +136,7 @@ public:
         float current_speed_kmh = 0.0f
     );
 
+    // Số frame camera đang chờ xử lý — dùng để chẩn đoán capture thread bị tắc.
     size_t buffered_frames() const;
 
 private:

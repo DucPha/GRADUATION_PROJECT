@@ -1,0 +1,35 @@
+version: 2
+packages:
+  # ROS 2 Core
+  - rclcpp
+  - rclpy
+  - sensor_msgs
+  - std_msgs
+  - cv_bridge
+  - image_transport
+  - launch
+  - launch_ros
+
+  # OpenCV
+  - libopencv-dev
+  - python3-opencv
+
+  # NCNN Vulkan
+  - ncnn-vulkan
+  - python3-ncnn-vulkan
+
+  # Build tools
+  - ament_cmake
+  - ament_python
+  - python3-colcon-common-extensions
+
+  # System
+  - v4l-utils
+  - udev
+  - python3-numpy
+  - python3-pip
+
+pip:
+  - ncnn-vulkan
+  - opencv-python
+  - numpy

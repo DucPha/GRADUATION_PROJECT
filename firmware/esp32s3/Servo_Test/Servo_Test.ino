@@ -1,7 +1,9 @@
 #include <ESP32Servo.h>
 
 Servo servo;
-#define SERVO_PIN 18
+// GPIO 18 là PIN_TURN_R của Autonomous_Vehicle — dùng lại sẽ lái xi-nhan
+// ngẫu nhiên khi chạy test servo. Chọn GPIO 16 (chân tự do, ngoài USB 19/20).
+#define SERVO_PIN 16
 
 int currentAngle = 90;
 

@@ -12,13 +12,13 @@
 // ============================================================================
 // [1] CẤU HÌNH CHÂN PHẦN CỨNG (PINS)
 // ============================================================================
-constexpr uint8_t PIN_STEER = 13;  // Chân PWM xuất ra Servo bẻ lái
+constexpr uint8_t PIN_STEER = 33;  // Chân PWM xuất ra Servo bẻ lái
 constexpr uint8_t PIN_HALL = 23;   // Chân ngắt đọc xung Cảm biến Hall đo tốc độ
 constexpr uint8_t PIN_TURN_L = 21; // Đèn LED xi-nhan trái
 constexpr uint8_t PIN_TURN_R =
     18; // Đèn LED xi-nhan phải (Tránh chân 19 là USB_D- của ESP32-S3)
 constexpr uint8_t PIN_BRAKE = 15; // Đèn LED phanh đít
-constexpr uint8_t PIN_ESC = 14;   // Chân PWM xuất ra Động cơ (ESC)
+constexpr uint8_t PIN_ESC = 32;   // Chân PWM xuất ra Động cơ (ESC)
 
 // ============================================================================
 // [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
@@ -615,20 +615,36 @@ void checkSafety() {
   }
 
   if (!car.emg_stop) {
+    // Lệnh mới đã vô hiệu hoá phanh -> huỷ nốt pha phanh đang dở.
+    // Thiếu khối này, car.braking kẹt true vĩnh viễn => đèn phanh sáng kẹt
+    // VÀ lần khẩn cấp sau điều kiện `!car.braking` không bao giờ đúng nữa
+    // => xe KHÔNG BAO GIỜ phanh được lần nữa.
+    if (car.braking) {
+      car.braking = false;
+      if (last_esc != ESC_NEUTRAL) {
+        motor_esc.write(ESC_NEUTRAL);
+        last_esc = ESC_NEUTRAL;
+      }
+      car.esc_cmd = ESC_NEUTRAL;
+      pid_speed.integral = pid_speed.prev_err = 0;
+    }
     emg_started = false;
     return;
   }
 
-  // 2. Kích hoạt cờ Phanh Khẩn Cấp (Chỉ kick 1 lần duy nhất)
+  // 2. Kích hoạt pha phanh khẩn cấp (chỉ 1 lần cho mỗi lần emg_stop)
+  // processBrake() tự set car.braking = true + phase = 0. Phải gọi ở đây,
+  // nếu không car.braking vẫn false và nhánh "nuôi phanh" ở bước 3 không
+  // bao giờ chạy -> xe KHÔNG phanh được.
   if (!emg_started && !car.braking && car.cur_spd > 0.5f) {
     emg_started = true;
     processBrake();
   }
-
-  // 3. Nuôi máy trạng thái phanh đang chạy
-  if (car.braking)
+  // 3. Nuôi pha phanh đang chạy (nếu bước 2 đã gọi thì bước này bỏ qua,
+  //    đảm bảo processBrake() chạy ĐÚNG 1 lần mỗi vòng loop)
+  else if (car.braking) {
     processBrake();
-  else {
+  } else {
     // Nếu đã phanh xong thì khóa cứng ESC ở số Mo
     if (last_esc != ESC_NEUTRAL) {
       motor_esc.write(ESC_NEUTRAL);
@@ -653,15 +669,19 @@ void updateLights() {
   }
 
   // Đèn xi-nhan đánh theo độ lệch làn đường (Chuyển làn / Ôm cua)
+  // Quy ước (khớp camera_lane.cpp + calcSteerPID):
+  //   smooth_dev < 0 => tâm làn lệch trái => phải lái trái  => xi-nhan TRÁI
+  //   smooth_dev > 0 => tâm làn lệch phải => phải lái phải  => xi-nhan PHẢI
+  // Nhánh dưới đây trước đây bị ĐẢO: smooth_dev > 0 lại bật PIN_TURN_L.
   if (fabsf(car.smooth_dev) < BLINK_THRESH) {
     digitalWrite(PIN_TURN_L, LOW);
     digitalWrite(PIN_TURN_R, LOW);
-  } else if (car.smooth_dev > BLINK_THRESH) {
+  } else if (car.smooth_dev < -BLINK_THRESH) {
     digitalWrite(PIN_TURN_L, led_on);
-    digitalWrite(PIN_TURN_R, LOW); // Lệch trái -> Xi nhan Trái
+    digitalWrite(PIN_TURN_R, LOW);
   } else {
     digitalWrite(PIN_TURN_L, LOW);
-    digitalWrite(PIN_TURN_R, led_on); // Lệch phải -> Xi nhan Phải
+    digitalWrite(PIN_TURN_R, led_on);
   }
 
   // Đèn phanh đít bật đỏ khi đang phanh, dừng, hoặc có cờ báo khẩn cấp
@@ -684,6 +704,24 @@ void sendTelemetry() {
 // ============================================================================
 // [9] HÀM SETUP & MAIN LOOP
 // ============================================================================
+
+// Chẩn đoán 1Hz: in ra để biết ESP32 có THỰC SỰ nhận lệnh từ Mini PC hay không.
+// Không đụng tới gói tin telemetry (giữ nguyên protocol).
+void printDiagnostics() {
+  static uint32_t seen_packet_ms = 0;
+  static uint32_t rx_packets = 0;
+
+  if (last_packet_ms != seen_packet_ms) {
+    seen_packet_ms = last_packet_ms;
+    rx_packets++;
+  }
+
+  Serial.printf(
+      "[DIAG] spd=%.2f/%.2fkm/h dev=%d esc=%d steer=%d rx=%lu emg=%d brk=%d\n",
+      car.cur_spd, car.target_spd, car.raw_dev, car.esc_cmd, car.steer_cmd,
+      (unsigned long)rx_packets, car.emg_stop ? 1 : 0, car.braking ? 1 : 0);
+}
+
 void setup() {
   // Mở rộng bộ đệm UART ngay từ đầu để hấp thụ dồn ứ dữ liệu (burst) từ MiniPC
   Serial.setRxBufferSize(RX_BUF_SIZE);
@@ -743,5 +781,12 @@ void loop() {
   if (millis() - last_tx >= TELEM_DT_MS) {
     sendTelemetry();
     last_tx = millis();
+  }
+
+  // Bước 7: Log chẩn đoán 1 Hz
+  static uint32_t last_diag = millis();
+  if (millis() - last_diag >= 1000) {
+    printDiagnostics();
+    last_diag = millis();
   }
 }

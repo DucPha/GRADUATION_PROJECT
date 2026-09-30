@@ -2,9 +2,11 @@
 #ifndef OBSTACLE_AVOIDANCE_HPP
 #define OBSTACLE_AVOIDANCE_HPP
 
+#include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <optional>
-#include <chrono>
+#include <string>
 
 // Forward declaration
 struct LidarStatus;
@@ -34,7 +36,7 @@ struct BypassCommand {
     BypassCommand()
         : state(BypassState::NORMAL),
           state_name("NORMAL"),
-          speed_control(115),
+          speed_control(35),
           dev_final_px(0),
           emergency_stop(false) {}
 };
@@ -53,17 +55,26 @@ public:
                          float current_speed_kmh);
 
     BypassState get_current_state() const { return current_state_; }
-    
-    // ✅ THÊM: Lấy speed margin để truyền sang camera
-    float get_speed_margin_cm() const { return speed_margin_cm_; }
 
 private:
+    // Mốc thời gian an toàn cho các trạng thái trung gian (ms).
+    // Không có mốc này, SWERVE có thể giữ góc lái cứng vô hạn.
+    static constexpr unsigned long SWERVE_TIMEOUT_MS = 3000;
+    static constexpr unsigned long BYPASS_TIMEOUT_MS = 8000;
+    static constexpr unsigned long RETURN_TIMEOUT_MS = 5000;
+
     BypassState current_state_;
     unsigned long state_start_time_;
     
     std::optional<float> prev_bypass_left_dist_;
     std::optional<float> prev_bypass_right_dist_;
     std::optional<float> swerve_start_front_dist_;
+
+    // Khoảng cách vật cản bên (đã né) chụp lại lúc bắt đầu SWERVE.
+    // Dùng để biết đã "đi qua xong" chưa. Trước đây code so sánh khoảng
+    // cách BÊN với khoảng cách PHÍA TRƯỚC -> điều kiện hoàn tất vô nghĩa.
+    std::optional<float> swerve_start_left_dist_;
+    std::optional<float> swerve_start_right_dist_;
     
     std::string prev_traffic_light_;
     
@@ -72,7 +83,10 @@ private:
     float speed_margin_cm_;
     
     // State handlers
-    BypassCommand handle_normal(const LidarStatus& lidar, int16_t dev_px);
+    // dominant_slope: bắt buộc truyền xuống, nếu không speed planner sẽ mất
+    // thông tin độ cong mỗi khi rời trạng thái tránh né.
+    BypassCommand handle_normal(const LidarStatus& lidar, int16_t dev_px,
+                                float dominant_slope);
     BypassCommand handle_slow_down(const LidarStatus& lidar, float dominant_slope, int16_t dev_px);
     BypassCommand handle_detect_bypass_side(const LidarStatus& lidar);
     BypassCommand handle_swerve_left(const LidarStatus& lidar);

@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <sys/ioctl.h>
 #include <fcntl.h>
@@ -155,7 +156,7 @@ ESP32Feedback SerialESP32::get_latest_feedback() const {
 }
 
 // ============================================================================
-// LUỒNG NGẦM ĐỌC DATA (RX THREAD)
+// LUỒNG NGẦM ĐỌC DATA (RX THREAD) - OPTIMIZED FOR LOW LATENCY
 // ============================================================================
 void SerialESP32::feedback_loop() {
     fd_set read_fds;
@@ -170,16 +171,16 @@ void SerialESP32::feedback_loop() {
         }
 
         if (current_fd < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));  // Reduced from 50ms
             continue;
         }
 
         FD_ZERO(&read_fds);
         FD_SET(current_fd, &read_fds);
 
-        // Chờ 10ms (Không ăn CPU)
+        // CHỜ 5ms (Giảm từ 10ms để giảm độ trễ - Patch 3 từ LATENCY_OPTIMIZATION_PATCHES.txt)
         timeout.tv_sec = 0;
-        timeout.tv_usec = 10000; 
+        timeout.tv_usec = 5000;  // 5ms instead of 10ms
 
         int ret = select(current_fd + 1, &read_fds, nullptr, nullptr, &timeout);
         
@@ -194,6 +195,8 @@ void SerialESP32::feedback_loop() {
                 }
             }
         }
+        // Patch 4: Reduced sleep from 10ms to 5ms for faster polling
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
 
@@ -236,12 +239,23 @@ void SerialESP32::process_rx_byte(uint8_t b) {
                     ESP32Feedback fb;
                     // Ép 4 bytes vào kiểu Float
                     std::memcpy(&fb.velocity_kmh, &rx_packet_[2], sizeof(float));
-                    fb.valid = true;
+                    
+                    // Timestamp when received
+                    fb.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
 
-                    // Ghi đè biến an toàn
-                    {
+                    // NaN/Inf/âm đều là dữ liệu hỏng.
+                    if (std::isfinite(fb.velocity_kmh) &&
+                        fb.velocity_kmh >= 0.0f &&
+                        fb.velocity_kmh <= 100.0f) {
+                        fb.valid = true;
+
+                        // Ghi đè biến an toàn
                         std::lock_guard<std::mutex> lock(feedback_mtx_);
                         latest_feedback_ = fb;
+                    } else {
+                        std::lock_guard<std::mutex> lock(feedback_mtx_);
+                        latest_feedback_.valid = false;
                     }
                 }
                 

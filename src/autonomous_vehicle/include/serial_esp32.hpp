@@ -35,8 +35,18 @@ struct SerialCommand {
 
 struct ESP32Feedback {
     float velocity_kmh = 0.0f;
+    uint64_t timestamp_us = 0;  // Microseconds since epoch when received
 
     bool valid = false;
+    
+    // Check if feedback is stale (older than max_age_ms)
+    bool is_stale(uint32_t max_age_ms = 100) const {
+        if (!valid) return true;
+        auto now = std::chrono::steady_clock::now();
+        auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()).count() - timestamp_us;
+        return age_us > static_cast<int64_t>(max_age_ms * 1000);
+    }
 };
 
 // ============================================================================

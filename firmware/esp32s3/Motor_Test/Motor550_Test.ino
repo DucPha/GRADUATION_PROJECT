@@ -1,33 +1,37 @@
 #include <ESP32Servo.h>
 
-#define ESC_PIN 18
+// GPIO 18 là PIN_TURN_R của Autonomous_Vehicle — chấn cùng đó sẽ quay xi-nhan
+// mỗi lần đổi hướng. Xe chính dùng PIN_ESC = 14, dùng lại 14 cho test.
+#define ESC_PIN 14
 
 Servo esc;
 
-// Các ngưỡng xung thực tế đã đo đạc
-const int FWD_MIN = 1600; // Ngưỡng bắt đầu quay tiến
-const int FWD_MAX = 2000; // Max công suất tiến
-const int REV_MIN = 1400; // Ngưỡng bắt đầu quay lùi
-const int REV_MAX = 1000; // Max công suất lùi
-const int STOP_US = 1500; // Dừng hoàn toàn
+// Xe chính điều khiển ESC bằng góc SERVO (attach(pin, 1000, 2000)) chứ không
+// phải micro-giây. Giữ đúng cùng dải góc với Autonomous_Vehicle.ino
+// (motor_esc.attach(PIN_ESC, 1000, 2000), ESC_NEUTRAL=90, MIN_FWD=95,
+// MAX_FWD=180) để kết quả test khớp xe thật.
+const int FWD_MIN = 95;  // = ESC_MIN_FWD
+const int FWD_MAX = 180; // = ESC_MAX_FWD
+const int STOP_DEG = 90; // = ESC_NEUTRAL
+
+// Ngưỡng lùi/phanh (ESC_BRAKE = 20 độ trong sketch chính)
+const int REV_MIN = 40;
+const int REV_MAX = 0;
 
 void setMotorSpeed(int percent) {
   percent = constrain(percent, -100, 100);
 
-  int pulseUs = STOP_US;
+  int dutyDeg = STOP_DEG;
 
   if (percent > 0) {
-    // Ánh xạ dải 1% -> 100% thẳng vào 1600us -> 2000us
-    pulseUs = map(percent, 1, 100, FWD_MIN, FWD_MAX);
+    // 1% -> ESC_MIN_FWD, 100% -> ESC_MAX_FWD (độ, khớp sketch chính)
+    dutyDeg = map(percent, 1, 100, FWD_MIN, FWD_MAX);
   } else if (percent < 0) {
-    // Ánh xạ dải -1% -> -100% thẳng vào 1400us -> 1000us
-    pulseUs = map(percent, -1, -100, REV_MIN, REV_MAX);
-  } else {
-    pulseUs = STOP_US;
+    dutyDeg = map(percent, -1, -100, REV_MIN, REV_MAX);
   }
 
-  esc.writeMicroseconds(pulseUs);
-  Serial.printf("Toc do: %3d%% -> Xung: %d us\n", percent, pulseUs);
+  esc.write(dutyDeg);
+  Serial.printf("Toc do: %3d%% -> ESC goc: %d do\n", percent, dutyDeg);
 }
 
 void setup() {
@@ -41,8 +45,9 @@ void setup() {
   esc.setPeriodHertz(50);
   esc.attach(ESC_PIN, 1000, 2000);
 
-  // Arming
-  esc.writeMicroseconds(STOP_US);
+  // Arming — phải đặt NEUTRAL (90 độ), KHÔNG dùng writeMicroseconds(1500)
+  // vì ESC ở đây điều khiển bằng góc, 1500us ≈ 150 độ = chạy hết tốc tiến.
+  esc.write(STOP_DEG);
   delay(3000);
   Serial.println("ESC da san sang. Nhap toc do tu -100 den 100:");
 }

@@ -346,7 +346,9 @@ int CameraLane::median_value(std::vector<int>& values) {
 }
 
 float CameraLane::calculate_slope(const std::vector<cv::Point>& lane) {
-    if (lane.size() < 10) return 0.0f;
+    // Ngưỡng này PHẢI bằng SLOPE_MIN_POINTS trong header, nếu không sẽ
+    // lệch với điều kiện has_left/has_right và slope luôn về 0.
+    if (lane.size() < static_cast<size_t>(SLOPE_MIN_POINTS)) return 0.0f;
     double sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_yy = 0.0;
     const double n = static_cast<double>(lane.size());
 
@@ -645,7 +647,8 @@ void CameraLane::detect_lanes(const cv::Mat& bgr, float current_speed_kmh, LaneO
         out.target_speed_x10 = static_cast<uint8_t>(std::round(target_speed_x10_filtered_));
 
         out.speed_factor = static_cast<uint8_t>(std::round(100.0f * static_cast<float>(out.target_speed_x10) / static_cast<float>(SPEED_STRAIGHT_X10)));
-        out.speed_factor = static_cast<uint8_t>(std::min(100, static_cast<int>(out.speed_factor)));
+        // Nhánh min(100, ...) cũ là vô nghĩa vì tỉ số đã <= 100 sẵn.
+        out.speed_factor = static_cast<uint8_t>(std::clamp(static_cast<int>(out.speed_factor), 0, 100));
     } else {
         out.camera_cmd = "STOP";
         out.dev_final_px = 0;
