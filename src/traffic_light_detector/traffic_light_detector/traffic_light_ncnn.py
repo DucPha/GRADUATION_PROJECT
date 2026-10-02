@@ -21,12 +21,13 @@ except Exception:
     from ncnn_vulkan import ncnn
 
 # Default model paths (can be overridden by ROS parameters)
-DEFAULT_MODEL_PARAM = os.path.expanduser(
-    "~/yolo_ws/runs/detect/traffic_all_red_turn_e10/weights/best_ncnn_model/model.ncnn.param"
+# Ưu tiên: biến môi trường TRAFFIC_MODEL_DIR -> package share -> fallback cũ
+DEFAULT_TRAFFIC_MODEL_DIR = os.environ.get(
+    "TRAFFIC_MODEL_DIR",
+    os.path.expanduser("~/yolo_ws/runs/detect/traffic_all_red_turn_e10/weights/best_ncnn_model")
 )
-DEFAULT_MODEL_BIN = os.path.expanduser(
-    "~/yolo_ws/runs/detect/traffic_all_red_turn_e10/weights/best_ncnn_model/model.ncnn.bin"
-)
+DEFAULT_MODEL_PARAM = os.path.join(DEFAULT_TRAFFIC_MODEL_DIR, "model.ncnn.param")
+DEFAULT_MODEL_BIN = os.path.join(DEFAULT_TRAFFIC_MODEL_DIR, "model.ncnn.bin")
 
 INPUT_BLOB = "in0"
 OUTPUT_BLOB = "out0"
@@ -82,22 +83,36 @@ def iou_xyxy(a, b):
     return inter / union
 
 
-def nms_xyxy(boxes, scores, iou_thres=0.45, max_det=30):
+def nms_xyxy(boxes, scores, iou_thres=0.45, max_det=30, classes=None):
+    """Greedy NMS.
+
+    `classes` bắt buộc nếu muốn giữ nhiều lớp: NMS toàn cục sẽ lo mất hẳn
+    một biển nằm trùng vùng với một đèn (ví dụ cổng 20 nằm ngay cạnh đèn đỏ),
+    vì chỉ còn một hộp có score cao nhất được giữ lại.
+    """
     if len(boxes) == 0:
         return []
-    idxs = np.argsort(scores)[::-1]
+
     keep = []
-    while idxs.size > 0 and len(keep) < max_det:
-        i = int(idxs[0])
-        keep.append(i)
-        if idxs.size == 1:
-            break
-        rest = idxs[1:]
-        new_rest = []
-        for j in rest:
-            if iou_xyxy(boxes[i], boxes[int(j)]) <= iou_thres:
-                new_rest.append(int(j))
-        idxs = np.array(new_rest, dtype=np.int64)
+    # Nhóm chỉ số theo lớp rồi NMS riêng từng lớp => đèn và biển cùng vùng
+    # vẫn cùng tồn tại.
+    if classes is None:
+        groups = [np.arange(len(boxes), dtype=np.int64)]
+    else:
+        groups = [np.where(classes == c)[0].astype(np.int64) for c in np.unique(classes)]
+
+    for group in groups:
+        if group.size == 0:
+            continue
+        idxs = group[np.argsort(scores[group])[::-1]]
+        while idxs.size > 0 and len(keep) < max_det:
+            i = int(idxs[0])
+            keep.append(i)
+            if idxs.size == 1:
+                break
+            rest = idxs[1:]
+            ious = [iou_xyxy(boxes[i], boxes[int(j)]) for j in rest]
+            idxs = rest[np.array(ious, dtype=np.float32) <= iou_thres]
     return keep
 
 
@@ -107,9 +122,20 @@ class TrafficLightDetectorNCNNVulkan(Node):
         self.model_ready = False
 
         self.bridge = CvBridge()
-        self.sub = self.create_subscription(Image, "/image_raw", self.image_callback, 10)
-        self.pub_img = self.create_publisher(Image, "/traffic_light/image_debug", 10)
-        self.pub_state = self.create_publisher(String, "/traffic_light/decision", 10)
+
+        # Topic là tham số: trước đây viết cứng trong code nên không override
+        # được từ launch, và node C++ chỉ subscribe đúng tên mặc định.
+        self.declare_parameter("image_topic", "/image_raw")
+        self.declare_parameter("debug_image_topic", "/traffic_light/image_debug")
+        self.declare_parameter("decision_topic", "/traffic_light/decision")
+
+        topic_input = self.get_parameter("image_topic").value
+        topic_debug = self.get_parameter("debug_image_topic").value
+        topic_decision = self.get_parameter("decision_topic").value
+
+        self.sub = self.create_subscription(Image, topic_input, self.image_callback, 10)
+        self.pub_img = self.create_publisher(Image, topic_debug, 10)
+        self.pub_state = self.create_publisher(String, topic_decision, 10)
 
         # Parameters
         self.declare_parameter("model_param", DEFAULT_MODEL_PARAM)
@@ -162,8 +188,19 @@ class TrafficLightDetectorNCNNVulkan(Node):
         self.red_frame_count = 0
         self.last_decision = "NONE"
 
+        # Chỉ phát String khi quyết định đổi, nhưng vẫn phát lại định kỳ để
+        # watchdog `ai_timeout_s` của fusion_viz_node không xoá nhầm.
+        self._last_published_decision = None
+        self._last_decision_pub_ns = 0
+        self.DECISION_HEARTBEAT_NS = 500_000_000   # 0.5s, nhỏ hơn ai_timeout_s (2s)
+
         self.last_frame = None
+        # Định danh frame: tăng mỗi khi có ảnh mới, dùng để bỏ qua việc infer
+        # lại cùng một frame.
+        self.frame_seq = 0
+        self.last_inferred_seq = -1
         self.logged_once = False
+        self._warned = set()
 
         # Initialize NCNN
         self._init_ncnn()
@@ -202,9 +239,15 @@ class TrafficLightDetectorNCNNVulkan(Node):
 
     def image_callback(self, msg: Image):
         try:
-            self.last_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
+            return
+        # Đánh dấu định danh frame: process_latest chỉ chạy trên frame MỚI.
+        # Nếu không, timer 30 Hz sẽ infer lại cùng một frame nhiều lần và
+        # đẩy red_frame_count lên ngưỡng chỉ vì một lần nhìn thấy đèn đỏ.
+        self.frame_seq += 1
+        self.last_frame = frame
 
     def decode_box_auto(self, b4):
         b4 = b4.astype(np.float32).copy()
@@ -220,6 +263,12 @@ class TrafficLightDetectorNCNNVulkan(Node):
 
     def cls_name(self, idx: int) -> str:
         return CLASS_NAMES_MAP.get(idx, f"cls{idx}")
+
+    def _warn_once(self, key: str, msg: str):
+        """Log một lần cho mỗi loại chuyển nhãn để không spam mỗi frame."""
+        if key not in self._warned:
+            self._warned.add(key)
+            self.get_logger().warning(msg)
 
     def verify_red_color(self, crop):
         """Check if bbox contains red color (traffic light)."""
@@ -293,6 +342,13 @@ class TrafficLightDetectorNCNNVulkan(Node):
 
         if self.last_frame is None:
             return
+
+        # Chỉ infer frame mới. Nếu không, timer 30 Hz sẽ xử lý lại cùng một
+        # frame nhiều lần: red_frame_count tăng theo số lần timer chạy chứ
+        # không theo số lần thực sự nhìn thấy đèn đỏ.
+        if self.frame_seq == self.last_inferred_seq:
+            return
+        self.last_inferred_seq = self.frame_seq
 
         frame = self.last_frame
         h, w, _ = frame.shape
@@ -397,7 +453,9 @@ class TrafficLightDetectorNCNNVulkan(Node):
         scores = np.array(scores, dtype=np.float32)
         clses = np.array(clses, dtype=np.int32)
 
-        keep_ids = nms_xyxy(boxes, scores, iou_thres=self.iou_thres, max_det=self.max_det)
+        # NMS theo từng lớp: đèn và biển 20 có thể cùng nằm trong một vùng.
+        keep_ids = nms_xyxy(boxes, scores, iou_thres=self.iou_thres,
+    max_det=self.max_det, classes=clses)
 
         now = time.time()
         detected_red = detected_yellow = detected_green = detected_stop = detected_speed = False
@@ -410,23 +468,23 @@ class TrafficLightDetectorNCNNVulkan(Node):
 
             crop = roi[int(y1):int(y2), int(x1):int(x2)]
 
+            # Kiểm tra HSV chỉ dùng để NÂNG mức an toàn (nhẹ -> nặng), không dùng để hạ.
+            # Hạ "red" thành "yellow" là lỗi nguy hiểm: bản cũ làm vậy, và chỉ
+            # cần một frame sương mù/vàng chói là xe chạy thẳng qua đèn đỏ.
             if label == "green":
                 if self.verify_red_color(crop):
-                    self.get_logger().warning(" Model: green -> HSV: RED")
+                    self._warn_once("green->red", "HSV check: green -> RED")
                     label = "red"
                 elif self.verify_yellow_color(crop):
-                    self.get_logger().warning("Model: green -> HSV: YELLOW")
-                    label = "yellow"
-
-            elif label == "red":
-                if self.verify_yellow_color(crop):
-                    self.get_logger().warning(" Model: red -> HSV: YELLOW")
+                    self._warn_once("green->yellow", "HSV check: green -> YELLOW")
                     label = "yellow"
 
             elif label == "yellow":
                 if self.verify_red_color(crop):
-                    self.get_logger().warning(" Model: yellow -> HSV: RED")
+                    self._warn_once("yellow->red", "HSV check: yellow -> RED")
                     label = "red"
+
+            # red giữ nguyên: không có bước xác nhận nào có thể hạ đèn đỏ.
 
             if label == "red" and conf >= self.CONF_RED:
                 detected_red = True
@@ -476,9 +534,25 @@ class TrafficLightDetectorNCNNVulkan(Node):
         self.publish(frame, decision)
 
     def publish(self, frame, decision):
+        """Publish debug image always; publish decision String only on change.
+
+        Gửi String mỗi vòng infer (30 Hz) là 30 topic message/s cho một giá trị
+        vốn đổi vài lần mỗi phút. Nhưng KHÔNG được im luôn: fusion_viz_node có
+        watchdog `ai_timeout_s`, tức quyết định cũ sẽ bị xoá về "NONE" sau
+        vài giây im lặng. Vì vậy luôn phát lại theo nhịp heartbeat, chỉ bỏ qua
+        ở nhịp timer khi không có thay đổi.
+        """
         try:
             self.pub_img.publish(self.bridge.cv2_to_imgmsg(frame, "bgr8"))
-            self.pub_state.publish(String(data=decision))
+
+            now_ns = self.get_clock().now().nanoseconds
+            changed = decision != self._last_published_decision
+            heartbeat_due = (now_ns - self._last_decision_pub_ns) >= self.DECISION_HEARTBEAT_NS
+
+            if changed or heartbeat_due:
+                self.pub_state.publish(String(data=decision))
+                self._last_published_decision = decision
+                self._last_decision_pub_ns = now_ns
         except Exception as e:
             self.get_logger().error(f"Failed to publish: {e}")
 

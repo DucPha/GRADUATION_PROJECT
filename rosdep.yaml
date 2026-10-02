@@ -1,35 +1,41 @@
 version: 2
+
+# rosdep source dùng khi chạy `rosdep install --from-paths src`.
+#
+# Lưu ý: file này CHỈ liệt kê gói hệ thống/ROS. Thư viện Python cài bằng
+# pip không thuộc rosdep (bản cũ liệt kê chúng trong khoá `packages`, rosdep
+# sẽ báo "Cannot locate rosdep definition"). Xem Dockerfile cho phần pip.
+#
+# ncnn: không có gói rosdep chuẩn cho Python binding. Cài bằng pip
+# (xem Dockerfile: `pip install ncnn`), hoặc tự đặt tên ở đây nếu đã tạo
+# key riêng (không khuyến khích vì không portable).
+
 packages:
-  # ROS 2 Core
-  - rclcpp
-  - rclpy
-  - sensor_msgs
-  - std_msgs
-  - cv_bridge
-  - image_transport
-  - launch
-  - launch_ros
+  ros:
+    # Core
+    - rclcpp
+    - rclpy
+    - sensor_msgs
+    - std_msgs
+    - cv-bridge
+    - launch
+    - launch-ros
+    - ament-index-python
 
-  # OpenCV
-  - libopencv-dev
-  - python3-opencv
+    # Build tools
+    - ament-cmake
+    - ament-cmake-gtest
+    - ament-lint-auto
+    - ament-lint-common
+    - python3-colcon-common-extensions
 
-  # NCNN Vulkan
-  - ncnn-vulkan
-  - python3-ncnn-vulkan
-
-  # Build tools
-  - ament_cmake
-  - ament_python
-  - python3-colcon-common-extensions
-
-  # System
-  - v4l-utils
-  - udev
-  - python3-numpy
-  - python3-pip
-
-pip:
-  - ncnn-vulkan
-  - opencv-python
-  - numpy
+  apt:
+    # OpenCV cho C++ (node fusion dùng cv::Mat)
+    - libopencv-dev
+    - python3-opencv
+    - python3-numpy
+    - v4l-utils
+    - udev
+    - usbutils
+    # Cho serial port access
+    - modemmanager

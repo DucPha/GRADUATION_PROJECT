@@ -11,19 +11,21 @@
   <url type="bugtracker">https://github.com/your-repo/graduation_project/issues</url>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_auto</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>cv_bridge</depend>
-  <depend>opencv4</depend>
+  <!-- OpenCV: tìm bằng find_package(OpenCV) trong CMakeLists.txt, không phải rosdep key -->
   <depend>builtin_interfaces</depend>
 
+  <!-- bringup.launch.py gọi get_package_share_directory() để tìm file rviz -->
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>rviz2</exec_depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

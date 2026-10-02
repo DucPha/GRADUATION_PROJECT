@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -57,6 +58,8 @@ class SerialESP32 {
 
 public:
 
+    // Firmware ESP32 khóa cứng 230400 (xem Autonomous_Vehicle.ino). Giá trị
+    // này chỉ để tương thích: đổi ở PC mà không đổi firmware sẽ mất liên lạc.
     static constexpr int BAUDRATE = 230400;
 
     // MiniPC -> ESP32
@@ -71,8 +74,7 @@ public:
     static constexpr size_t RX_PACKET_LEN = 7;
 
     explicit SerialESP32(
-        const std::string& port =
-            "/dev/ttyESP32"
+        const std::string& port = "/dev/ttyESP32"
     );
 
     ~SerialESP32();
@@ -82,6 +84,12 @@ public:
     void close();
 
     bool is_open() const;
+
+    // Baudrate gửi xuống ESP32 (thông số ROS `baudrate`). Firmware đang khóa
+    // cứng Serial.begin(230400); tham số này chỉ hữu ích khi firmware cũng
+    // đổi theo.
+    void set_baudrate(int baudrate) { baudrate_ = baudrate; }
+    int baudrate() const { return baudrate_; }
 
     // ------------------------------------------------------------------------
     // MiniPC -> ESP32
@@ -98,6 +106,17 @@ public:
     ESP32Feedback
     get_latest_feedback() const;
 
+    // true nếu luồng đọc gặp lỗi (EIO/EPIPE) => nhiều khả năng ESP32 đã bị
+    // rút hoặc driver USB serial reset. Node điều khiển dùng cờ này để phanh
+    // và thử mở lại cổng.
+    bool link_down() const { return link_down_.load(); }
+
+    // Xoá cờ lỗi sau khi mở lại cổng thành công.
+    void clear_link_down() {
+        link_down_.store(false);
+        read_error_count_.store(0);
+    }
+
 private:
 
     // ------------------------------------------------------------------------
@@ -106,7 +125,15 @@ private:
 
     std::string port_;
 
+    int baudrate_ = BAUDRATE;
+
     int fd_ = -1;
+
+    // Số lần liên tiếp không đọc được byte nào trên UART. ESP32 bị rút, hoặc
+    // driver reset, sẽ làm read() trả lỗi EIO; nếu chỉ im lặng thì xe vẫn
+    // nhận lệnh (không ai nhận phản hồi) mà HUD vẫn báo "OK".
+    std::atomic<int> read_error_count_{0};
+    std::atomic<bool> link_down_{false};
 
     // Protect:
     // - fd_

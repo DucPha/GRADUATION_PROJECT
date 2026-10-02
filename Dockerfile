@@ -1,53 +1,70 @@
-# Multi-stage build for Autonomous Vehicle ROS 2 workspace
-# Stage 1: Base with ROS 2 and dependencies
-FROM ros:humble-ros-base-jammy AS base
+# Multi-stage build cho Autonomous Vehicle (ROS 2 workspace)
+#
+# ROS_DISTRO mặc định theo máy host: Jazzy trên Ubuntu 24.04. Đổi qua
+# --build-arg ROS_DISTRO=humble nếu dựng trên Ubuntu 22.04.
+ARG ROS_DISTRO=jazzy
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV ROS_DISTRO=humble
+# ============================================================================
+# Stage 1: base - ROS 2 + phụ thuộc hệ thống
+# ============================================================================
+FROM ros:${ROS_DISTRO}-ros-base AS base
 
-# Install system dependencies
+ARG ROS_DISTRO
+ENV DEBIAN_FRONTEND=noninteractive \
+    ROS_DISTRO=${ROS_DISTRO}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-pip python3-venv python3-dev \
+    python3-pip \
     libopencv-dev python3-opencv \
     v4l-utils udev usbutils \
-    libncnn-dev ncnn-vulkan-tools \
     build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-RUN pip3 install --no-cache-dir \
-    ncnn-vulkan opencv-python numpy
+# ncnn cho Python binding: KHÔNG cài `opencv-python` bằng pip.
+#
+# opencv-python cài vào site-packages sẽ đè lên `cv2` do gói `python3-opencv`
+# của hệ thống cung cấp. Module cv2 của ROS (opencv4 cho Ament) được build
+# theo đúng ABI mà python3-opencv mang; bản pip mang ABI riêng, nên `import
+# cv2` trong container sẽ trỏ nhầm sang bản pip và node nhận diện AI chết
+# với lỗi kiểu dữ liệu numpy. python3-opencv đã cài ở trên là đủ.
+#
+# Lưu ý: gói pip tên là 'ncnn' (không phải 'ncnn-vulkan') - bản vulkan được
+# build sẵn trong wheel. Xem https://pypi.org/project/ncnn/
+RUN pip3 install --no-cache-dir --break-system-packages \
+    ncnn numpy
 
-# Stage 2: Build workspace
+# ============================================================================
+# Stage 2: builder - cài dependency + colcon build
+# ============================================================================
 FROM base AS builder
 
 WORKDIR /workspace
-
-# Copy source
 COPY src/ ./src/
+COPY rosdep.yaml /workspace/rosdep.yaml
 
-# Install rosdep dependencies
-RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
-    rosdep update && \
+# rosdep install chạy với --from-paths src nên rosdep.yaml phải nằm trong
+# src/, không phải ở gốc workspace.
+# rosdep.yaml đã được copy vào /workspace/rosdep.yaml, copy vào src/
+RUN cp /workspace/rosdep.yaml ./src/rosdep.yaml && \
+    . /opt/ros/${ROS_DISTRO}/setup.sh && \
+    rosdep update --rosdistro ${ROS_DISTRO} && \
     rosdep install --from-paths src --ignore-src -r -y
 
-# Build
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
     colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# Stage 3: Runtime
+# ============================================================================
+# Stage 3: runtime
+# ============================================================================
 FROM base AS runtime
 
-ENV ROS_DISTRO=humble
-
 COPY --from=builder /workspace/install /opt/ros/${ROS_DISTRO}/install
-COPY --from=builder /workspace/src /opt/ros/${ROS_DISTRO}/src
 
-# Setup entrypoint
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-# Create non-root user
+# User không phải root, thuộc group video (camera) và dialout (serial).
+# Quyền truy cập thiết bị đến từ group này, không phải từ chmod/sudo lúc chạy.
 ARG UID=1000
 ARG GID=1000
 RUN groupadd -g ${GID} autocar && \
@@ -57,5 +74,8 @@ RUN groupadd -g ${GID} autocar && \
 USER autocar
 WORKDIR /home/autocar
 
+# Không thể cấp quyền định kỳ cho /dev/* khi build: thiết bị chỉ xuất hiện
+# lúc container chạy (--device=...). Khi chạy cần:
+#   docker run --device=/dev/video0 --device=/dev/ttyUSB0 ...
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["ros2", "launch", "autonomous_vehicle", "bringup.launch.py"]

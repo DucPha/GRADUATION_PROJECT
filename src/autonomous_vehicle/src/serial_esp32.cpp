@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 #include <sys/ioctl.h>
+#include <poll.h>
+#include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -30,8 +32,8 @@ bool SerialESP32::open() {
     std::lock_guard<std::mutex> lock(mtx_);
     if (fd_ >= 0) return true;
 
-    // Mở cổng Serial: Đọc/Ghi, Không chiếm quyền Terminal, Đồng bộ
-    fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+    // O_NONBLOCK: Không chặn luồng I/O
+    fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
         std::cerr << "[SerialESP32] Error opening " << port_ << ": " << strerror(errno) << "\n";
         return false;
@@ -43,7 +45,6 @@ bool SerialESP32::open() {
         return false;
     }
 
-    // Bật cờ chạy và khởi tạo luồng đọc ngầm
     running_ = true;
     feedback_thread_ = std::thread(&SerialESP32::feedback_loop, this);
 
@@ -52,14 +53,12 @@ bool SerialESP32::open() {
 }
 
 void SerialESP32::close() {
-    // Tắt cờ trước để luồng ngầm tự thoát
     running_ = false;
-    
+
     if (feedback_thread_.joinable()) {
         feedback_thread_.join();
     }
 
-    // Sau khi luồng ngầm dừng hẳn mới đóng File Descriptor
     std::lock_guard<std::mutex> lock(mtx_);
     if (fd_ >= 0) {
         ::close(fd_);
@@ -69,7 +68,7 @@ void SerialESP32::close() {
 }
 
 // ============================================================================
-// HÀM CẤU HÌNH CỔNG (OS LEVEL)
+// CẤU HÌNH CỔNG SERIAL (OS LEVEL - TỐI ƯU REAL-TIME)
 // ============================================================================
 bool SerialESP32::configure_port() {
     struct termios tty;
@@ -78,24 +77,25 @@ bool SerialESP32::configure_port() {
         return false;
     }
 
-    cfsetospeed(&tty, BAUDRATE);
-    cfsetispeed(&tty, BAUDRATE);
+    // Set Baudrate chuẩn 230400 (khớp với firmware ESP32)
+    cfsetospeed(&tty, B230400);
+    cfsetispeed(&tty, B230400);
 
-    // 8N1
+    // 8N1 - 8 data bits, no parity, 1 stop bit
     tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
     tty.c_cflag &= ~(PARENB | PARODD);
     tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CRTSCTS; // No hardware flow control
+    tty.c_cflag &= ~CRTSCTS; // Không dùng flow control phần cứng
     tty.c_cflag |= CREAD | CLOCAL;
 
-    // Tắt các tính năng can thiệp ký tự của Linux
+    // Chuyển sang chế độ RAW THUẦN TÚY (Tắt toàn bộ xử lý ký tự của Linux kernel)
     tty.c_lflag = 0;
     tty.c_oflag = 0;
     tty.c_iflag &= ~(IXON | IXOFF | IXANY);
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
 
-    // Dùng Non-blocking mode cho read (select sẽ lo việc block an toàn)
-    tty.c_cc[VMIN] = 0;
+    // Non-blocking thuần: read() trả về ngay lập tức nếu không có dữ liệu
+    tty.c_cc[VMIN]  = 0;
     tty.c_cc[VTIME] = 0;
 
     if (tcsetattr(fd_, TCSANOW, &tty) != 0) {
@@ -103,7 +103,7 @@ bool SerialESP32::configure_port() {
         return false;
     }
 
-    // Tắt DTR / RTS để tránh mạch ESP32 bị Auto-Reset khi mở cổng
+    // Tắt DTR và RTS để chống kích hoạt mạch Auto-Reset (DTR/RTS dập chân EN/RST của ESP32)
     int status;
     if (ioctl(fd_, TIOCMGET, &status) == 0) {
         status &= ~TIOCM_DTR;
@@ -111,44 +111,67 @@ bool SerialESP32::configure_port() {
         ioctl(fd_, TIOCMSET, &status);
     }
 
+    // Xóa sạch rác trong buffer phần cứng trước khi chạy
     tcflush(fd_, TCIOFLUSH);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     return true;
 }
 
 // ============================================================================
-// GỬI LỆNH XUỐNG ESP32 (TX)
+// GỬI LỆNH XUỐNG ESP32 (TX - ZERO LATENCY)
 // ============================================================================
 bool SerialESP32::send_command(const SerialCommand& cmd) {
     std::lock_guard<std::mutex> lock(mtx_);
     if (fd_ < 0) return false;
 
     uint8_t packet[TX_PACKET_LEN];
-    
-    // Header
-    packet[0] = TX_HEADER_1; // 0xAB
-    packet[1] = TX_HEADER_2; // 0xCD
-    
-    // Payload (Bytes 2 to 9)
-    packet[2] = (cmd.dev_final_px >> 8) & 0xFF; // MSB
-    packet[3] = cmd.dev_final_px & 0xFF;        // LSB
-    packet[4] = cmd.speed_control;              // Vận tốc (km/h * 10)
-    packet[5] = cmd.emergency_stop ? 1 : 0;     // Phanh khẩn cấp
-    packet[6] = 0x00; // Padding
-    packet[7] = 0x00; // Padding
-    packet[8] = 0x00; // Padding
-    packet[9] = 0x00; // Padding
-    
-    // Checksum (XOR từ byte 2 đến byte 9)
+
+    // Header: AB CD
+    packet[0] = TX_HEADER_1;
+    packet[1] = TX_HEADER_2;
+
+    // Payload (Bytes 2 đến 9)
+    packet[2] = (cmd.dev_final_px >> 8) & 0xFF; // DEV_H
+    packet[3] = cmd.dev_final_px & 0xFF;        // DEV_L
+    packet[4] = cmd.speed_control;              // SPEED (km/h * 10)
+    packet[5] = cmd.emergency_stop ? 1 : 0;     // EMG
+    packet[6] = 0x00;                           // Padding
+    packet[7] = 0x00;                           // Padding
+    packet[8] = 0x00;                           // Padding
+    packet[9] = 0x00;                           // Padding
+
+    // Checksum: XOR từ byte 2 đến byte 9
     packet[10] = calculate_checksum(&packet[2], 8);
 
+    // Ghi trực tiếp xuống UART không đệm trễ
     ssize_t written = ::write(fd_, packet, TX_PACKET_LEN);
-    return (written == TX_PACKET_LEN);
+
+    if (written < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            std::cerr << "[SerialESP32] write() failed: " << strerror(errno) << "\n";
+            read_error_count_.fetch_add(1);
+            link_down_.store(true);
+        }
+        return false;
+    }
+
+    // Ghi ngắn (written < TX_PACKET_LEN) nghĩa là dòng không nuốt hết hoặc bị
+    // ngắt giữa chừng. Frame bị cắt cụt đều là frame hỏng -> coi như mất liên
+    // kết, không phải chỉ "lệnh chưa gửi xong".
+    if (written < static_cast<ssize_t>(TX_PACKET_LEN)) {
+        std::cerr << "[SerialESP32] short write: " << written << "/"
+                  << TX_PACKET_LEN << " bytes\n";
+        read_error_count_.fetch_add(1);
+        link_down_.store(true);
+        return false;
+    }
+
+    return true;
 }
 
 // ============================================================================
-// LẤY TRẠNG THÁI (AI LUỒNG CHÍNH GỌI)
+// LẤY TRẠNG THÁI (CHO ROS NODE ĐỌC)
 // ============================================================================
 ESP32Feedback SerialESP32::get_latest_feedback() const {
     std::lock_guard<std::mutex> lock(feedback_mtx_);
@@ -156,14 +179,13 @@ ESP32Feedback SerialESP32::get_latest_feedback() const {
 }
 
 // ============================================================================
-// LUỒNG NGẦM ĐỌC DATA (RX THREAD) - OPTIMIZED FOR LOW LATENCY
+// LUỒNG NGẦM ĐỌC DATA (RX THREAD) - EVENT-DRIVEN, VÉT CẠN BUFFER, NO SLEEP
 // ============================================================================
 void SerialESP32::feedback_loop() {
-    fd_set read_fds;
-    struct timeval timeout;
+    struct pollfd pfd;
+    uint8_t buf[256];
 
     while (running_) {
-        // Lấy fd_ an toàn. Không giữ mtx_ trong lúc chờ io (Đúng chuẩn thiết kế)
         int current_fd = -1;
         {
             std::lock_guard<std::mutex> lock(mtx_);
@@ -171,41 +193,85 @@ void SerialESP32::feedback_loop() {
         }
 
         if (current_fd < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));  // Reduced from 50ms
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        FD_ZERO(&read_fds);
-        FD_SET(current_fd, &read_fds);
+        pfd.fd = current_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
 
-        // CHỜ 5ms (Giảm từ 10ms để giảm độ trễ - Patch 3 từ LATENCY_OPTIMIZATION_PATCHES.txt)
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 5000;  // 5ms instead of 10ms
+        // poll() cho toi da 20 ms (tuong ung chu ky 50 Hz cua ESP32). Khi co
+        // byte toi no tra ve ngay, khong can them mot sleep_for(co dieu kien)
+        // nhu ban select() + sleep_for(5 ms) truoc day -- von tre them 5 ms
+        // moi vong ke ca khi da co du lieu.
+        int ret = ::poll(&pfd, 1, 20);
 
-        int ret = select(current_fd + 1, &read_fds, nullptr, nullptr, &timeout);
-        
-        if (ret > 0 && FD_ISSET(current_fd, &read_fds)) {
-            uint8_t buf[64];
-            ssize_t bytes_read = ::read(current_fd, buf, sizeof(buf));
-            
-            if (bytes_read > 0) {
-                // Nhồi byte nhận được vào State Machine
-                for (ssize_t i = 0; i < bytes_read; ++i) {
-                    process_rx_byte(buf[i]);
-                }
-            }
+        if (ret < 0) {
+            if (errno == EINTR) continue;   // bi ngat, thu lai
+            // Loi poll (fd hong) = mat lien lac that.
+            std::cerr << "[SerialESP32] poll failed: " << strerror(errno) << "\n";
+            read_error_count_.fetch_add(1);
+            link_down_.store(true);
+            break;
         }
-        // Patch 4: Reduced sleep from 10ms to 5ms for faster polling
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        if (ret > 0 && (pfd.revents & POLLIN)) {
+            // Vet can toan bo byte dang cho trong kernel buffer, nen telemetry
+            // nhan duoc luon la mau moi nhat, khong phai mau cu trong buffer.
+            while (true) {
+                ssize_t n = ::read(current_fd, buf, sizeof(buf));
+                if (n > 0) {
+                    for (ssize_t i = 0; i < n; ++i) {
+                        process_rx_byte(buf[i]);
+                    }
+                    continue;
+                }
+                if (n == 0) break;                                  // het du lieu
+                if (errno == EINTR) continue;                       // doc bi ngat
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // buffer rong
+
+                // EIO/EBADF: ESP32 bi rut hoac driver USB reset. Gan co de
+                // node dong cong va phanh, thay vi giu trang thai "OK" gia.
+                std::cerr << "[SerialESP32] read() failed: " << strerror(errno) << "\n";
+                read_error_count_.fetch_add(1);
+                link_down_.store(true);
+                break;
+            }
+        } else if (ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            // Cong chet nhung read() van tra EAGAIN (thuong gap voi USB CDC
+            // sau khi rut cap), nen phai kiem tra revents rieng.
+            std::cerr << "[SerialESP32] poll error/hangup on fd " << current_fd
+                      << ", marking link down\n";
+            read_error_count_.fetch_add(1);
+            link_down_.store(true);
+        }
     }
 }
 
 // ============================================================================
-// RX STATE MACHINE (MÁY TRẠNG THÁI)
+// RX STATE MACHINE (FRAME TIMEOUT 10MS ĐỒNG BỘ VỚI FIRMWARE ESP32)
 // ============================================================================
 void SerialESP32::process_rx_byte(uint8_t b) {
+    static auto last_rx_time = std::chrono::steady_clock::now();
+    static constexpr int64_t FRAME_TIMEOUT_US = 10000; // 10ms Frame Timeout
+
+    auto now = std::chrono::steady_clock::now();
+
+    // 1. Chống kẹt byte: Nếu gói tin bị đứt đoạn quá 10ms -> tự reset về đầu
+    if (rx_state_ != RxState::WAIT_H1) {
+        auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now - last_rx_time).count();
+        if (elapsed_us > FRAME_TIMEOUT_US) {
+            rx_state_ = RxState::WAIT_H1;
+            rx_idx_ = 0;
+        }
+    }
+    last_rx_time = now;
+
+    // 2. Máy trạng thái phân tích gói tin
     switch (rx_state_) {
-        case RxState::WAIT_H1: // Đợi 0xDC
+        case RxState::WAIT_H1: // Chờ 0xDC
             if (b == RX_HEADER_1) {
                 rx_packet_[0] = b;
                 rx_idx_ = 1;
@@ -213,54 +279,52 @@ void SerialESP32::process_rx_byte(uint8_t b) {
             }
             break;
 
-        case RxState::WAIT_H2: // Đợi 0xBA
+        case RxState::WAIT_H2: // Chờ 0xBA
             if (b == RX_HEADER_2) {
                 rx_packet_[1] = b;
                 rx_idx_ = 2;
                 rx_state_ = RxState::READ_PAYLOAD;
             } else if (b == RX_HEADER_1) {
-                // Rơi nhầm byte, nhưng lại trùng header 1
+                // Rơi nhầm byte nhưng lại trùng H1 -> giữ lại H1
                 rx_packet_[0] = b;
                 rx_idx_ = 1;
             } else {
                 rx_state_ = RxState::WAIT_H1;
+                rx_idx_ = 0;
             }
             break;
 
-        case RxState::READ_PAYLOAD: // Đọc tiếp 5 bytes
-            rx_packet_[rx_idx_++] = b;
+        case RxState::READ_PAYLOAD: // Đọc tiếp 5 bytes (4 byte float speed + 1 byte checksum)
+            if (rx_idx_ < RX_PACKET_LEN) {
+                rx_packet_[rx_idx_++] = b;
+            }
 
-            if (rx_idx_ == RX_PACKET_LEN) { // Đã nhận đủ 7 bytes
-                // Tính Checksum XOR từ 4 bytes float (Vị trí 2 -> 5)
+            if (rx_idx_ >= RX_PACKET_LEN) {
+                // Tính Checksum XOR từ byte 2 đến byte 5 (4 bytes float)
                 uint8_t calc_csum = calculate_checksum(&rx_packet_[2], 4);
-                
-                // Vị trí 6 là Checksum do ESP32 gửi lên
+
+                // Vị trí 6 là checksum từ ESP32
                 if (calc_csum == rx_packet_[6]) {
                     ESP32Feedback fb;
-                    // Ép 4 bytes vào kiểu Float
                     std::memcpy(&fb.velocity_kmh, &rx_packet_[2], sizeof(float));
-                    
-                    // Timestamp when received
-                    fb.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
 
-                    // NaN/Inf/âm đều là dữ liệu hỏng.
+                    fb.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        now.time_since_epoch()).count();
+
+                    // Lọc dữ liệu hợp lý
                     if (std::isfinite(fb.velocity_kmh) &&
                         fb.velocity_kmh >= 0.0f &&
                         fb.velocity_kmh <= 100.0f) {
                         fb.valid = true;
 
-                        // Ghi đè biến an toàn
                         std::lock_guard<std::mutex> lock(feedback_mtx_);
                         latest_feedback_ = fb;
-                    } else {
-                        std::lock_guard<std::mutex> lock(feedback_mtx_);
-                        latest_feedback_.valid = false;
                     }
                 }
-                
-                // Quay lại đợi gói tiếp theo
+
+                // Luôn reset về đầu để đón frame tiếp theo
                 rx_state_ = RxState::WAIT_H1;
+                rx_idx_ = 0;
             }
             break;
     }

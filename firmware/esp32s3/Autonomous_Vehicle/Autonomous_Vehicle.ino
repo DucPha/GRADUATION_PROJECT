@@ -12,13 +12,12 @@
 // ============================================================================
 // [1] CẤU HÌNH CHÂN PHẦN CỨNG (PINS)
 // ============================================================================
-constexpr uint8_t PIN_STEER = 33;  // Chân PWM xuất ra Servo bẻ lái
+constexpr uint8_t PIN_STEER = 32;  // Chân PWM xuất ra Servo bẻ lái
 constexpr uint8_t PIN_HALL = 23;   // Chân ngắt đọc xung Cảm biến Hall đo tốc độ
 constexpr uint8_t PIN_TURN_L = 21; // Đèn LED xi-nhan trái
-constexpr uint8_t PIN_TURN_R =
-    18; // Đèn LED xi-nhan phải (Tránh chân 19 là USB_D- của ESP32-S3)
-constexpr uint8_t PIN_BRAKE = 15; // Đèn LED phanh đít
-constexpr uint8_t PIN_ESC = 32;   // Chân PWM xuất ra Động cơ (ESC)
+constexpr uint8_t PIN_TURN_R = 18; // Đèn LED xi-nhan phải (Tránh chân 19 là USB_D- của ESP32-S3)
+constexpr uint8_t PIN_BRAKE = 15;  // Đèn LED phanh đít
+constexpr uint8_t PIN_ESC = 33;    // Chân PWM xuất ra Động cơ (ESC)
 
 // ============================================================================
 // [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
@@ -28,12 +27,9 @@ constexpr int STEER_CENTER = 90; // Góc Servo khi xe đi thẳng
 constexpr int STEER_MIN = 45;    // Giới hạn góc Servo rẽ phải tối đa
 constexpr int STEER_MAX = 135;   // Giới hạn góc Servo rẽ trái tối đa
 
-constexpr float CAM_DEADZONE =
-    10.0f; // Vùng chết (pixel): Lệch dưới mức này xem như đi thẳng
-constexpr float CAM_MAX_DEV =
-    50.0f; // Độ lệch quỹ đạo tối đa (pixel) để quy đổi ra góc lái
-constexpr float BLINK_THRESH =
-    10.0f; // Ngưỡng lệch làn (pixel) để tự động bật xi-nhan
+constexpr float CAM_DEADZONE = 10.0f; // Vùng chết (pixel): Lệch dưới mức này xem như đi thẳng
+constexpr float CAM_MAX_DEV = 50.0f;  // Độ lệch quỹ đạo tối đa (pixel) để quy đổi ra góc lái
+constexpr float BLINK_THRESH = 10.0f; // Ngưỡng lệch làn (pixel) để tự động bật xi-nhan
 
 // --- Động cơ (Speed/ESC) ---
 constexpr int ESC_NEUTRAL = 90;  // Xung PWM để ESC dừng động cơ (Số Mo)
@@ -41,101 +37,87 @@ constexpr int ESC_MIN_FWD = 95;  // Xung PWM tối thiểu để xe bắt đầu
 constexpr int ESC_MAX_FWD = 180; // Xung PWM tối đa cho chiều tiến
 constexpr int ESC_BRAKE = 20;    // Xung PWM kéo lùi để hãm phanh điện từ
 
-constexpr float MAX_SPEED_KMH =
-    15.0f; // Giới hạn tốc độ mục tiêu an toàn từ MiniPC
-constexpr float MAX_VALID_SPEED_KMH =
-    20.0f; // Ngưỡng chặn nhiễu sinh tốc độ ảo vượt 20km/h
+constexpr float MAX_SPEED_KMH = 15.0f;       // Giới hạn tốc độ mục tiêu an toàn từ MiniPC
+constexpr float MAX_VALID_SPEED_KMH = 20.0f; // Ngưỡng chặn nhiễu sinh tốc độ ảo vượt 20km/h
 
-// --- Toán học tính vận tốc (Tính sẵn tại Compile-time để MCU chạy siêu nhẹ)
-// ---
-constexpr float WHEEL_DIA_M = 0.090f; // Đường kính bánh xe (90mm = 0.09m)
+// --- Toán học tính vận tốc (Compile-time) ---
+constexpr float WHEEL_DIA_M = 0.090f;             // Đường kính bánh xe (90mm = 0.09m)
 constexpr float WHEEL_CIRCUMF = PI * WHEEL_DIA_M; // Chu vi bánh xe (m)
 constexpr float GEAR_RATIO = 37.0f / 13.0f;       // Tỷ số truyền vi sai
-constexpr uint8_t PULSES_PER_REV = 4; // Số lượng xung Hall / 1 vòng quay bánh
+constexpr uint8_t PULSES_PER_REV = 4;             // Số lượng xung Hall / 1 vòng quay bánh
 
-// Hằng số quy đổi từ Chu kỳ (us) sang Tốc độ (km/h) = (3.6 * 1,000,000 * Chu
-// vi) / (Xung * Tỷ số)
-constexpr float PERIOD_TO_KMH_FACTOR =
-    (3600000.0f * WHEEL_CIRCUMF) / (PULSES_PER_REV * GEAR_RATIO);
-// Chu kỳ xung nhỏ nhất hợp lý (Giới hạn vật lý khi xe chạy 20km/h để chặn xung
-// nhiễu quá sát)
-constexpr uint32_t MIN_HALL_PERIOD_US =
-    (uint32_t)(PERIOD_TO_KMH_FACTOR / MAX_VALID_SPEED_KMH);
+// Hằng số quy đổi từ Chu kỳ (us) sang Tốc độ (km/h) = (3.6 * 1,000,000 * Chu vi) / (Xung * Tỷ số)
+constexpr float PERIOD_TO_KMH_FACTOR = (3600000.0f * WHEEL_CIRCUMF) / (PULSES_PER_REV * GEAR_RATIO);
+constexpr uint32_t MIN_HALL_PERIOD_US = (uint32_t)(PERIOD_TO_KMH_FACTOR / MAX_VALID_SPEED_KMH);
 
 // --- Bộ lọc và Thời gian định thời (Timing & Filters) ---
-constexpr uint32_t PID_DT_US = 10000; // 100Hz: Chu kỳ định thời thuật toán PID
-constexpr uint32_t TELEM_DT_MS =
-    20; // 50Hz: Chu kỳ gửi phản hồi trạng thái về MiniPC
-constexpr uint32_t WDOG_TIMEOUT_MS =
-    500; // 0.5s: Nếu mất kết nối PC quá nửa giây -> Dừng xe
-constexpr uint32_t BLINK_DT_MS = 500; // 0.5s: Tốc độ nháy đèn xi-nhan
+constexpr uint32_t PID_DT_US = 10000;      // 100Hz: Chu kỳ định thời thuật toán PID
+constexpr uint32_t TELEM_DT_MS = 20;       // 50Hz: Chu kỳ gửi phản hồi trạng thái về MiniPC
+constexpr uint32_t WDOG_TIMEOUT_MS = 500;  // 0.5s: Nếu mất kết nối PC quá nửa giây -> Dừng xe
+constexpr uint32_t BLINK_DT_MS = 500;      // 0.5s: Tốc độ nháy đèn xi-nhan
 
-constexpr uint32_t HALL_DEBOUNCE_US =
-    1000; // 1ms: Lọc nhiễu công tắc cảm biến Hall
-constexpr uint32_t BRAKE_HOLD_MS =
-    200; // 200ms: Thời gian giữ lệnh lùi để hãm xe phanh
-constexpr uint32_t FRAME_TIMEOUT_US =
-    10000; // 10ms: Thời gian chờ tối đa cho 1 frame UART bị đứt đoạn
+constexpr uint32_t HALL_DEBOUNCE_US = 1000; // 1ms: Lọc nhiễu cảm biến Hall
+constexpr uint32_t BRAKE_HOLD_MS = 200;     // 200ms: Thời gian giữ lệnh lùi để hãm xe phanh
+constexpr uint32_t FRAME_TIMEOUT_US = 10000;// 10ms: Timeout frame UART đứt đoạn
 
-constexpr float ALPHA_STEER =
-    0.4f; // Hệ số EMA làm mượt góc lái (0->1, càng nhỏ càng mượt)
+// Dưới ngưỡng này (km/h) coi như xe đã dừng hẳn => không cần phanh nữa.
+constexpr float STOPPED_KMH = 0.3f;
+
+constexpr float ALPHA_STEER = 0.4f; // Hệ số EMA làm mượt góc lái
 
 // --- Giao tiếp (UART Protocol) ---
-constexpr uint32_t UART_BAUD = 230400; // Tốc độ Baud giao tiếp MiniPC
-constexpr size_t RX_BUF_SIZE =
-    4096; // Kích thước Buffer nhận (Rộng để chống tràn burst data)
-constexpr size_t TX_BUF_SIZE = 512; // Kích thước Buffer gửi
+// LƯU Ý: UART này mang DUY NHẤT protocol nhị phân 7 byte (xem sendTelemetry).
+// Tuyệt đối không Serial.print/printf ở đây: chữ ASCII chen vào giữa các gói
+// làm MiniPC mất đồng bộ khung, và bản thân bộ đệm RX bị nhiễu. Cần xem trạng
+// thái thì đọc qua topic telemetry phía MiniPC hoặc dùng cổng USB/Serial mặc
+// định của board (USB CDC), không phải cổng này.
+constexpr uint32_t UART_BAUD = 230400; // Khớp với BAUDRATE trong serial_esp32.hpp
+constexpr size_t RX_BUF_SIZE = 4096;
+constexpr size_t TX_BUF_SIZE = 512;
 
 constexpr uint8_t HDR_RX1 = 0xAB, HDR_RX2 = 0xCD; // Byte đồng bộ nhận lệnh
 constexpr uint8_t HDR_TX1 = 0xDC, HDR_TX2 = 0xBA; // Byte đồng bộ gửi Telemetry
-constexpr uint8_t RX_LEN = 11; // Kích thước chuẩn gói tin nhận
-constexpr uint8_t TX_LEN = 7;  // Kích thước chuẩn gói tin gửi
+constexpr uint8_t RX_LEN = 11;
+constexpr uint8_t TX_LEN = 7;
 
-constexpr uint32_t CPU_RX_BUDGET_US =
-    800; // Ngân sách thời gian tối đa để đọc UART (800us/vòng)
-constexpr uint16_t MAX_RX_PER_LOOP =
-    2048; // Giới hạn đọc byte tối đa 1 lượt chống nghẽn vòng lặp
+constexpr uint32_t CPU_RX_BUDGET_US = 800; // 800us ngân sách xử lý UART mỗi loop
+constexpr uint16_t MAX_RX_PER_LOOP = 2048;
 
-// Vị trí mảng của gói tin RX
 constexpr uint8_t IDX_LANE_H = 2, IDX_LANE_L = 3;
 constexpr uint8_t IDX_SPEED = 4, IDX_EMG = 5, IDX_CSUM = 10;
 
 // ============================================================================
 // [3] CẤU TRÚC DỮ LIỆU (DATA STRUCTURES)
 // ============================================================================
-// Trạng thái tổng quát của xe
 struct CarState {
-  float target_spd = 0.0f;      // Vận tốc mong muốn từ PC
-  float cur_spd = 0.0f;         // Vận tốc thực tế đo được
-  int16_t raw_dev = 0;          // Độ lệch làn thô (pixel)
-  float smooth_dev = 0.0f;      // Độ lệch làn đã lọc mượt EMA
-  int steer_cmd = STEER_CENTER; // Góc ra Servo bẻ lái
-  int esc_cmd = ESC_NEUTRAL;    // Xung ra Động cơ ESC
-  bool emg_stop = false;        // Cờ dừng khẩn cấp
-  bool braking = false;         // Đang trong quá trình phanh
+  float target_spd = 0.0f;
+  float cur_spd = 0.0f;
+  int16_t raw_dev = 0;
+  float smooth_dev = 0.0f;
+  int steer_cmd = STEER_CENTER;
+  int esc_cmd = ESC_NEUTRAL;
+  bool emg_stop = false;
+  bool braking = false;
 };
 
-// Cấu trúc bộ thông số PID
 struct PidState {
   float kp = 0.0f, ki = 0.0f, kd = 0.0f;
-  float integral = 0.0f; // Khâu I (Cộng dồn sai số)
-  float prev_err = 0.0f; // Khâu D (Lỗi vòng lặp trước)
+  float integral = 0.0f;
+  float prev_err = 0.0f;
 };
 
-// Trạng thái Cảm biến Hall
 struct HallState {
-  volatile uint32_t last_pulse = 0; // Thời điểm nhận xung cuối (Micros)
-  volatile uint32_t period_us = 0;  // Khoảng thời gian giữa 2 xung gần nhất
-  volatile uint32_t pulse_cnt = 0;  // Tổng số đếm xung
-  volatile uint32_t sequence = 0;   // Đánh dấu ID chu kỳ (Tăng khi có xung mới)
+  volatile uint32_t last_pulse = 0;
+  volatile uint32_t period_us = 0;
+  volatile uint32_t pulse_cnt = 0;
+  volatile uint32_t sequence = 0;
 
-  uint32_t proc_pulse_us = 0;    // Thời điểm xử lý xung cuối cùng trong loop
-  uint32_t valid_period = 0;     // Chu kỳ hợp lệ gần nhất
-  float smooth_speed_kmh = 0.0f; // Tốc độ đã được lọc mượt
-  float saved_spd = 0.0f;        // Tốc độ lưu nháp để nội suy giảm dần
+  uint32_t proc_pulse_us = 0;
+  uint32_t valid_period = 0;
+  float smooth_speed_kmh = 0.0f;
+  float saved_spd = 0.0f;
 };
 
-// Máy trạng thái đọc UART
 enum class RxState : uint8_t { WAIT_H1, WAIT_H2, READ_PAYLOAD };
 
 // ============================================================================
@@ -144,31 +126,24 @@ enum class RxState : uint8_t { WAIT_H1, WAIT_H2, READ_PAYLOAD };
 Servo servo_steer, motor_esc;
 
 CarState car;
-PidState pid_steer = {1.5f, 0.08f, 0.6f, 0.0f,
-                      0.0f}; // Khởi tạo PID lái mặc định
+PidState pid_steer = {1.5f, 0.08f, 0.6f, 0.0f, 0.0f};
 PidState pid_speed;
 HallState hall;
 
-// Khóa Spinlock (MUX) bảo vệ chống xung đột bộ nhớ giữa 2 nhân CPU (ISR vs
-// Loop)
 portMUX_TYPE hall_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Quản lý UART RX
 RxState rx_state = RxState::WAIT_H1;
 uint8_t rx_buf[RX_LEN] = {};
 uint8_t rx_idx = 0;
 uint32_t last_rx_us = 0;
-uint32_t last_packet_ms = 0; // Lưu thời điểm nhận lệnh để Watchdog canh trừng
+uint32_t last_packet_ms = 0;
 
-// Quản lý PID Scheduler
 uint32_t next_pid_us = 0;
 bool pid_timer_init = false;
-bool emg_started = false;
 
 int last_esc = ESC_NEUTRAL;
 int last_steer = STEER_CENTER;
 
-// Bảng tra cứu tốc độ tĩnh (ESC Lookup Table)
 struct EscMap {
   int pwm;
   float spd;
@@ -184,16 +159,12 @@ constexpr size_t LUT_SIZE = sizeof(ESC_LUT) / sizeof(ESC_LUT[0]);
 // ============================================================================
 // [5] HÀM TIỆN ÍCH & NGẮT (UTILS & ISR)
 // ============================================================================
-// Hàm quy đổi dải số có chặn giới hạn an toàn để không vượt biên
-inline float mapF(float x, float in_min, float in_max, float out_min,
-                  float out_max) {
-  if (in_max == in_min)
-    return out_min;                 // Tránh lỗi chia cho 0
-  x = constrain(x, in_min, in_max); // Cắt phần vượt giới hạn
+inline float mapF(float x, float in_min, float in_max, float out_min, float out_max) {
+  if (in_max == in_min) return out_min;
+  x = constrain(x, in_min, in_max);
   return out_min + (x - in_min) * (out_max - out_min) / (in_max - in_min);
 }
 
-// Hàm tính Checksum XOR đơn giản
 inline uint8_t calcXor(const uint8_t *buf, uint8_t start, uint8_t end) {
   uint8_t csum = 0;
   for (uint8_t i = start; i <= end; ++i)
@@ -201,34 +172,33 @@ inline uint8_t calcXor(const uint8_t *buf, uint8_t start, uint8_t end) {
   return csum;
 }
 
-// Hàm NGẮT CẢM BIẾN HALL: Chạy cực nhanh mỗi khi bánh xe quay qua nam châm
 void IRAM_ATTR isrHall() {
   uint32_t now = micros();
-
-  portENTER_CRITICAL_ISR(
-      &hall_mux); // Khóa nhân CPU còn lại để ghi biến an toàn
+  portENTER_CRITICAL_ISR(&hall_mux);
   uint32_t dt = now - hall.last_pulse;
-  if (dt >= HALL_DEBOUNCE_US) { // Loại bỏ nhiễu rung cơ học (<1ms)
-    hall.pulse_cnt++;
+  if (dt >= HALL_DEBOUNCE_US) {
+    // Ghi tường minh thay vì ++: toán tử ++ trên biến volatile đã bị loại bỏ
+    // trong C++20 và gcc cảnh báo. Hai lệnh đọc-ghi này nằm trong critical
+    // section nên vẫn nguyên tử với phía đọc.
+    hall.pulse_cnt = hall.pulse_cnt + 1;
     if (hall.last_pulse != 0) {
-      hall.period_us = dt; // Ghi lại chu kỳ
-      hall.sequence++;     // Tăng ID để vòng lặp biết có chu kỳ mới
+      hall.period_us = dt;
+      hall.sequence = hall.sequence + 1;
     }
     hall.last_pulse = now;
   }
-  portEXIT_CRITICAL_ISR(&hall_mux); // Mở khóa CPU
+  portEXIT_CRITICAL_ISR(&hall_mux);
 }
 
 // ============================================================================
 // [6] XỬ LÝ LÕI TÍNH TOÁN & GIAO TIẾP
 // ============================================================================
 
-// --- 6.1. ĐỌC TỐC ĐỘ (SPEED CALCULATION - TỐI ƯU XE CHẠY CHẬM) ---
+// --- 6.1. ĐỌC TỐC ĐỘ ---
 void calcSpeed() {
   uint32_t period = 0, last_p = 0, seq = 0;
   static uint32_t last_seq = 0;
 
-  // Lấy bản sao dữ liệu từ ngắt ra ngoài một cách an toàn
   portENTER_CRITICAL(&hall_mux);
   last_p = hall.last_pulse;
   period = hall.period_us;
@@ -237,20 +207,14 @@ void calcSpeed() {
 
   uint32_t now = micros();
 
-  // 1. NẾU CÓ CHU KỲ MỚI (Xe đang lăn bánh liên tục)
+  // 1. Có chu kỳ mới
   if (seq != last_seq && period > 0) {
     last_seq = seq;
 
-    // Bỏ qua các xung nhiễu sinh tốc độ ảo >20km/h
     if (period >= MIN_HALL_PERIOD_US) {
-      // Tính vận tốc Km/h từ chu kỳ, dùng hằng số ma thuật (Chỉ tốn 1 phép
-      // chia)
       const float raw_speed = PERIOD_TO_KMH_FACTOR / static_cast<float>(period);
       const float safe_speed = constrain(raw_speed, 0.0f, MAX_VALID_SPEED_KMH);
 
-      // [LỌC NHIỄU THÍCH NGHI - Adaptive EMA]
-      // Đi chậm -> lấy alpha lớn để phản ứng lẹ. Đi nhanh -> lấy alpha nhỏ để
-      // xe êm.
       float adaptive_alpha;
       if (safe_speed < 3.0f)
         adaptive_alpha = 0.60f;
@@ -259,40 +223,28 @@ void calcSpeed() {
       else
         adaptive_alpha = 0.30f;
 
-      hall.smooth_speed_kmh = adaptive_alpha * safe_speed +
-                              (1.0f - adaptive_alpha) * hall.smooth_speed_kmh;
+      hall.smooth_speed_kmh = adaptive_alpha * safe_speed + (1.0f - adaptive_alpha) * hall.smooth_speed_kmh;
       car.cur_spd = hall.smooth_speed_kmh;
 
-      // Lưu dữ liệu để lát nữa nội suy nếu xe chạy chậm dần
       hall.proc_pulse_us = last_p;
       hall.valid_period = period;
       hall.saved_spd = car.cur_spd;
     }
   }
 
-  // 2. NẾU ĐANG TRONG KHOẢNG CHỜ XUNG TIẾP THEO (Nội suy giảm tốc độ êm ái)
+  // 2. Nội suy khi chờ xung
   if (hall.proc_pulse_us != 0 && hall.valid_period > 0) {
     uint32_t elapsed = now - hall.proc_pulse_us;
-
-    // Khoảng chờ an toàn: Giữ tốc độ nguyên si trong tối đa 1.5 lần chu kỳ
-    // trước (Max 0.5s)
-    uint32_t hold_us = constrain(hall.valid_period + (hall.valid_period / 2),
-                                 20000UL, 500000UL);
-    // Trục phân rã: Tốc độ sẽ tuột dần về 0 trong 2 lần chu kỳ (Max 1s)
+    uint32_t hold_us = constrain(hall.valid_period + (hall.valid_period / 2), 20000UL, 500000UL);
     uint32_t decay_us = constrain(hall.valid_period * 2UL, 50000UL, 1000000UL);
 
     if (elapsed <= hold_us) {
-      car.cur_spd = hall.saved_spd; // Vẫn đang bình thường
+      car.cur_spd = hall.saved_spd;
     } else {
-      // Xe đang chạy chậm lại -> Giảm tốc độ tuyến tính để PID không bị giật
-      // cục
-      float decay = constrain(static_cast<float>(elapsed - hold_us) /
-                                  static_cast<float>(decay_us),
-                              0.0f, 1.0f);
+      float decay = constrain(static_cast<float>(elapsed - hold_us) / static_cast<float>(decay_us), 0.0f, 1.0f);
       car.cur_spd = hall.saved_spd * (1.0f - decay);
 
-      if (decay >=
-          1.0f) { // Thời gian trôi qua đã đủ lâu -> Chắc chắn xe đã dừng
+      if (decay >= 1.0f) {
         car.cur_spd = 0.0f;
         hall.smooth_speed_kmh = 0.0f;
       }
@@ -302,49 +254,41 @@ void calcSpeed() {
     hall.smooth_speed_kmh = 0.0f;
   }
 
-  // 3. CHỐT CHẶN CUỐI THÍCH NGHI (Adaptive Timeout)
-  // Tùy theo xe vừa đi chậm hay nhanh, ta cho phép nó chờ xung tiếp theo tối đa
-  // 1 giây
+  // 3. Timeout chặn cuối
   uint32_t adaptive_timeout_us = 1000000;
   if (hall.valid_period > 0) {
     adaptive_timeout_us = constrain(hall.valid_period * 4, 100000UL, 1000000UL);
   }
 
-  // Nếu quá ngưỡng chờ cho phép -> Đưa hẳn về 0
   if (last_p == 0 || (now - last_p) >= adaptive_timeout_us) {
     car.cur_spd = 0.0f;
     hall.smooth_speed_kmh = 0.0f;
   }
 
-  // Kẹp thêm 1 lần cuối cho an toàn
   car.cur_spd = constrain(car.cur_spd, 0.0f, MAX_VALID_SPEED_KMH);
 }
 
-// --- 6.2. MÁY TRẠNG THÁI ĐỌC UART (UART RX) ---
+// --- 6.2. MÁY TRẠNG THÁI ĐỌC UART ---
 void readUART() {
   uint32_t start_us = micros();
 
-  // Hủy và khởi động lại luồng nếu gói tin bị đứt đoạn quá 10ms
-  if (rx_state != RxState::WAIT_H1 &&
-      (start_us - last_rx_us) > FRAME_TIMEOUT_US) {
+  if (rx_state != RxState::WAIT_H1 && (start_us - last_rx_us) > FRAME_TIMEOUT_US) {
     rx_state = RxState::WAIT_H1;
     rx_idx = 0;
   }
 
   uint16_t count = 0;
 
-  // Đọc liên tục với điều kiện: Có data VÀ Chưa tới ngưỡng chống nghẽn vòng lặp
-  // VÀ Vẫn còn ngân sách CPU
   while (Serial.available() > 0 && count < MAX_RX_PER_LOOP) {
     if ((micros() - start_us) >= CPU_RX_BUDGET_US)
-      break; // Hết thời gian cho UART -> Thoát đi chạy PID
+      break;
 
     count++;
     uint8_t b = Serial.read();
     last_rx_us = micros();
 
     switch (rx_state) {
-    case RxState::WAIT_H1: // Chờ Header 1 (AB)
+    case RxState::WAIT_H1:
       if (b == HDR_RX1) {
         rx_buf[0] = b;
         rx_idx = 1;
@@ -352,7 +296,7 @@ void readUART() {
       }
       break;
 
-    case RxState::WAIT_H2: // Chờ Header 2 (CD)
+    case RxState::WAIT_H2:
       if (b == HDR_RX2) {
         rx_buf[1] = b;
         rx_idx = 2;
@@ -360,28 +304,23 @@ void readUART() {
       } else if (b == HDR_RX1) {
         rx_buf[0] = b;
         rx_idx = 1;
-      } // Rơi nhầm, bắt đầu lại
-      else {
+      } else {
         rx_state = RxState::WAIT_H1;
       }
       break;
 
-    case RxState::READ_PAYLOAD: // Đọc tiếp 9 byte phần thân
+    case RxState::READ_PAYLOAD:
       if (rx_idx < RX_LEN)
         rx_buf[rx_idx++] = b;
 
       if (rx_idx >= RX_LEN) {
-        // Nhận đủ 11 bytes, kiểm tra Checksum XOR
         if (calcXor(rx_buf, 2, IDX_CSUM - 1) == rx_buf[IDX_CSUM]) {
-          // Trùng khớp -> Cập nhật trực tiếp vào trạng thái chung của xe
-          // (Zero-Latency)
-          car.raw_dev = (rx_buf[IDX_LANE_H] << 8) | rx_buf[IDX_LANE_L];
-          car.target_spd =
-              constrain(rx_buf[IDX_SPEED] * 0.1f, 0.0f, MAX_SPEED_KMH);
+          car.raw_dev = (int16_t)((rx_buf[IDX_LANE_H] << 8) | rx_buf[IDX_LANE_L]);
+          car.target_spd = constrain(rx_buf[IDX_SPEED] * 0.1f, 0.0f, MAX_SPEED_KMH);
           car.emg_stop = (rx_buf[IDX_EMG] != 0);
-          last_packet_ms = millis(); // Nuôi chó canh chừng (Watchdog)
+          last_packet_ms = millis();
         }
-        rx_state = RxState::WAIT_H1; // Đợi gói mới
+        rx_state = RxState::WAIT_H1;
         rx_idx = 0;
       }
       break;
@@ -389,31 +328,27 @@ void readUART() {
   }
 }
 
-// --- 6.3. THUẬT TOÁN ĐIỀU KHIỂN (CONTROL PID) ---
-// Hàm nội suy: Tính ra xung PWM cơ bản cho ESC từ vận tốc mong muốn
+// --- 6.3. THUẬT TOÁN ĐIỀU KHIỂN (PID) ---
 int getBasePWM(float spd) {
   if (spd < 0.5f)
-    return ESC_NEUTRAL; // Chậm quá -> Dừng
+    return ESC_NEUTRAL;
   if (spd < ESC_LUT[2].spd)
-    return ESC_MIN_FWD; // Nhích nhẹ
+    return ESC_MIN_FWD;
 
-  // Quét dọc bảng Lookup để tìm mốc chặn gần nhất
   for (size_t i = 0; i + 1 < LUT_SIZE; ++i) {
     if (spd >= ESC_LUT[i].spd && spd < ESC_LUT[i + 1].spd) {
       float dSpd = ESC_LUT[i + 1].spd - ESC_LUT[i].spd;
       if (dSpd <= 0.0f)
         return ESC_LUT[i].pwm;
       float ratio = (spd - ESC_LUT[i].spd) / dSpd;
-      return roundf(ESC_LUT[i].pwm +
-                    ratio * (ESC_LUT[i + 1].pwm - ESC_LUT[i].pwm));
+      return roundf(ESC_LUT[i].pwm + ratio * (ESC_LUT[i + 1].pwm - ESC_LUT[i].pwm));
     }
   }
-  return ESC_LUT[LUT_SIZE - 1].pwm; // Vượt bảng -> Trả về cao nhất
+  return ESC_LUT[LUT_SIZE - 1].pwm;
 }
 
-// PID Tính toán Động cơ
 void calcSpeedPID(float dt) {
-  if (car.target_spd < 0.5f) { // Nhận lệnh dừng hẳn
+  if (car.target_spd < 0.5f) {
     pid_speed.integral = pid_speed.prev_err = 0;
     car.esc_cmd = ESC_NEUTRAL;
     return;
@@ -424,9 +359,8 @@ void calcSpeedPID(float dt) {
   float max_dpwm;
   int margin;
 
-  // Tự động tinh chỉnh PID (Adaptive) theo dải tốc độ thực tế
   if (car.cur_spd <= 3.58f) {
-    pid_speed.kp = (err < -0.3f) ? 1.5f : 1.2f; // Phanh cứng hơn nếu lố tốc
+    pid_speed.kp = (err < -0.3f) ? 1.5f : 1.2f;
     pid_speed.ki = 0.02f;
     pid_speed.kd = 0.005f;
     max_dpwm = 3.0f;
@@ -453,7 +387,6 @@ void calcSpeedPID(float dt) {
 
   float P = pid_speed.kp * err;
 
-  // Chống Windup (Xả khâu I nếu xe chạy trớn quá đà)
   if (car.cur_spd > car.target_spd)
     pid_speed.integral *= 0.2f;
   else
@@ -464,12 +397,9 @@ void calcSpeedPID(float dt) {
   float D = pid_speed.kd * (err - pid_speed.prev_err) / dt;
   pid_speed.prev_err = err;
 
-  // Cộng dồn lượng bù sai số vào xung ESC hiện tại
   float total = constrain(P + I + D, -max_dpwm, max_dpwm);
-  car.esc_cmd =
-      constrain(car.esc_cmd + (int)roundf(total), ESC_NEUTRAL, ESC_MAX_FWD);
+  car.esc_cmd = constrain(car.esc_cmd + (int)roundf(total), ESC_NEUTRAL, ESC_MAX_FWD);
 
-  // Guard rails: Ép ESC không vọt qua rào an toàn quanh mức Base
   if (err > 0.0f) {
     car.esc_cmd = constrain(car.esc_cmd, ESC_MIN_FWD, base_pwm + margin);
   } else if (err < -0.3f && car.esc_cmd > base_pwm) {
@@ -477,13 +407,9 @@ void calcSpeedPID(float dt) {
   }
 }
 
-// PID Tính toán Đánh Lái
 void calcSteerPID(float dt) {
-  // Lọc nhiễu độ lệch quỹ đạo từ MiniPC bằng bộ lọc Mũ EMA
-  car.smooth_dev =
-      ALPHA_STEER * car.raw_dev + (1.0f - ALPHA_STEER) * car.smooth_dev;
+  car.smooth_dev = ALPHA_STEER * car.raw_dev + (1.0f - ALPHA_STEER) * car.smooth_dev;
 
-  // Tốc độ xe càng nhanh, vô-lăng càng đầm (Kp nhỏ lại) tránh lật xe
   if (car.cur_spd < 10.0f) {
     pid_steer.kp = 1.5f;
     pid_steer.ki = 0.08f;
@@ -501,20 +427,15 @@ void calcSteerPID(float dt) {
   float target_angle = STEER_CENTER;
   float abs_dev = fabsf(car.smooth_dev);
 
-  // Nếu xe lệch ngoài vùng "chết" an toàn (Deadzone) thì mới bẻ lái
   if (abs_dev > CAM_DEADZONE) {
-    float norm_dev =
-        constrain(abs_dev - CAM_DEADZONE, 0.0f, CAM_MAX_DEV - CAM_DEADZONE);
-    float offset = mapF(norm_dev, 0.0f, CAM_MAX_DEV - CAM_DEADZONE, 0.0f,
-                        STEER_MAX - STEER_CENTER);
-    target_angle = (car.smooth_dev < 0.0f) ? (STEER_CENTER + offset)
-                                           : (STEER_CENTER - offset);
+    float norm_dev = constrain(abs_dev - CAM_DEADZONE, 0.0f, CAM_MAX_DEV - CAM_DEADZONE);
+    float offset = mapF(norm_dev, 0.0f, CAM_MAX_DEV - CAM_DEADZONE, 0.0f, STEER_MAX - STEER_CENTER);
+    target_angle = (car.smooth_dev < 0.0f) ? (STEER_CENTER + offset) : (STEER_CENTER - offset);
   }
 
   float err = target_angle - STEER_CENTER;
   float P = pid_steer.kp * err;
 
-  // Tránh cộng dồn khâu I khi đang đi đường thẳng tắp
   if (fabsf(err) < 1.0f)
     pid_steer.integral *= 0.5f;
   else
@@ -525,12 +446,9 @@ void calcSteerPID(float dt) {
   float D = pid_steer.kd * (err - pid_steer.prev_err) / dt;
   pid_steer.prev_err = err;
 
-  // Tính góc Servo cuối cùng và kẹp góc vật lý
-  car.steer_cmd = (int)roundf(
-      constrain(STEER_CENTER + P + I + D, (float)STEER_MIN, (float)STEER_MAX));
+  car.steer_cmd = (int)roundf(constrain(STEER_CENTER + P + I + D, (float)STEER_MIN, (float)STEER_MAX));
 }
 
-// BỘ ĐỊNH THỜI VÒNG LẶP ĐIỀU KHIỂN (SCHEDULER 100Hz CỐ ĐỊNH)
 void runPID(uint32_t now) {
   if (!pid_timer_init) {
     next_pid_us = now + PID_DT_US;
@@ -538,20 +456,15 @@ void runPID(uint32_t now) {
     return;
   }
 
-  // Kiểm tra xem đã tới giờ chạy PID chưa (Ép kiểu giải quyết tràn bộ đếm
-  // Timer)
   if ((int32_t)(now - next_pid_us) < 0)
     return;
 
   next_pid_us += PID_DT_US;
-  // Bù sai số trượt (Drift) nếu hệ thống bị trễ 1 nhịp
   if ((int32_t)(now - next_pid_us) >= 0)
     next_pid_us = now + PID_DT_US;
 
-  constexpr float DT_SEC =
-      PID_DT_US * 1e-6f; // Cố định dt = 0.01 giây cho toán học PID chuẩn xác
+  constexpr float DT_SEC = PID_DT_US * 1e-6f;
 
-  // Nếu không phải phanh khẩn cấp -> Chạy PID tốc độ
   if (!car.emg_stop) {
     calcSpeedPID(DT_SEC);
     if (car.esc_cmd != last_esc) {
@@ -560,7 +473,6 @@ void runPID(uint32_t now) {
     }
   }
 
-  // Luôn luôn chạy đánh lái
   calcSteerPID(DT_SEC);
   if (car.steer_cmd != last_steer) {
     servo_steer.write(car.steer_cmd);
@@ -572,11 +484,10 @@ void runPID(uint32_t now) {
 // [7] CƠ CHẾ BẢO VỆ (SAFETY / BRAKING)
 // ============================================================================
 void processBrake() {
-  static uint8_t phase = 0; // 0: Đạp phanh (Lùi), 1: Thả phanh về Mo
+  static uint8_t phase = 0;
   static uint32_t start_ms = 0;
   uint32_t now = millis();
 
-  // Khởi tạo máy trạng thái phanh
   if (!car.braking) {
     car.braking = true;
     phase = 0;
@@ -584,7 +495,6 @@ void processBrake() {
   }
 
   if (phase == 0) {
-    // Đẩy xung ESC lùi (Brake) để kích hoạt phanh điện từ
     if (last_esc != ESC_BRAKE) {
       motor_esc.write(ESC_BRAKE);
       last_esc = ESC_BRAKE;
@@ -594,20 +504,17 @@ void processBrake() {
       start_ms = now;
     }
   } else {
-    // Hết thời gian giữ phanh, trả về Neutral
     if (last_esc != ESC_NEUTRAL) {
       motor_esc.write(ESC_NEUTRAL);
       last_esc = ESC_NEUTRAL;
     }
     car.esc_cmd = ESC_NEUTRAL;
     pid_speed.integral = pid_speed.prev_err = 0;
-    car.braking = false; // Báo hiệu phanh xong
+    car.braking = false;
   }
 }
 
 void checkSafety() {
-  // 1. Kiểm tra mạch máu (Watchdog) - Nếu quá nửa giây không có lệnh từ PC ->
-  // Báo còi khẩn cấp
   if (millis() - last_packet_ms > WDOG_TIMEOUT_MS) {
     car.target_spd = 0;
     car.raw_dev = 0;
@@ -615,10 +522,6 @@ void checkSafety() {
   }
 
   if (!car.emg_stop) {
-    // Lệnh mới đã vô hiệu hoá phanh -> huỷ nốt pha phanh đang dở.
-    // Thiếu khối này, car.braking kẹt true vĩnh viễn => đèn phanh sáng kẹt
-    // VÀ lần khẩn cấp sau điều kiện `!car.braking` không bao giờ đúng nữa
-    // => xe KHÔNG BAO GIỜ phanh được lần nữa.
     if (car.braking) {
       car.braking = false;
       if (last_esc != ESC_NEUTRAL) {
@@ -628,51 +531,44 @@ void checkSafety() {
       car.esc_cmd = ESC_NEUTRAL;
       pid_speed.integral = pid_speed.prev_err = 0;
     }
-    emg_started = false;
     return;
   }
 
-  // 2. Kích hoạt pha phanh khẩn cấp (chỉ 1 lần cho mỗi lần emg_stop)
-  // processBrake() tự set car.braking = true + phase = 0. Phải gọi ở đây,
-  // nếu không car.braking vẫn false và nhánh "nuôi phanh" ở bước 3 không
-  // bao giờ chạy -> xe KHÔNG phanh được.
-  if (!emg_started && !car.braking && car.cur_spd > 0.5f) {
-    emg_started = true;
+  // Đang phanh thì tiếp tục phanh.
+  if (car.braking) {
     processBrake();
+    return;
   }
-  // 3. Nuôi pha phanh đang chạy (nếu bước 2 đã gọi thì bước này bỏ qua,
-  //    đảm bảo processBrake() chạy ĐÚNG 1 lần mỗi vòng loop)
-  else if (car.braking) {
+
+  // Xe vẫn còn lăn (sau khi đổi số mo phanh điện tử) thì phanh tiếp.
+  // Bản cũ chỉ phanh MỘT lần rồi giữ cờ emg_started = true vĩnh viễn: xe trượt
+  // tiếp và có thể còn lao vào vật cản dù vẫn ở trạng thái EMERGENCY_STOP.
+  if (car.cur_spd > STOPPED_KMH) {
     processBrake();
-  } else {
-    // Nếu đã phanh xong thì khóa cứng ESC ở số Mo
-    if (last_esc != ESC_NEUTRAL) {
-      motor_esc.write(ESC_NEUTRAL);
-      last_esc = ESC_NEUTRAL;
-    }
-    car.esc_cmd = ESC_NEUTRAL;
+    return;
   }
+
+  // Đã dừng hẳn: giữ số mo.
+  if (last_esc != ESC_NEUTRAL) {
+    motor_esc.write(ESC_NEUTRAL);
+    last_esc = ESC_NEUTRAL;
+  }
+  car.esc_cmd = ESC_NEUTRAL;
 }
 
 // ============================================================================
-// [8] ĐIỀU KHIỂN ĐÈN & TRUYỀN DỮ LIỆU (PERIPHERALS)
+// [8] ĐIỀU KHIỂN NGOẠI VI & TELEMETRY
 // ============================================================================
 void updateLights() {
   static uint32_t last_blink = 0;
   static bool led_on = false;
   uint32_t now = millis();
 
-  // Tính chu kỳ nhấp nháy đèn mỗi nửa giây
   if (now - last_blink >= BLINK_DT_MS) {
     led_on = !led_on;
     last_blink = now;
   }
 
-  // Đèn xi-nhan đánh theo độ lệch làn đường (Chuyển làn / Ôm cua)
-  // Quy ước (khớp camera_lane.cpp + calcSteerPID):
-  //   smooth_dev < 0 => tâm làn lệch trái => phải lái trái  => xi-nhan TRÁI
-  //   smooth_dev > 0 => tâm làn lệch phải => phải lái phải  => xi-nhan PHẢI
-  // Nhánh dưới đây trước đây bị ĐẢO: smooth_dev > 0 lại bật PIN_TURN_L.
   if (fabsf(car.smooth_dev) < BLINK_THRESH) {
     digitalWrite(PIN_TURN_L, LOW);
     digitalWrite(PIN_TURN_R, LOW);
@@ -684,56 +580,29 @@ void updateLights() {
     digitalWrite(PIN_TURN_R, led_on);
   }
 
-  // Đèn phanh đít bật đỏ khi đang phanh, dừng, hoặc có cờ báo khẩn cấp
-  digitalWrite(PIN_BRAKE,
-               (car.target_spd < 0.5f || car.emg_stop || car.braking));
+  digitalWrite(PIN_BRAKE, (car.target_spd < 0.5f || car.emg_stop || car.braking));
 }
 
 void sendTelemetry() {
-  // Đóng gói mảng byte cần gửi: Header 1, Header 2, Data, Checksum
   uint8_t tx_buf[TX_LEN] = {HDR_TX1, HDR_TX2, 0, 0, 0, 0, 0};
-  memcpy(&tx_buf[2], &car.cur_spd,
-         4); // Chép số float (4 bytes) tốc độ thẳng vào chuỗi
-  tx_buf[6] = calcXor(tx_buf, 2, 5); // Tính mã XOR bảo vệ
+  memcpy(&tx_buf[2], &car.cur_spd, sizeof(float));
+  tx_buf[6] = calcXor(tx_buf, 2, 5);
 
-  // Chỉ gửi khi buffer phần cứng còn rảnh để tránh làm chẹn CPU
   if (Serial.availableForWrite() >= TX_LEN)
     Serial.write(tx_buf, TX_LEN);
 }
 
 // ============================================================================
-// [9] HÀM SETUP & MAIN LOOP
+// [9] SETUP & LOOP
 // ============================================================================
-
-// Chẩn đoán 1Hz: in ra để biết ESP32 có THỰC SỰ nhận lệnh từ Mini PC hay không.
-// Không đụng tới gói tin telemetry (giữ nguyên protocol).
-void printDiagnostics() {
-  static uint32_t seen_packet_ms = 0;
-  static uint32_t rx_packets = 0;
-
-  if (last_packet_ms != seen_packet_ms) {
-    seen_packet_ms = last_packet_ms;
-    rx_packets++;
-  }
-
-  Serial.printf(
-      "[DIAG] spd=%.2f/%.2fkm/h dev=%d esc=%d steer=%d rx=%lu emg=%d brk=%d\n",
-      car.cur_spd, car.target_spd, car.raw_dev, car.esc_cmd, car.steer_cmd,
-      (unsigned long)rx_packets, car.emg_stop ? 1 : 0, car.braking ? 1 : 0);
-}
-
 void setup() {
-  // Mở rộng bộ đệm UART ngay từ đầu để hấp thụ dồn ứ dữ liệu (burst) từ MiniPC
   Serial.setRxBufferSize(RX_BUF_SIZE);
   Serial.setTxBufferSize(TX_BUF_SIZE);
   Serial.begin(UART_BAUD);
 
-  // Xin cấp phát Timer nội bộ của ESP32 để phát xung PWM mượt nhất cho
-  // Servo/Motor
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
 
-  // Cài đặt chân I/O
   pinMode(PIN_HALL, INPUT_PULLUP);
   pinMode(PIN_TURN_L, OUTPUT);
   pinMode(PIN_TURN_R, OUTPUT);
@@ -742,7 +611,6 @@ void setup() {
   digitalWrite(PIN_TURN_R, LOW);
   digitalWrite(PIN_BRAKE, LOW);
 
-  // Khởi tạo thiết bị chấp hành (Trả thẳng lái, Số Mo)
   servo_steer.setPeriodHertz(50);
   servo_steer.attach(PIN_STEER, 500, 2400);
   servo_steer.write(STEER_CENTER);
@@ -750,43 +618,33 @@ void setup() {
   motor_esc.attach(PIN_ESC, 1000, 2000);
   motor_esc.write(ESC_NEUTRAL);
 
-  // Bật ngắt phần cứng cho cảm biến nam châm bánh xe
   attachInterrupt(digitalPinToInterrupt(PIN_HALL), isrHall, RISING);
 
-  // Chuẩn bị biến thời gian
   last_packet_ms = millis();
   next_pid_us = micros() + PID_DT_US;
   pid_timer_init = true;
 }
 
 void loop() {
-  // Bước 1: Quét đọc dữ liệu UART bằng Máy trạng thái (Không chẹn CPU)
+  // 1. Quét đọc UART (Non-blocking)
   readUART();
 
-  // Bước 2: Đo đạc vận tốc bánh xe (Có thuật toán Adaptive nội suy xe chạy
-  // chậm)
+  // 2. Đo vận tốc Hall
   calcSpeed();
 
-  // Bước 3: Đánh giá An toàn mạng lưới & Môi trường để kích hoạt phanh
+  // 3. Đánh giá an toàn & phanh
   checkSafety();
 
-  // Bước 4: Chạy thuật toán PID với nhịp điệu chính xác 100 Hz
+  // 4. PID nhịp 100Hz
   runPID(micros());
 
-  // Bước 5: Cập nhật bóng đèn tín hiệu ngoại vi
+  // 5. Cập nhật đèn
   updateLights();
 
-  // Bước 6: Phản hồi thông số về máy tính (50 Hz)
+  // 6. Phản hồi Telemetry 50Hz (Chỉ gửi frame nhị phân, không log text)
   static uint32_t last_tx = millis();
   if (millis() - last_tx >= TELEM_DT_MS) {
     sendTelemetry();
     last_tx = millis();
-  }
-
-  // Bước 7: Log chẩn đoán 1 Hz
-  static uint32_t last_diag = millis();
-  if (millis() - last_diag >= 1000) {
-    printDiagnostics();
-    last_diag = millis();
   }
 }

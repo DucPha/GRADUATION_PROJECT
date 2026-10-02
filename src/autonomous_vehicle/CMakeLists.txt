@@ -52,4 +52,41 @@ install(DIRECTORY rviz/
 	DESTINATION share/${PROJECT_NAME}/rviz
 )
 
+# ============================================================================
+# TESTS
+# ============================================================================
+if(BUILD_TESTING)
+	find_package(ament_cmake_gtest REQUIRED)
+
+	ament_add_gtest(test_lidar_module
+		test/test_lidar_module.cpp
+		src/lidar_module.cpp
+	)
+	target_include_directories(test_lidar_module PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/include
+		${OpenCV_INCLUDE_DIRS}
+	)
+	target_link_libraries(test_lidar_module ${OpenCV_LIBS})
+	ament_target_dependencies(test_lidar_module sensor_msgs)
+
+	# ------------------------------------------------------------------------
+	# Bench đo FPS end-to-end của pipeline lane, CẦN camera thật.
+	# Không dùng ament_add_gtest vì phụ thuộc phần cứng, chạy tay:
+	#     ros2 run autonomous_vehicle test_camera_lane 20 30
+	# (20 = giây, 30 = FPS mục tiêu)
+	# ------------------------------------------------------------------------
+	add_executable(test_camera_lane
+		test/test_camera_lane.cpp
+		src/camera_lane.cpp
+	)
+	target_include_directories(test_camera_lane PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/include
+		${OpenCV_INCLUDE_DIRS}
+	)
+	target_link_libraries(test_camera_lane ${OpenCV_LIBS})
+	find_package(Threads REQUIRED)
+	target_link_libraries(test_camera_lane Threads::Threads)
+	install(TARGETS test_camera_lane DESTINATION lib/${PROJECT_NAME})
+endif()
+
 ament_package()

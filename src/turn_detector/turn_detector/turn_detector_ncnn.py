@@ -21,16 +21,22 @@ except Exception:
     from ncnn_vulkan import ncnn  # type: ignore
 
 # Default model paths (can be overridden by ROS parameters)
-DEFAULT_MODEL_PARAM = os.path.expanduser("~/models/turn_lr_ncnn_model/model.ncnn.param")
-DEFAULT_MODEL_BIN = os.path.expanduser("~/models/turn_lr_ncnn_model/model.ncnn.bin")
+# Ưu tiên: biến môi trường TURN_MODEL_DIR -> package share -> fallback cũ
+DEFAULT_TURN_MODEL_DIR = os.environ.get(
+    "TURN_MODEL_DIR",
+    os.path.expanduser("~/models/turn_lr_ncnn_model")
+)
+DEFAULT_MODEL_PARAM = os.path.join(DEFAULT_TURN_MODEL_DIR, "model.ncnn.param")
+DEFAULT_MODEL_BIN = os.path.join(DEFAULT_TURN_MODEL_DIR, "model.ncnn.bin")
 
 INPUT_BLOB = "in0"
 OUTPUT_BLOB = "out0"
 
-# Unique topics for this node (avoid collision with traffic_light_detector)
-TOPIC_IMAGE = "/turn_detector/image_debug"
-TOPIC_DECISION = "/turn_detector/decision"
-TOPIC_INPUT = "/image_raw"
+# Topic mặc định. Tất cả đều khai báo được qua ROS parameter (xem __init__)
+# để đổi tên không phải sửa code.
+DEFAULT_TOPIC_IMAGE = "/turn_detector/image_debug"
+DEFAULT_TOPIC_DECISION = "/turn_detector/decision"
+DEFAULT_TOPIC_INPUT = "/image_raw"
 
 
 def letterbox_bgr(img, new_size=320, color=(114, 114, 114)):
@@ -72,14 +78,27 @@ class TurnDetectorNCNNVulkan(Node):
         self.model_ready = False
 
         self.bridge = CvBridge()
-        self.sub = self.create_subscription(Image, TOPIC_INPUT, self.image_callback, 10)
-        self.pub_decision = self.create_publisher(String, TOPIC_DECISION, 10)
-        self.pub_img = self.create_publisher(Image, TOPIC_IMAGE, 10)
+
+        # Topic là tham số: trước đây viết cứng trong module nên không đổi
+        # được từ launch, và node C++ cũng chỉ subscribe đúng tên mặc định.
+        topic_input = self.declare_parameter("image_topic", DEFAULT_TOPIC_INPUT).value
+        topic_decision = self.declare_parameter("decision_topic", DEFAULT_TOPIC_DECISION).value
+        topic_image = self.declare_parameter("debug_image_topic", DEFAULT_TOPIC_IMAGE).value
+
+        self.sub = self.create_subscription(Image, topic_input, self.image_callback, 10)
+        self.pub_decision = self.create_publisher(String, topic_decision, 10)
+        self.pub_img = self.create_publisher(Image, topic_image, 10)
+
         self.model_param = self.declare_parameter("model_param", DEFAULT_MODEL_PARAM).value
         self.model_bin = self.declare_parameter("model_bin", DEFAULT_MODEL_BIN).value
 
         self.history = deque(maxlen=5)
         self.last_frame = None
+        # Định danh frame để không infer lại cùng một ảnh nhiều lần: nếu không,
+        # một mũi tên duy nhất bị "bỏ phiếu" nhiều lần và voting 3/5 trở nên vô
+        # nghĩa vì cả 5 phiếu đến từ một frame duy nhất.
+        self.frame_seq = 0
+        self.last_inferred_seq = -1
 
         # Parameters
         self.declare_parameter("infer_hz", 30.0)
@@ -108,10 +127,13 @@ class TurnDetectorNCNNVulkan(Node):
 
         self.logged_once = False
         self.last_log_ns = 0
+        self._last_published_decision = None
+        self._last_decision_pub_ns = 0
+        self.DECISION_HEARTBEAT_NS = 500_000_000   # 0.5s, nhỏ hơn ai_timeout_s (2s)
 
         self.get_logger().info("TurnDetector NCNN Vulkan STARTED (iGPU/Vulkan)")
         self.get_logger().info(f"  model_param = {self.model_param}")
-        self.get_logger().info(f"  decision topic = {TOPIC_DECISION}")
+        self.get_logger().info(f"  decision topic = {topic_decision}")
         self.timer = self.create_timer(1.0 / self.infer_hz, self.process_latest)
 
     def _init_ncnn(self):
@@ -142,9 +164,12 @@ class TurnDetectorNCNNVulkan(Node):
 
     def image_callback(self, msg: Image):
         try:
-            self.last_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
+            return
+        self.frame_seq += 1
+        self.last_frame = frame
 
     def detect_arrow_direction(self, crop):
         """Detect arrow direction using contour analysis."""
@@ -230,10 +255,17 @@ class TurnDetectorNCNNVulkan(Node):
             cv2.putText(frame, "TURN RIGHT", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
 
-        self.pub_decision.publish(String(data=decision))
         self.pub_img.publish(self.bridge.cv2_to_imgmsg(frame, "bgr8"))
 
+        # Chỉ phát String khi quyết định đổi; vẫn heartbeat 0.5s để watchdog
+        # `ai_timeout_s` của fusion_viz_node không xoá quyết định còn hợp lệ.
         now_ns = self.get_clock().now().nanoseconds
+        if (decision != self._last_published_decision or
+                (now_ns - self._last_decision_pub_ns) >= self.DECISION_HEARTBEAT_NS):
+            self.pub_decision.publish(String(data=decision))
+            self._last_published_decision = decision
+            self._last_decision_pub_ns = now_ns
+
         if now_ns - self.last_log_ns > 1_000_000_000:
             self.last_log_ns = now_ns
             l = self.history.count("left")
@@ -247,6 +279,13 @@ class TurnDetectorNCNNVulkan(Node):
 
         if self.last_frame is None:
             return
+
+        # Chỉ xử lý frame mới. Timer 30 Hz chạy nhanh hơn tần suất ảnh vào,
+        # nên không có bước này thì cùng một frame bị infer lại nhiều lần và
+        # deque 5 phiếu đầy bằng 5 bản sao của một ảnh.
+        if self.frame_seq == self.last_inferred_seq:
+            return
+        self.last_inferred_seq = self.frame_seq
 
         frame = self.last_frame
         H, W, _ = frame.shape
