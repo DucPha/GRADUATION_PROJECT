@@ -11,11 +11,11 @@
 // [1] CẤU HÌNH CHÂN PHẦN CỨNG (PINS)
 // ============================================================================
 constexpr uint8_t PIN_STEER = 32;
-constexpr uint8_t PIN_HALL = 23;
-constexpr uint8_t PIN_TURN_L = 21;
-constexpr uint8_t PIN_TURN_R = 18;
-constexpr uint8_t PIN_BRAKE = 15;
 constexpr uint8_t PIN_ESC = 33;
+constexpr uint8_t PIN_TURN_L = 25; 
+constexpr uint8_t PIN_TURN_R = 26; 
+constexpr uint8_t PIN_BRAKE  = 27; 
+constexpr uint8_t PIN_HALL   = 4;  
 
 // ============================================================================
 // [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
@@ -34,24 +34,13 @@ constexpr int ESC_MAX_FWD = 180;
 constexpr int ESC_BRAKE = 20;
 
 constexpr float MAX_SPEED_KMH = 15.0f;
-constexpr float MAX_VALID_SPEED_KMH = 20.0f;
+constexpr float MAX_VALID_SPEED_KMH = 18.0f;
 
-constexpr float WHEEL_DIA_M = 0.090f;
-constexpr float WHEEL_CIRCUMF = PI * WHEEL_DIA_M;
-constexpr float GEAR_RATIO = 37.0f / 13.0f;
-constexpr uint8_t PULSES_PER_REV = 4;
-
-constexpr float PERIOD_TO_KMH_FACTOR = (3600000.0f * WHEEL_CIRCUMF) / (PULSES_PER_REV * GEAR_RATIO);
-constexpr uint32_t MIN_HALL_PERIOD_US = (uint32_t)(PERIOD_TO_KMH_FACTOR / MAX_VALID_SPEED_KMH);
-constexpr uint32_t MIN_HALL_PERIOD_US_NOISE = 3000;
-
-constexpr uint32_t PID_DT_US = 10000;
+constexpr uint32_t PID_DT_US = 10000;  
 constexpr uint32_t TELEM_DT_MS = 20;
 constexpr uint32_t WDOG_TIMEOUT_MS = 500;
-constexpr uint32_t BLINK_DT_MS = 500;
-constexpr uint32_t HALL_DEBOUNCE_US = 1000;
-constexpr uint32_t BRAKE_HOLD_MS = 200;
-constexpr uint32_t FRAME_TIMEOUT_US = 10000;
+constexpr uint32_t FRAME_TIMEOUT_US = 8000;
+constexpr uint32_t BRAKE_HOLD_MS = 200; // Đã bổ sung
 constexpr float STOPPED_KMH = 0.3f;
 
 // Lọc nhiễu siêu mượt cho camera
@@ -69,6 +58,7 @@ constexpr uint8_t TX_LEN = 7;
 constexpr uint32_t CPU_RX_BUDGET_US = 800; 
 constexpr uint16_t MAX_RX_PER_LOOP = 2048;
 
+// Chỉ mục vị trí dữ liệu trong gói tin (Đã bổ sung)
 constexpr uint8_t IDX_LANE_H = 2, IDX_LANE_L = 3;
 constexpr uint8_t IDX_SPEED = 4, IDX_EMG = 5, IDX_CSUM = 10;
 
@@ -92,18 +82,6 @@ struct PidState {
   float prev_err = 0.0f;
 };
 
-struct HallState {
-  volatile uint32_t last_pulse = 0;
-  volatile uint32_t period_us = 0;
-  volatile uint32_t pulse_cnt = 0;
-  volatile uint32_t sequence = 0;
-
-  uint32_t proc_pulse_us = 0;
-  uint32_t valid_period = 0;
-  float smooth_speed_kmh = 0.0f;
-  float saved_spd = 0.0f;
-};
-
 enum class RxState : uint8_t { WAIT_H1, WAIT_H2, READ_PAYLOAD };
 
 // ============================================================================
@@ -113,10 +91,6 @@ Servo servo_steer, motor_esc;
 
 CarState car;
 PidState pid_steer;
-PidState pid_speed;
-HallState hall;
-
-portMUX_TYPE hall_mux = portMUX_INITIALIZER_UNLOCKED;
 
 RxState rx_state = RxState::WAIT_H1;
 uint8_t rx_buf[RX_LEN] = {};
@@ -158,90 +132,9 @@ inline uint8_t calcXor(const uint8_t *buf, uint8_t start, uint8_t end) {
   return csum;
 }
 
-void IRAM_ATTR isrHall() {
-  uint32_t now = micros();
-  portENTER_CRITICAL_ISR(&hall_mux);
-  uint32_t dt = now - hall.last_pulse;
-  if (dt >= HALL_DEBOUNCE_US) {
-    hall.pulse_cnt = hall.pulse_cnt + 1;
-    if (hall.last_pulse != 0) {
-      hall.period_us = dt;
-      hall.sequence = hall.sequence + 1;
-    }
-    hall.last_pulse = now;
-  }
-  portEXIT_CRITICAL_ISR(&hall_mux);
-}
-
 // ============================================================================
 // [6] XỬ LÝ LÕI TÍNH TOÁN & GIAO TIẾP
 // ============================================================================
-void calcSpeed() {
-  uint32_t period = 0, last_p = 0, seq = 0;
-  static uint32_t last_seq = 0;
-
-  portENTER_CRITICAL(&hall_mux);
-  last_p = hall.last_pulse;
-  period = hall.period_us;
-  seq = hall.sequence;
-  portEXIT_CRITICAL(&hall_mux);
-
-  uint32_t now = micros();
-
-  if (seq != last_seq && period > 0) {
-    last_seq = seq;
-    if (period >= MIN_HALL_PERIOD_US_NOISE) {
-      const float raw_speed = PERIOD_TO_KMH_FACTOR / static_cast<float>(period);
-      const float safe_speed = constrain(raw_speed, 0.0f, MAX_VALID_SPEED_KMH);
-
-      float adaptive_alpha;
-      if (safe_speed < 3.0f) adaptive_alpha = 0.60f;
-      else if (safe_speed < 8.0f) adaptive_alpha = 0.40f;
-      else adaptive_alpha = 0.30f;
-
-      hall.smooth_speed_kmh = adaptive_alpha * safe_speed + (1.0f - adaptive_alpha) * hall.smooth_speed_kmh;
-      car.cur_spd = hall.smooth_speed_kmh;
-
-      hall.proc_pulse_us = last_p;
-      hall.valid_period = period;
-      hall.saved_spd = car.cur_spd;
-    }
-  }
-
-  if (hall.proc_pulse_us != 0 && hall.valid_period > 0) {
-    uint32_t elapsed = now - hall.proc_pulse_us;
-    uint32_t hold_us = constrain(hall.valid_period + (hall.valid_period / 2), 20000UL, 500000UL);
-    uint32_t decay_us = constrain(hall.valid_period * 2UL, 50000UL, 1000000UL);
-
-    if (elapsed <= hold_us) {
-      car.cur_spd = hall.saved_spd;
-    } else {
-      float decay = constrain(static_cast<float>(elapsed - hold_us) / static_cast<float>(decay_us), 0.0f, 1.0f);
-      car.cur_spd = hall.saved_spd * (1.0f - decay);
-
-      if (decay >= 1.0f) {
-        car.cur_spd = 0.0f;
-        hall.smooth_speed_kmh = 0.0f;
-      }
-    }
-  } else {
-    car.cur_spd = 0.0f;
-    hall.smooth_speed_kmh = 0.0f;
-  }
-
-  uint32_t adaptive_timeout_us = 1000000;
-  if (hall.valid_period > 0) {
-    adaptive_timeout_us = constrain(hall.valid_period * 4, 100000UL, 1000000UL);
-  }
-
-  if (last_p == 0 || (now - last_p) >= adaptive_timeout_us) {
-    car.cur_spd = 0.0f;
-    hall.smooth_speed_kmh = 0.0f;
-  }
-
-  car.cur_spd = constrain(car.cur_spd, 0.0f, MAX_VALID_SPEED_KMH);
-}
-
 void readUART() {
   uint32_t start_us = micros();
 
@@ -300,51 +193,9 @@ int getBasePWM(float spd) {
   return ESC_LUT[LUT_SIZE - 1].pwm;
 }
 
-void calcSpeedPID(float dt) {
-  if (car.target_spd < 0.5f) {
-    pid_speed.integral = pid_speed.prev_err = 0;
-    car.esc_cmd = ESC_NEUTRAL;
-    return;
-  }
-
-  int base_pwm = max(getBasePWM(car.target_spd), ESC_MIN_FWD);
-  float err = car.target_spd - car.cur_spd;
-  float max_dpwm;
-  int margin;
-
-  // PID Speed ép siêu thấp để lướt êm
-  if (car.cur_spd <= 3.58f) {
-    pid_speed.kp = 0.4f; pid_speed.ki = 0.005f; pid_speed.kd = 0.05f;
-    max_dpwm = 2.0f; margin = 1;
-  } else if (car.cur_spd <= 8.0f) {
-    pid_speed.kp = 0.3f; pid_speed.ki = 0.005f; pid_speed.kd = 0.05f;
-    max_dpwm = 2.0f; margin = 2;
-  } else {
-    pid_speed.kp = 0.2f; pid_speed.ki = 0.010f; pid_speed.kd = 0.05f;
-    max_dpwm = 3.0f; margin = 3;
-  }
-
-  float P = pid_speed.kp * err;
-
-  if (car.cur_spd > car.target_spd) pid_speed.integral *= 0.1f;
-  else pid_speed.integral += err * dt;
-  pid_speed.integral = constrain(pid_speed.integral, -5.0f, 5.0f);
-
-  float I = pid_speed.ki * pid_speed.integral;
-  float D = pid_speed.kd * (err - pid_speed.prev_err) / dt;
-  pid_speed.prev_err = err;
-
-  float total = constrain(P + I + D, -max_dpwm, max_dpwm);
-  car.esc_cmd = constrain(car.esc_cmd + (int)roundf(total), ESC_NEUTRAL, ESC_MAX_FWD);
-
-  if (err > 0.0f) car.esc_cmd = constrain(car.esc_cmd, ESC_MIN_FWD, base_pwm + margin);
-  else if (err < -0.3f && car.esc_cmd > base_pwm) car.esc_cmd = base_pwm;
-}
-
 void calcSteerPID(float dt) {
   car.smooth_dev = ALPHA_STEER * car.raw_dev + (1.0f - ALPHA_STEER) * car.smooth_dev;
 
-  // PID Steer: Kp cực thấp, triệt tiêu Ki, Kd rất cao hãm dao động
   if (car.cur_spd < 10.0f) {
     pid_steer.kp = 0.3f; pid_steer.ki = 0.0f; pid_steer.kd = 1.5f;
   } else if (car.cur_spd < 25.0f) {
@@ -365,8 +216,9 @@ void calcSteerPID(float dt) {
   float err = target_angle - STEER_CENTER;
   float P = pid_steer.kp * err;
 
-  pid_steer.integral = 0; // Tắt luôn Ki
+  pid_steer.integral = 0; 
   float I = 0.0f;
+  
   float D = pid_steer.kd * (err - pid_steer.prev_err) / dt;
   pid_steer.prev_err = err;
 
@@ -388,7 +240,9 @@ void runPID(uint32_t now) {
   constexpr float DT_SEC = PID_DT_US * 1e-6f;
 
   if (!car.emg_stop) {
-    calcSpeedPID(DT_SEC);
+    int target_pwm = getBasePWM(car.target_spd);
+    car.esc_cmd = constrain(target_pwm, ESC_MIN_FWD, ESC_MAX_FWD);
+    
     if (car.esc_cmd != last_esc) {
       motor_esc.write(car.esc_cmd);
       last_esc = car.esc_cmd;
@@ -418,7 +272,6 @@ void processBrake() {
   } else {
     if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
     car.esc_cmd = ESC_NEUTRAL;
-    pid_speed.integral = pid_speed.prev_err = 0;
     car.braking = false;
   }
 }
@@ -432,36 +285,17 @@ void checkSafety() {
     if (car.braking) {
       car.braking = false;
       if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
-      car.esc_cmd = ESC_NEUTRAL; pid_speed.integral = pid_speed.prev_err = 0;
+      car.esc_cmd = ESC_NEUTRAL; 
     }
     return;
   }
 
   if (car.braking) { processBrake(); return; }
+  
   if (car.cur_spd > STOPPED_KMH) { processBrake(); return; }
 
   if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
   car.esc_cmd = ESC_NEUTRAL;
-}
-
-// ============================================================================
-// [8] ĐIỀU KHIỂN NGOẠI VI & TELEMETRY
-// ============================================================================
-void updateLights() {
-  static uint32_t last_blink = 0;
-  static bool led_on = false;
-  uint32_t now = millis();
-
-  if (now - last_blink >= BLINK_DT_MS) { led_on = !led_on; last_blink = now; }
-
-  if (fabsf(car.smooth_dev) < BLINK_THRESH) {
-    digitalWrite(PIN_TURN_L, LOW); digitalWrite(PIN_TURN_R, LOW);
-  } else if (car.smooth_dev < -BLINK_THRESH) {
-    digitalWrite(PIN_TURN_L, led_on); digitalWrite(PIN_TURN_R, LOW);
-  } else {
-    digitalWrite(PIN_TURN_L, LOW); digitalWrite(PIN_TURN_R, led_on);
-  }
-  digitalWrite(PIN_BRAKE, (car.target_spd < 0.5f || car.emg_stop || car.braking));
 }
 
 void sendTelemetry() {
@@ -477,13 +311,17 @@ void sendTelemetry() {
 void setup() {
   Serial.setRxBufferSize(RX_BUF_SIZE);
   Serial.setTxBufferSize(TX_BUF_SIZE);
-  Serial.begin(UART_BAUD);
+  Serial.begin(UART_BAUD); 
 
-  ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(0); 
+  ESP32PWM::allocateTimer(1);
 
-  pinMode(PIN_HALL, INPUT_PULLUP);
-  pinMode(PIN_TURN_L, OUTPUT); pinMode(PIN_TURN_R, OUTPUT); pinMode(PIN_BRAKE, OUTPUT);
-  digitalWrite(PIN_TURN_L, LOW); digitalWrite(PIN_TURN_R, LOW); digitalWrite(PIN_BRAKE, LOW);
+  pinMode(PIN_TURN_L, OUTPUT); 
+  pinMode(PIN_TURN_R, OUTPUT); 
+  pinMode(PIN_BRAKE, OUTPUT);
+  digitalWrite(PIN_TURN_L, LOW); 
+  digitalWrite(PIN_TURN_R, LOW); 
+  digitalWrite(PIN_BRAKE, LOW);
 
   servo_steer.setPeriodHertz(50);
   servo_steer.attach(PIN_STEER, 500, 2400);
@@ -492,8 +330,6 @@ void setup() {
   motor_esc.attach(PIN_ESC, 1000, 2000);
   motor_esc.write(ESC_NEUTRAL);
 
-  attachInterrupt(digitalPinToInterrupt(PIN_HALL), isrHall, RISING);
-
   last_packet_ms = millis();
   next_pid_us = micros() + PID_DT_US;
   pid_timer_init = true;
@@ -501,10 +337,8 @@ void setup() {
 
 void loop() {
   readUART();
-  calcSpeed();
   checkSafety();
   runPID(micros());
-  updateLights();
 
   static uint32_t last_tx = millis();
   if (millis() - last_tx >= TELEM_DT_MS) {
