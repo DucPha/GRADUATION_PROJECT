@@ -90,6 +90,23 @@ if(BUILD_TESTING)
 	)
 	ament_target_dependencies(test_lidar_module sensor_msgs)
 
+	# obstacle_avoidance.cpp gọi set_mount_offset_deg? Không - nhưng nó dùng
+	# std::string và std::optional, không cần OpenCV. LiDAR module thì có.
+	ament_add_gtest(test_obstacle_avoidance
+		test/test_obstacle_avoidance.cpp
+		src/obstacle_avoidance.cpp
+		src/lidar_module.cpp
+	)
+	target_include_directories(test_obstacle_avoidance PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/include
+		${OpenCV_INCLUDE_DIRS}
+	)
+	target_link_libraries(test_obstacle_avoidance
+		${OpenCV_LIBS}
+		Threads::Threads
+	)
+	ament_target_dependencies(test_obstacle_avoidance sensor_msgs)
+
 	# Đây là chạy thử có phần cứng (mở camera thật, in FPS và tỉ lệ lane
 	# valid), không phải unit test nên dùng add_executable + main riêng.
 	add_executable(test_camera_lane

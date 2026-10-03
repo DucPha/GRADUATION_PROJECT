@@ -158,6 +158,13 @@ def generate_launch_description():
                               description="Góc lái bù khi nhận biển rẽ (px, dương=phải)"),
         DeclareLaunchArgument("turn_speed_x10", default_value="40",
                               description="Trần tốc độ khi nhận biển rẽ (km/h x 10)"),
+        DeclareLaunchArgument(
+            "speed_normal_x10", default_value="0",
+            description=(
+                "Tốc độ ở state NORMAL (km/h x 10). 0 = để bộ lập của "
+                "detector quyết: thẳng 85 / cua 60 / cua gấp 45. Đặt 35 để "
+                "quay lại hành vi cũ (đường thẳng cố định 3.5 km/h)"
+            )),
 
         # Watchdog (giá trị cũ hơn = phanh sớm hơn)
         DeclareLaunchArgument("camera_stale_timeout_s", default_value="1.0",
@@ -225,6 +232,8 @@ def generate_launch_description():
                 LaunchConfiguration("turn_blend_px"), value_type=int),
             "turn_speed_x10": ParameterValue(
                 LaunchConfiguration("turn_speed_x10"), value_type=int),
+            "speed_normal_x10": ParameterValue(
+                LaunchConfiguration("speed_normal_x10"), value_type=int),
         }],
         arguments=["--ros-args", "--log-level", LaunchConfiguration("log_level")],
         respawn=True,

@@ -58,7 +58,13 @@ struct BypassCommand {
     BypassCommand()
         : state(BypassState::NORMAL),
           state_name("NORMAL"),
-          speed_control(115),
+          // Mặc định DỪNG, không phải 11.5 km/h. Giá trị 115 của bản cũ là
+          // một state đã bị xoá; nếu có bất kỳ đường nào quên gán speed thì
+          // xe lập tức chạy 11.5 km/h. Mặc định 0 nghĩa là "chưa có quyết
+          // định" -> an toàn.
+          //
+          // Dùng literal 0 vì khối hằng số tốc độ nằm DƯỚI struct này.
+          speed_control(0),
           dev_final_px(0),
           emergency_stop(false),
           camera_stale(false),
@@ -68,6 +74,34 @@ struct BypassCommand {
 // Ngưỡng hạn dữ liệu (ms). Vượt ngưỡng -> lái xe theo chế độ an toàn.
 static constexpr unsigned long CAMERA_STALE_MS = 200;
 static constexpr unsigned long LIDAR_STALE_MS = 500;
+
+// ============================================================================
+// TỐC ĐỘ YÊU CẦU
+// ============================================================================
+// NORMAL lấy tốc độ do CameraLane lập (STRAIGHT 85 / CURVE 60 / SHARP 45,
+// tức 8.5 / 6.0 / 4.5 km/h) thay vì hằng số cứng. Bản cũ gán cứng 35 cho
+// NORMAL và 30 cho mọi state lách, nên bộ lập tốc độ trong detector được
+// tính ra rồi bỏ không: xe chạy 3.5 km/h vào cua gấp y hệt đường thẳng.
+//
+// Các state có ràng buộc riêng (đang né vật cản, phanh, trả làn) giữ nguyên
+// giá trị cũ - khi đang né vật cản thì tốc độ phải do logic an toàn quyết,
+// không phải detector.
+
+static constexpr uint8_t SPEED_HOLD_X10 = 0;      // dừng / phanh
+static constexpr uint8_t SPEED_BYPASS_X10 = 30;   // né tránh, trả làn
+
+// Detector mất lane -> target_speed_x10 = 0. KHÔNG dừng: xe còn đang trong làn,
+// chỉ là detector chập chờn. Dừng sẽ giật xe mỗi lần detector mất vài frame;
+// LiDAR vẫn lo phần né vật cản.
+static constexpr uint8_t SPEED_NO_LANE_X10 = 30;
+
+// Trần cho NORMAL, khớp SPEED_STRAIGHT_X10 của detector.
+static constexpr uint8_t SPEED_NORMAL_MAX_X10 = 85;
+
+// Ghi đè tốc độ NORMAL bằng tham số ROS (0 = dùng tốc độ detector). Giữ để
+// chỉnh ngay trên xe khi hằng số bánh chưa đo thật: đặt 35 là quay lại
+// hành vi cũ, đặt 0 là để detector quyết hoàn toàn.
+static uint8_t g_speed_normal_override_x10 = 0;
 
 // OBSTACLE AVOIDANCE CLASS
 class ObstacleAvoidance {
@@ -80,9 +114,18 @@ public:
                          bool is_dual_lane,
                          const std::string& traffic_light_decision,
                          float current_speed_kmh,
+                         uint8_t lane_target_speed_x10,
                          bool camera_stale = false,
                          bool lidar_stale = false);
 BypassState get_current_state() const { return current_state_; }
+
+    // Ghi đè tốc độ NORMAL (km/h x 10). 0 = dùng tốc độ detector.
+    static void set_speed_normal_override(uint8_t x10) {
+        g_speed_normal_override_x10 = x10;
+    }
+    static uint8_t get_speed_normal_override() {
+        return g_speed_normal_override_x10;
+    }
 
     // Tốc độ yêu cầu gửi ESP32 ở lượt update() gần nhất (km/h × 10).
     // Node điều khiển dùng giá trị này để gửi serial và dashboard dùng để
@@ -107,6 +150,10 @@ private:
     float current_speed_kmh_;
     float speed_margin_cm_;
 
+    // Tốc độ detector yêu cầu ở lượt update() gần nhất (km/h x 10), dùng cho
+    // NORMAL. 0 = detector không có lane hợp lệ.
+    uint8_t lane_speed_x10_ = 0;
+
     // Lưu lần gọi gần nhất để các handler dùng chung vẫn ép được an toàn
     bool camera_stale_ = false;
     bool lidar_stale_ = false;
@@ -120,6 +167,7 @@ private:
                               bool is_dual_lane,
                               const std::string& traffic_light_decision,
                               float current_speed_kmh,
+                              uint8_t lane_target_speed_x10,
                               bool camera_stale,
                               bool lidar_stale);
 
@@ -140,6 +188,11 @@ private:
     // Helper
     void change_state(BypassState new_state);
     unsigned long get_state_elapsed_ms() const;
+
+    // Tốc độ dùng cho NORMAL, lấy từ bộ lập của detector. Trả
+    // SPEED_NO_LANE_X10 nếu detector không có lane hợp lệ, và luôn kẹp ở
+    // SPEED_NORMAL_MAX_X10.
+    uint8_t normal_speed_x10() const;
 };
 
 #endif // OBSTACLE_AVOIDANCE_HPP

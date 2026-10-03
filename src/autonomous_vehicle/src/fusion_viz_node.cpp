@@ -310,6 +310,13 @@ public:
         std::string serial_port = declare_parameter("serial_port", "/dev/ttyUSB0");
         serial_ = std::make_unique<SerialESP32>(serial_port);
 
+        // Tốc độ NORMAL. 0 = để bộ lập của detector quyết (STRAIGHT 85 /
+        // CURVE 60 / SHARP 45). Đặt 35 để quay lại hành vi cũ khi cần đo
+        // lại hằng số bánh.
+        ObstacleAvoidance::set_speed_normal_override(
+            static_cast<uint8_t>(std::max(
+                0, std::min(255, declare_parameter("speed_normal_x10", 0)))));
+
         RCLCPP_INFO(get_logger(), "Waiting 2s for ESP32 to boot...");
         std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
@@ -555,9 +562,14 @@ private:
         const bool is_dual_lane = has_cam && lo.is_dual_lane;
         const float dominant_slope = has_cam ? lo.curvature : 0.0f;
 
+        // Tốc độ detector yêu cầu (km/h x 10). 0 khi detector không có lane hợp lệ,
+        // lúc đó ObstacleAvoidance tự dùng SPEED_NO_LANE_X10.
+        const uint8_t lane_speed_x10 = has_cam ? lo.target_speed_x10 : 0;
+
         const BypassCommand bypass_cmd = obstacle_avoidance_.update(
             last_lidar_, deviation, dominant_slope, is_dual_lane,
             traffic_light_decision_, current_speed,
+            lane_speed_x10,
             camera_stale, lidar_stale);
 
         bypass_state_ = bypass_cmd.state;
@@ -772,10 +784,14 @@ if (!has_cam || camera_stale) return;
         root["oa"]["state"] = bypass_state_name(state);
         root["oa"]["dev"] = dev_final;
         root["oa"]["speed"] = static_cast<int>(oa.get_speed_command());
+        // Tốc độ thực sự gửi đi, km/h. Giá trị /10 nhanh chóng khó đọc khi
+        // so sánh với lane.speed_kmh và esp.v trên cùng dashboard.
+        root["oa"]["speed_kmh"] = static_cast<double>(oa.get_speed_command()) / 10.0;
         root["oa"]["estop"] = (state == BypassState::EMERGENCY_STOP);
         root["oa"]["camera_stale"] = camera_stale;
         root["oa"]["lidar_stale"] = lidar_stale;
         root["oa"]["margin_cm"] = oa.get_speed_margin_cm();
+        root["oa"]["speed_override"] = static_cast<int>(ObstacleAvoidance::get_speed_normal_override());
 
         root["esp"]["ok"] = serial_ok;
         root["esp"]["valid"] = esp_fb.valid;

@@ -2,6 +2,7 @@
 #include "obstacle_avoidance.hpp"
 #include "lidar_module.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -102,11 +103,13 @@ BypassCommand ObstacleAvoidance::update(const LidarStatus& lidar,
                                         bool is_dual_lane,
                                         const std::string& traffic_light_decision,
                                         float current_speed_kmh,
+                                        uint8_t lane_target_speed_x10,
                                         bool camera_stale,
                                         bool lidar_stale) {
     const BypassCommand cmd = update_impl(
         lidar, dev_px, dominant_slope, is_dual_lane,
-        traffic_light_decision, current_speed_kmh, camera_stale, lidar_stale);
+        traffic_light_decision, current_speed_kmh, lane_target_speed_x10,
+        camera_stale, lidar_stale);
 
     // Ghi lại sau khi đã đi qua toàn bộ các nhánh con. Nhiều nhánh return
     // sớm (lidar_stale, camera_stale) nên ghi trong từng handler dễ sót,
@@ -121,12 +124,14 @@ BypassCommand ObstacleAvoidance::update_impl(const LidarStatus& lidar,
                                         bool is_dual_lane,
                                         const std::string& traffic_light_decision,
                                         float current_speed_kmh,
+                                        uint8_t lane_target_speed_x10,
                                         bool camera_stale,
                                         bool lidar_stale) {
     current_speed_kmh_ = current_speed_kmh;
     camera_stale_ = camera_stale;
     lidar_stale_ = lidar_stale;
     speed_margin_cm_ = 0.0f;
+    lane_speed_x10_ = lane_target_speed_x10;
 
     if (!std::isfinite(current_speed_kmh)) current_speed_kmh = 0.0f;
 
@@ -220,7 +225,7 @@ BypassCommand ObstacleAvoidance::handle_lidar_stale(int16_t dev_px) {
     BypassCommand cmd;
     cmd.state = BypassState::EMERGENCY_STOP;
     cmd.state_name = "EMERGENCY_STOP";
-    cmd.speed_control = 0;
+    cmd.speed_control = SPEED_HOLD_X10;
     cmd.dev_final_px = dev_px;
     cmd.emergency_stop = true;
     cmd.lidar_stale = true;
@@ -239,7 +244,7 @@ BypassCommand ObstacleAvoidance::handle_camera_stale(const LidarStatus& lidar) {
     if (obstacle_close) {
         cmd.state = BypassState::SLOW_DOWN;
         cmd.state_name = "SLOW_DOWN";
-        cmd.speed_control = 30;
+        cmd.speed_control = SPEED_BYPASS_X10;
         cmd.dev_final_px = 0;
         cmd.emergency_stop = false;
         return cmd;
@@ -249,17 +254,28 @@ BypassCommand ObstacleAvoidance::handle_camera_stale(const LidarStatus& lidar) {
     cmd.state_name = current_state_ == BypassState::NORMAL
         ? "NORMAL" : current_state_ == BypassState::EMERGENCY_STOP
             ? "EMERGENCY_STOP" : "CAMERA_STALE";
-    cmd.speed_control = 0;
+    cmd.speed_control = SPEED_HOLD_X10;
     cmd.dev_final_px = 0;
     cmd.emergency_stop = current_state_ == BypassState::EMERGENCY_STOP;
     return cmd;
+}
+
+// Tốc độ NORMAL do detector lập. Ba nhánh:
+//   - có lane + tốc độ hợp lệ -> dùng của detector (đã có sẵn EMA + state
+//     machine STRAIGHT/CURVE/SHARP bên trong CameraLane).
+//   - detector mất lane -> SPEED_NO_LANE_X10, lái thẳng, không dừng.
+//   - detector trả về thứ lạ (0 khi có lane, hoặc > trần) -> kẹp về trần.
+uint8_t ObstacleAvoidance::normal_speed_x10() const {
+    if (g_speed_normal_override_x10 > 0) return g_speed_normal_override_x10;
+    if (lane_speed_x10_ == 0) return SPEED_NO_LANE_X10;
+    return std::min<uint8_t>(lane_speed_x10_, SPEED_NORMAL_MAX_X10);
 }
 
 BypassCommand ObstacleAvoidance::handle_normal(const LidarStatus& lidar, int16_t dev_px) {
     BypassCommand cmd;
     cmd.state = BypassState::NORMAL;
     cmd.state_name = "NORMAL";
-    cmd.speed_control = 35;
+    cmd.speed_control = normal_speed_x10();
     cmd.dev_final_px = dev_px;
     cmd.emergency_stop = false;
 
@@ -295,7 +311,7 @@ BypassCommand ObstacleAvoidance::handle_slow_down(const LidarStatus& lidar,
     BypassCommand cmd;
     cmd.state = BypassState::SLOW_DOWN;
     cmd.state_name = "SLOW_DOWN";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_BYPASS_X10;
     cmd.dev_final_px = dev_px;
     cmd.emergency_stop = false;
 
@@ -324,7 +340,7 @@ BypassCommand ObstacleAvoidance::handle_detect_bypass_side(const LidarStatus& li
     BypassCommand cmd;
     cmd.state = BypassState::DETECT_BYPASS_SIDE;
     cmd.state_name = "DETECT_BYPASS_SIDE";
-    cmd.speed_control = 0;
+    cmd.speed_control = SPEED_HOLD_X10;
     cmd.dev_final_px = 0;
     cmd.emergency_stop = false;
 
@@ -358,7 +374,7 @@ BypassCommand ObstacleAvoidance::handle_swerve_left(const LidarStatus& lidar) {
     BypassCommand cmd;
     cmd.state = BypassState::SWERVE_LEFT;
     cmd.state_name = "SWERVE_LEFT";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_SWERVE_X10;
     cmd.dev_final_px = -60;
     cmd.emergency_stop = false;
 
@@ -395,7 +411,7 @@ BypassCommand ObstacleAvoidance::handle_swerve_right(const LidarStatus& lidar) {
     BypassCommand cmd;
     cmd.state = BypassState::SWERVE_RIGHT;
     cmd.state_name = "SWERVE_RIGHT";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_SWERVE_X10;
     cmd.dev_final_px = 60;
     cmd.emergency_stop = false;
 
@@ -433,7 +449,7 @@ BypassCommand ObstacleAvoidance::handle_bypass_left(const LidarStatus& lidar) {
     BypassCommand cmd;
     cmd.state = BypassState::BYPASS_LEFT;
     cmd.state_name = "BYPASS_LEFT";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_BYPASS_X10;
     cmd.dev_final_px = 35;
     cmd.emergency_stop = false;
 
@@ -502,7 +518,7 @@ BypassCommand ObstacleAvoidance::handle_bypass_right(const LidarStatus& lidar) {
     BypassCommand cmd;
     cmd.state = BypassState::BYPASS_RIGHT;
     cmd.state_name = "BYPASS_RIGHT";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_BYPASS_X10;
     cmd.dev_final_px = -35;
     cmd.emergency_stop = false;
 
@@ -570,7 +586,7 @@ BypassCommand ObstacleAvoidance::handle_return_lane_left(const LidarStatus& lida
     BypassCommand cmd;
     cmd.state = BypassState::RETURN_LANE_LEFT;
     cmd.state_name = "RETURN_LANE_LEFT";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_RETURN_X10;
     cmd.dev_final_px = -80;
     cmd.emergency_stop = false;
 
@@ -598,7 +614,7 @@ BypassCommand ObstacleAvoidance::handle_return_lane_right(const LidarStatus& lid
     BypassCommand cmd;
     cmd.state = BypassState::RETURN_LANE_RIGHT;
     cmd.state_name = "RETURN_LANE_RIGHT";
-    cmd.speed_control = 30;
+    cmd.speed_control = SPEED_RETURN_X10;
     cmd.dev_final_px = 80;
     cmd.emergency_stop = false;
 
@@ -627,7 +643,7 @@ BypassCommand ObstacleAvoidance::handle_emergency_stop(const LidarStatus& lidar,
     BypassCommand cmd;
     cmd.state = BypassState::EMERGENCY_STOP;
     cmd.state_name = "EMERGENCY_STOP";
-    cmd.speed_control = 0;
+    cmd.speed_control = SPEED_HOLD_X10;
     cmd.dev_final_px = dev_px;
     cmd.emergency_stop = true;
 
