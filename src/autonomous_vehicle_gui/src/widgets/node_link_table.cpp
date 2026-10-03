@@ -1,6 +1,9 @@
 #include "widgets/node_link_table.hpp"
 
+#include <QFont>
 #include <QPainter>
+
+#include <algorithm>
 
 #include "theme.hpp"
 

@@ -2,12 +2,18 @@
 
 #include <QApplication>
 #include <QDateTime>
-#include <QKeyEvent>
-#include <QSplitter>
-#include <QVBoxLayout>
 #include <QGridLayout>
-#include <QWidget>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QPainter>
+#include <QSplitter>
 #include <QTime>
+#include <QVariant>
+#include <QVBoxLayout>
+#include <QWidget>
+
+#include <cmath>
+#include <sstream>
 
 #include <json/json.h>
 
@@ -39,7 +45,7 @@ static QString gets(const Json::Value& v, const std::string& path, const QString
 static bool getb(const Json::Value& v, const std::string& path, bool d) {
     QVariant q = getj(v, path); return q.isValid() ? q.toBool() : d;
 }
-static QColor linkColor(bool ok) { return ok ? Theme::green() : (ok ? Theme::green() : Theme::gray()); } // không dùng
+static bool cameraStale(const Json::Value& v) { return getb(v, "lane.stale", true); }
 static QColor stateColor(const QString& s) {
     QString u = s.toUpper();
     if (u == "NORMAL") return Theme::green();
@@ -146,17 +152,15 @@ DashboardWindow::DashboardWindow(DashboardNode* node, QWidget* parent)
     root->setStretchFactor(bot,2);
 }
 
-void DashboardWindow::setDemoMode(bool demo){ demo_=demo; if (header_){} }
-
-// forward
-static bool cameraStale(const Json::Value& v,double t){ return getb(v,"lane.stale",true); }
+void DashboardWindow::setDemoMode(bool demo){ demo_=demo; }
 
 void DashboardWindow::updateStatus(const QString& json){
     Json::Value v;
     Json::CharReaderBuilder b; std::string e; std::istringstream s(json.toStdString());
     if (!Json::parseFromStream(b,s,&v,&e)) return;
-    const double t = elapsed_.elapsed()/1000.0;
-    tLast_ = t;
+    const double t = elapsed_.elapsed() / 1000.0;
+    (void)t;  // giữ symbol nếu sau này dùng; tLast_ vẫn cập nhật
+    tLast_ = elapsed_.elapsed() / 1000.0;
 
     // LiDAR
     bool lok = getb(v,"lidar.ok",false);
@@ -202,14 +206,15 @@ void DashboardWindow::updateStatus(const QString& json){
     QString ttn = gets(v,"ai.turn","NONE");  pAi_->setValue("turn",  ttn,  ttn=="NONE"?Theme::gray():Theme::accent());
 
     // trend
-    double trel = t - (t>10?10:0); // 10s window approx
+    const double tlast = elapsed_.elapsed() / 1000.0;
+    double trel = tlast - (tlast > 10.0 ? 10.0 : 0.0);  // 10s window approx
     pidPlot_->addPoint(trel, getd(v,"pid.sp",getd(v,"esp.v",0)), getd(v,"pid.pv",getd(v,"esp.v",0)));
     steerPlot_->addPoint(trel, getd(v,"lane.dev",0), getd(v,"oa.dev",0));
 
     // link
     QVector<NodeLinkTable::Row> rows(5);
     rows[0]={"LIDAR", llive?QString::number(getd(v,"lidar.fps",0),'f',0)+" Hz":"--", llive?"ONLINE":"LOST", llive?Theme::green():(getd(v,"lidar.age_ms",1e9)<500?Theme::amber():Theme::red())};
-    rows[1]={"CAMERA", lv?QString::number(getd(v,"lane.fps",0),'f',1):"--", lv?"ONLINE":(cameraStale(v,t)?"STALE":"LOST"), lv?Theme::green():(cameraStale(v,t)?Theme::amber():Theme::red())};
+    rows[1]={"CAMERA", lv?QString::number(getd(v,"lane.fps",0),'f',1):"--", lv?"ONLINE":(cameraStale(v)?"STALE":"LOST"), lv?Theme::green():(cameraStale(v)?Theme::amber():Theme::red())};
     rows[2]={"ESP32", eok?QString::number(getd(v,"esp.v",0),'f',1)+" km/h":"--", eok?"CONNECTED":"FAIL", eok?Theme::green():Theme::red()};
     rows[3]={"TRAFFIC LIGHT","--", gets(v,"ai.light","NONE")=="NONE"?"IDLE":"ACTIVE", gets(v,"ai.light","NONE")=="NONE"?Theme::gray():Theme::green()};
     rows[4]={"TURN DETECTOR","--", gets(v,"ai.turn","NONE")=="NONE"?"IDLE":"ACTIVE", gets(v,"ai.turn","NONE")=="NONE"?Theme::gray():Theme::green()};
@@ -221,7 +226,6 @@ void DashboardWindow::updateStatus(const QString& json){
     pSys_->setValue("age", QString::number(getd(v,"lidar.age_ms",getd(v,"lane.age_ms",0)),'f',0)+" ms");
     pSys_->setValue("up", QTime(0,0,0).addMSecs(elapsed_.elapsed()).toString("hh:mm:ss"));
 }
-static bool cameraStale(const Json::Value& v,double t){ return getb(v,"lane.stale",true); }
 void DashboardWindow::updateLink(int ok3){ header_->setLink(QString("LINK  %1/3").arg(ok3), ok3==3?Theme::greenLight():ok3==0?Theme::redLight():Theme::amberLight()); }
 void DashboardWindow::updateRaw(const QPixmap& pm){ imgRaw_->setPixmap(pm); }
 void DashboardWindow::updateVis(const QPixmap& pm){ imgVis_->setPixmap(pm); }

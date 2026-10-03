@@ -14,6 +14,12 @@ find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Threads REQUIRED)
 
+# fusion_viz_node.cpp dùng jsoncpp để dựng JSON trạng thái. Không có
+# find_package(jsoncpp) thì các symbol Json::Value::*, Json::FastWriter vẫn
+# được compile nhưng không có lib để link -> undefined reference.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
+
 add_executable(autonomous_vehicle_node
 	src/camera_lane.cpp
 	src/fusion_viz_node.cpp
@@ -40,6 +46,7 @@ ament_target_dependencies(autonomous_vehicle_node
 target_link_libraries(autonomous_vehicle_node
 	${OpenCV_LIBS}
 	Threads::Threads
+	PkgConfig::JSONCPP
 )
 
 install(TARGETS autonomous_vehicle_node
@@ -57,35 +64,50 @@ install(DIRECTORY rviz/
 
 ament_export_include_directories(include)
 ament_export_dependencies(rclcpp sensor_msgs std_msgs builtin_interfaces cv_bridge)
-ament_package()
 
 # ============================================================================
 # TESTS
+#
+# Khối này phải khai trước ament_package() và phải truyền include của
+# package: cả header đều #include <opencv2/opencv.hpp> nên thiếu
+# ${CMAKE_CURRENT_SOURCE_DIR}/include là fail ngay ở bước compile.
 # ============================================================================
 if(BUILD_TESTING)
 	find_package(ament_cmake_gtest REQUIRED)
+
+	# lidar_module.hpp kéo theo opencv2/opencv.hpp -> cần cả include và lib.
 	ament_add_gtest(test_lidar_module
 		test/test_lidar_module.cpp
 		src/lidar_module.cpp
 	)
 	target_include_directories(test_lidar_module PRIVATE
-		/include
-		
+		${CMAKE_CURRENT_SOURCE_DIR}/include
+		${OpenCV_INCLUDE_DIRS}
 	)
-	target_link_libraries(test_lidar_module )
+	target_link_libraries(test_lidar_module
+		${OpenCV_LIBS}
+		Threads::Threads
+	)
 	ament_target_dependencies(test_lidar_module sensor_msgs)
+
+	# Đây là chạy thử có phần cứng (mở camera thật, in FPS và tỉ lệ lane
+	# valid), không phải unit test nên dùng add_executable + main riêng.
 	add_executable(test_camera_lane
 		test/test_camera_lane.cpp
 		src/camera_lane.cpp
 		src/lane_mask.cpp
-		src/lidar_module.cpp
 	)
 	target_include_directories(test_camera_lane PRIVATE
-		/include
-		
-		
+		${CMAKE_CURRENT_SOURCE_DIR}/include
+		${OpenCV_INCLUDE_DIRS}
 	)
-	target_link_libraries(test_camera_lane  PkgConfig::JSONCPP Threads::Threads)
-	ament_target_dependencies(test_camera_lane rclcpp sensor_msgs std_msgs cv_bridge)
-	install(TARGETS test_camera_lane DESTINATION lib/)
+	target_link_libraries(test_camera_lane
+		${OpenCV_LIBS}
+		Threads::Threads
+	)
+	install(TARGETS test_camera_lane
+		DESTINATION lib/${PROJECT_NAME}
+	)
 endif()
+
+ament_package()

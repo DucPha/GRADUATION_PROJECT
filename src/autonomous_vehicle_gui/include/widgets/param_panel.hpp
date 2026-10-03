@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QGroupBox>
+#include <QLabel>
 #include <QMap>
 #include <QString>
 #include <QVector>

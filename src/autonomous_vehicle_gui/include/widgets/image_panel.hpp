@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QColor>
 #include <QPixmap>
+#include <QString>
 #include <QWidget>
 
 // ============================================================================

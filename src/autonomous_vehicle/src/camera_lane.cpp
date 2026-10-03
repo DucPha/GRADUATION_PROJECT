@@ -16,6 +16,9 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <linux/videodev2.h>
+#if __has_include(<linux/v4l2-ctrls.h>)
+#include <linux/v4l2-ctrls.h>
+#endif
 #include <cerrno>
 #endif
 #endif
@@ -198,10 +201,12 @@ bool CameraLane::start() {
 
 #ifdef CAMERA_LANE_HAS_V4L2_CTRL
     {
+        // V4L2_EXPOSURE_AUTO (=0) BẬT auto-exposure, nên để khoá tay phải ghi
+        // V4L2_EXPOSURE_MANUAL (=1). Ghi sai giá trị thì lệnh set
+        // V4L2_CID_EXPOSURE_ABSOLUTE ngay dưới đây bị driver bỏ qua.
         bool exposure_locked =
             v4l2_set_ctrl(device_index_, V4L2_CID_EXPOSURE_AUTO,
-                          V4L2_EXPOSURE_AUTO) ||
-            v4l2_set_ctrl(device_index_, V4L2_CID_AUTO_EXPOSURE, 0);
+                          V4L2_EXPOSURE_MANUAL);
 
         int exposure_max = 0;
         if (exposure_locked &&

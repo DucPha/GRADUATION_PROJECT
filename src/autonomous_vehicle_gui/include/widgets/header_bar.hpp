@@ -1,7 +1,9 @@
 #pragma once
 
-#include <QWidget>
+#include <QColor>
 #include <QLabel>
+#include <QString>
+#include <QWidget>
 
 // ============================================================================
 // HEADER BAR

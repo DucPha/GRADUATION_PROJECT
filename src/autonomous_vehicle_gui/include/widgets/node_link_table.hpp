@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QColor>
+#include <QString>
 #include <QVector>
 #include <QWidget>
 

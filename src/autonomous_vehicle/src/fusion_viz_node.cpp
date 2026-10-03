@@ -15,8 +15,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <exception>
+#include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -243,7 +246,7 @@ void draw_ai_detection_panel(cv::Mat& panel,
     
     for (const auto& sign : active_signs) {
         if (y + line_spacing * 2 + sign_spacing > panel.rows - 20) {
-            int remaining = active_signs.size() - sign_count;
+            const int remaining = static_cast<int>(active_signs.size()) - sign_count;
             if (remaining > 0) {
                 char buf[64];
                 snprintf(buf, sizeof(buf), "... +%d more signs", remaining);
@@ -419,8 +422,7 @@ public:
             RCLCPP_INFO(get_logger(),
                         "Control %.0f Hz | Viz %.1f Hz", control_hz, viz_hz);
         } else {
-            RCLCPP_INFO(get_logger(),
-                        "Control %.0f Hz | Viz DISABLED", control_hz);
+            RCLCPP_INFO(get_logger(), "Control %.0f Hz | Viz DISABLED", control_hz);
         }
     }
 
@@ -730,7 +732,7 @@ if (!has_cam || camera_stale) return;
         root["esp"]["valid"] = esp_fb.valid;
         root["esp"]["v"] = esp_fb.velocity_kmh;
         root["esp"]["age_ms"] =
-            static_cast<double>(serial_->get_feedback_age_ms());
+            static_cast<double>(serial_->feedback_age_ms());
 
         root["ai"]["light"] = traffic;
         root["ai"]["turn"] = turn;

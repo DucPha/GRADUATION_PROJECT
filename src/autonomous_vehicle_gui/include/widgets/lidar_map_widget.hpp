@@ -1,7 +1,9 @@
 #pragma once
 
+#include <QPainter>
 #include <QPointF>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 // ============================================================================

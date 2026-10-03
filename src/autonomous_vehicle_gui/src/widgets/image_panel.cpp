@@ -49,7 +49,7 @@ void ImagePanel::paintEvent(QPaintEvent*) {
 
     // Tiêu đề trên nền trắng.
     p.fillRect(QRect(0, 0, width(), title_h), Theme::panelBg());
-    p.setPen(accent_.darker() > 60 ? accent_.darker(140) : Theme::textPrimary());
+    p.setPen(QPen(accent_.darker(140), 1));
     p.drawText(QRect(6, 0, width() - 12, title_h), Qt::AlignVCenter | Qt::AlignLeft,
                title_);
 

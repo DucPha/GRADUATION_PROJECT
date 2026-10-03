@@ -29,6 +29,15 @@ add_executable(autonomous_vehicle_gui_node
   src/widgets/node_link_table.cpp
   src/widgets/param_panel.cpp
   src/widgets/header_bar.cpp
+  include/dashboard_node.hpp
+  include/dashboard_window.hpp
+  include/theme.hpp
+  include/widgets/header_bar.hpp
+  include/widgets/image_panel.hpp
+  include/widgets/lidar_map_widget.hpp
+  include/widgets/node_link_table.hpp
+  include/widgets/param_panel.hpp
+  include/widgets/trend_plot.hpp
 )
 
 target_include_directories(autonomous_vehicle_gui_node PRIVATE
@@ -37,10 +46,10 @@ target_include_directories(autonomous_vehicle_gui_node PRIVATE
 )
 
 target_link_libraries(autonomous_vehicle_gui_node
+  PkgConfig::JSONCPP
   Qt5::Core
   Qt5::Gui
   Qt5::Widgets
-  PkgConfig::JSONCPP
 )
 
 ament_target_dependencies(autonomous_vehicle_gui_node

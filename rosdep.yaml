@@ -37,5 +37,8 @@ packages:
     - v4l-utils
     - udev
     - usbutils
+    # JSON và GUI Qt5
+    - libjsoncpp-dev
+    - qtbase5-dev
     # Cho serial port access
     - modemmanager

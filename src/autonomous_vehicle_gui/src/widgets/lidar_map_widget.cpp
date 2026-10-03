@@ -3,6 +3,9 @@
 #include <QPainter>
 #include <QPainterPath>
 
+#include <algorithm>
+#include <cmath>
+
 #include "theme.hpp"
 
 namespace {

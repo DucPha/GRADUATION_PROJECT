@@ -1,7 +1,10 @@
 #include "widgets/trend_plot.hpp"
 
+#include <QFont>
 #include <QPainter>
+
 #include <algorithm>
+#include <cmath>
 
 #include "theme.hpp"
 
@@ -112,12 +115,11 @@ void TrendPlot::drawGrid(QPainter& p) const {
     f.setPointSize(8);
     p.setFont(f);
     for (int i=0; i<=nY; ++i) {
-        const double vy = i == 0 ? y0 : (centerZero_ && i > nY/2 ? y1 * (2.0*i/nY - 1.0) : yMinAuto_ + yr*i/nY);
         const double dy = i == 0 ? y0 : (centerZero_ ? (i <= nY/2 ? -y1 + 2*y1*i/nY : y1 - 2*y1*(nY-i)/nY) : (yMinAuto_ + yr*i/nY));
         const int y = plot.bottom() - (i * plot.height() / (double)nY);
         p.drawLine(QPoint(plot.left(), y), QPoint(plot.right(), y));
         if (centerZero_) {
-            const double vv = std::abs(dy) < 1e-6 ? 0.0 : (i <= nY/2 ? - (y1 - 2*y1*i/nY) : (y1 - 2*y1*(nY-i)/nY));
+            double vv = (i <= nY/2 ? - (y1 - 2*y1*i/nY) : (y1 - 2*y1*(nY-i)/nY));
             if (i == nY/2) vv = 0.0;
             p.setPen(Theme::textMuted());
             p.drawText(QRect(2, y-9, kLeft-4, 18), Qt::AlignRight, QString::number(std::lround(vv)));
