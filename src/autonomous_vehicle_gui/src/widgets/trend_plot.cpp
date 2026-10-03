@@ -45,20 +45,29 @@ void TrendPlot::addPoint(double tRel, double v1, double v2) {
         v2_.remove(0, v2_.size() - maxn);
     }
 
-    // Autoscale. Thêm 10% đệm để đường không dính mép.
-    if (!v1_.isEmpty() && !std::isnan(v1_.last()) && !std::isinf(v1_.last())) {
-        const double lv1 = v1_.last();
-        yMinAuto_ = std::min(yMinAuto_, lv1);
-        yMaxAuto_ = std::max(yMaxAuto_, lv1);
+    // Autoscale. Tính lại từ TRƯỜNG cấu hình và toàn bộ buffer mỗi lần,
+    // rồi mới thêm đệm 10%.
+    //
+    // Bản cũ tích luỹ trực tiếp vào yMinAuto_/yMaxAuto_ rồi lại trừ/cộng
+    // thêm 10% của chính khoảng đã đệm đó. Sau mỗi frame biên lại nới ra
+    // thêm ~10% nên trục Y trôi dần về +/- inf: sau vài chục nghìn frame đường
+    // bị nén sát đường ngang giữa và biểu đồ coi như hỏng.
+    double lo = yMin_;
+    double hi = yMax_;
+    for (double v : v1_) {
+        if (!std::isfinite(v)) continue;
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
     }
-    if (!v2_.isEmpty() && !std::isnan(v2_.last()) && !std::isinf(v2_.last())) {
-        const double lv2 = v2_.last();
-        yMinAuto_ = std::min(yMinAuto_, lv2);
-        yMaxAuto_ = std::max(yMaxAuto_, lv2);
+    for (double v : v2_) {
+        if (!std::isfinite(v)) continue;
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
     }
-    const double range = std::max(1e-3, yMaxAuto_ - yMinAuto_);
-    yMinAuto_ -= range * 0.1;
-    yMaxAuto_ += range * 0.1;
+
+    const double range = std::max(1e-3, hi - lo);
+    yMinAuto_ = lo - range * 0.1;
+    yMaxAuto_ = hi + range * 0.1;
 
     update();
 }

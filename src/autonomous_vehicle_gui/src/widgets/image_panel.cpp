@@ -1,6 +1,7 @@
 #include "widgets/image_panel.hpp"
 
 #include <QPainter>
+#include <QPixmap>
 
 #include "theme.hpp"
 
@@ -10,8 +11,10 @@ ImagePanel::ImagePanel(const QString& title, QWidget* parent)
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
-void ImagePanel::setPixmap(const QPixmap& pm) {
-    pm_ = pm;
+void ImagePanel::setImage(const QImage& img) {
+    // Chạy trên GUI thread (timer kéo từ hàng đợi) nên được tạo QPixmap ở đây.
+    // Nếu hàm này bị gọi từ callback ROS thì phải bọc QMetaObject::invokeMethod.
+    pm_ = img.isNull() ? QPixmap() : QPixmap::fromImage(img);
     update();
 }
 

@@ -34,7 +34,9 @@ using std::placeholders::_1;
 using namespace cv;
 namespace {
 
-constexpr int HEADER_H = 100;
+// Cao đủ chứa 5 dòng chữ nhỏ (ESP32 + AI dồn chung một cột) - bản cũ 100px
+// khiến dòng "Light:"/"Turn:" ở dưới bị cắt.
+constexpr int HEADER_H = 130;
 constexpr int RIGHT_PANEL_W = 400;
 
 // Chu kỳ timer từ tần số Hz. Chặn dưới 1 Hz để không tạo period = 0.
@@ -62,7 +64,11 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
         }
         return std::string(buf);
     };
-    int x1 = 15, y1 = 25;
+    // Bố cục 4 cột. Bản cũ xếp 5 cột ở x = 15 / 300 / 615 / 865 / 1050 trong
+    // khi ảnh chỉ rộng 1000 (map 600 + panel 400) => cột thứ 4 và 5 nằm ngoài
+    // mép phải, ESP32 và AI không bao giờ hiện. Nay gộp ESP32 + AI vào một
+    // cột hẹp ở mép phải.
+    int x1 = 10, y1 = 25;
     cv::putText(full_img, "LIDAR", {x1, y1}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(100, 255, 255), 2, cv::LINE_AA);
     y1 += 23;
     snprintf(text, sizeof(text), "FPS: %.0f | Status: %s", lidar_fps, lidar.has_data ? "OK" : "---");
@@ -77,7 +83,7 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
             fmt(lidar.left_min_cm).c_str(),
             fmt(lidar.right_min_cm).c_str());
     cv::putText(full_img, text, {x1, y1}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
-    int x2 = 300, y2 = 25;
+    int x2 = 250, y2 = 25;
     cv::putText(full_img, "OBSTACLE AVOIDANCE", {x2, y2}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 100), 2, cv::LINE_AA);
     y2 += 23;
 
@@ -101,7 +107,7 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     y2 += 22;
     snprintf(text, sizeof(text), "Dev Final: %d px", dev_final);
     cv::putText(full_img, text, {x2, y2}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
-    int x3 = 615, y3 = 25;
+    int x3 = 520, y3 = 25;
     cv::putText(full_img, "LANE DETECTION", {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(100, 255, 100), 2, cv::LINE_AA);
     y3 += 23;
 
@@ -120,19 +126,20 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
              (lane && lane->detector_mode == 1) ? "IPM" : "SCAN");
     cv::putText(full_img, text, {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
 
-    int x4 = 865, y4 = 25;
-    cv::putText(full_img, "ESP32", {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 100), 2, cv::LINE_AA);
-    y4 += 23;
-    snprintf(text, sizeof(text), "Status: %s", serial_ok ? "OK" : "FAIL");
-    cv::putText(full_img, text, {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
-    y4 += 22;
-    snprintf(text, sizeof(text), "V: %.1f km/h", esp_fb.valid ? esp_fb.velocity_kmh : 0.0f);
-    cv::putText(full_img, text, {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
+    // ESP32 và AI dồn chung cột 4. Dùng font nhỏ hơn vì cột hẹp ~130px.
+    int x4 = 780, y4 = 25;
+    cv::putText(full_img, "ESP32", {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(255, 200, 100), 2, cv::LINE_AA);
+    y4 += 21;
+    snprintf(text, sizeof(text), "%s", serial_ok ? "OK" : "FAIL");
+    cv::putText(full_img, text, {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(200,200,200), 1, cv::LINE_AA);
+    y4 += 20;
+    snprintf(text, sizeof(text), "V: %.1f", esp_fb.valid ? esp_fb.velocity_kmh : 0.0f);
+    cv::putText(full_img, text, {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(200,200,200), 1, cv::LINE_AA);
 
-    int x5 = 1050, y5 = 25;
-    cv::putText(full_img, "AI DETECTION", {x5, y5}, 
-                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 100, 255), 2, cv::LINE_AA);
-    y5 += 23;
+    int x5 = 895, y5 = 25;
+    cv::putText(full_img, "AI", {x5, y5},
+                cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(255, 100, 255), 2, cv::LINE_AA);
+    y5 += 21;
 
     cv::Scalar traffic_color;
     if (traffic_light_decision == "RED" || traffic_light_decision == "STOP") {
@@ -144,18 +151,18 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     } else {
         traffic_color = cv::Scalar(150, 150, 150);
     }
-    
-    snprintf(text, sizeof(text), "Light: %s", traffic_light_decision.c_str());
-    cv::putText(full_img, text, {x5, y5}, 
-                cv::FONT_HERSHEY_SIMPLEX, 0.55, traffic_color, 2, cv::LINE_AA);
-    y5 += 22;
 
-    cv::Scalar turn_color = (turn_decision == "NONE") ? 
+    snprintf(text, sizeof(text), "L:%s", traffic_light_decision.c_str());
+    cv::putText(full_img, text, {x5, y5},
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, traffic_color, 1, cv::LINE_AA);
+    y5 += 20;
+
+    cv::Scalar turn_color = (turn_decision == "NONE") ?
         cv::Scalar(150, 150, 150) : cv::Scalar(0, 255, 255);
-    
-    snprintf(text, sizeof(text), "Turn: %s", turn_decision.c_str());
-    cv::putText(full_img, text, {x5, y5}, 
-                cv::FONT_HERSHEY_SIMPLEX, 0.55, turn_color, 1, cv::LINE_AA);
+
+    snprintf(text, sizeof(text), "T:%s", turn_decision.c_str());
+    cv::putText(full_img, text, {x5, y5},
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, turn_color, 1, cv::LINE_AA);
 }
 
 void draw_sector_lines(cv::Mat& map, const cv::Point& origin) {
@@ -330,6 +337,16 @@ public:
             std::bind(&FusionVizNode::on_scan, this, _1)
         );
 
+        // Góc hiệu chỉnh lắp đặt LiDAR. KHÔNG được bỏ qua: LiDARModule mặc
+        // định -90°, nếu LiDAR thực tế không lắp lệch đúng góc đó thì cung
+        // "phía trước" của logic né tránh lệch sang cung khác => ob_front_cm
+        // không bao giờ thấy vật cản thật phía trước => xe không giảm tốc,
+        // không dừng. Tham số này là thứ duy nhất bù được sai lệch lắp đặt.
+        lidar_.set_mount_offset_deg(static_cast<float>(
+            declare_parameter("lidar_mount_offset_deg",
+                             static_cast<double>(
+                                 LidarModule::DEFAULT_MOUNT_OFFSET_DEG))));
+
         sub_signs_ = create_subscription<std_msgs::msg::String>(
             "/autocar/sign_detection",
             rclcpp::QoS(10),
@@ -358,7 +375,8 @@ public:
 
         pub_img_ = create_publisher<sensor_msgs::msg::Image>(
             declare_parameter("image_topic", "/fusion_viz/image"), 1);
-        pub_raw_img_ = create_publisher<sensor_msgs::msg::Image>("/image_raw", 1);
+        pub_raw_img_ = create_publisher<sensor_msgs::msg::Image>(
+            declare_parameter("raw_image_topic", "/image_raw"), 1);
 
         // ------------------------------------------------------------------
         // KÊNH CHẨN ĐOÁN CHO GUI (autonomous_vehicle_gui)
@@ -423,6 +441,21 @@ public:
                         "Control %.0f Hz | Viz %.1f Hz", control_hz, viz_hz);
         } else {
             RCLCPP_INFO(get_logger(), "Control %.0f Hz | Viz DISABLED", control_hz);
+        }
+
+        // ------------------------------------------------------------------
+        // RAW TICK: /image_raw cho node AI, tách khỏi viz.
+        // Bật theo mặc định vì không bật thì hai detector im lặng, tức xe coi
+        // đèn giao thông luôn là xanh. Tắt được bằng raw_image_hz:=0 khi
+        // debug ngoài xe và không muốn tốn băng thông.
+        // ------------------------------------------------------------------
+        const double raw_hz = declare_parameter("raw_image_hz", 5.0);
+        raw_pub_enabled_ = raw_hz > 0.0;
+        if (raw_pub_enabled_) {
+            raw_timer_ = create_wall_timer(
+                period_from_hz(raw_hz),
+                std::bind(&FusionVizNode::on_raw, this));
+            RCLCPP_INFO(get_logger(), "Raw image %.1f Hz", raw_hz);
         }
     }
 
@@ -585,10 +618,13 @@ private:
         const LaneOutput& lo = last_lane_;
         const bool has_cam = has_cam_;
 
-        Mat panel1 = full_img(Rect(map_w, HEADER_H, RIGHT_PANEL_W, 250));
+        // Hai panel phải cộng đúng MAP_H, không cộng cứng 250+350=600 khi MAP_H
+        // đổi thì Rect vượt biên -> cv::Mat roi sai kích thước.
+        const int panel_h = map_h / 2;
+        Mat panel1 = full_img(Rect(map_w, HEADER_H, RIGHT_PANEL_W, panel_h));
         draw_camera_panel(panel1, has_cam ? lo.vis : cv::Mat());
 
-        Mat panel2 = full_img(Rect(map_w, HEADER_H + 250, RIGHT_PANEL_W, 350));
+        Mat panel2 = full_img(Rect(map_w, HEADER_H + panel_h, RIGHT_PANEL_W, map_h - panel_h));
         draw_ai_detection_panel(panel2, traffic_light_decision_, turn_decision_);
 
         draw_header(full_img, has_cam ? &lo : nullptr, last_lidar_,
@@ -597,11 +633,24 @@ private:
                 traffic_light_decision_, turn_decision_);
         auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", full_img).toImageMsg();
         pub_img_->publish(*msg);
+    }
 
-        if (has_cam && !lo.raw.empty()) {
-            auto raw_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", lo.raw).toImageMsg();
-            pub_raw_img_->publish(*raw_msg);
-        }
+    // ======================================================================
+    // RAW TICK - /image_raw là nguồn ảnh cho hai node AI (NCNN).
+    //
+    // Phát ở đây chứ không nhét vào on_viz: hai node AI không quan tâm tới
+    // HUD, và trước đây khi enable_viz:=false thì /image_raw im luôn ->
+    // detector không bao giờ chạy, trong khi xe vẫn chạy với
+    // traffic_light_decision = "NONE" tức coi như đèn xanh.
+    // ======================================================================
+    void on_raw() {
+        if (!raw_pub_enabled_) return;
+
+        const LaneOutput& lo = last_lane_;
+        if (!has_cam_ || lo.raw.empty()) return;
+
+        auto raw_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", lo.raw).toImageMsg();
+        pub_raw_img_->publish(*raw_msg);
     }
 
     // ======================================================================
@@ -731,8 +780,14 @@ if (!has_cam || camera_stale) return;
         root["esp"]["ok"] = serial_ok;
         root["esp"]["valid"] = esp_fb.valid;
         root["esp"]["v"] = esp_fb.velocity_kmh;
-        root["esp"]["age_ms"] =
-            static_cast<double>(serial_->feedback_age_ms());
+        // feedback_age_ms() trả (unsigned long)-1 khi CHƯA có gói telemetry nào.
+        // Đổ thẳng ra JSON thành 1.8e19, GUI toDouble() đọc vào rồi hiện
+        // "age = 18446744073709551615 ms". -1 = chưa có gói là giá trị mà GUI
+        // đã quy ước là "không có dữ liệu".
+        const unsigned long esp_age = serial_->feedback_age_ms();
+        root["esp"]["age_ms"] = (esp_age == static_cast<unsigned long>(-1))
+            ? -1.0
+            : static_cast<double>(esp_age);
 
         root["ai"]["light"] = traffic;
         root["ai"]["turn"] = turn;
@@ -781,6 +836,7 @@ if (!has_cam || camera_stale) return;
 
     // Kết quả tick điều khiển, viz chỉ đọc.
     bool enable_viz_ = true;
+    bool raw_pub_enabled_ = false;
     LaneOutput last_lane_;
     bool has_cam_ = false;
     ESP32Feedback last_esp_fb_;
@@ -811,6 +867,7 @@ if (!has_cam || camera_stale) return;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_raw_img_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr viz_timer_;
+    rclcpp::TimerBase::SharedPtr raw_timer_;
 
     // --- Kênh chẩn đoán cho GUI ---
     bool enable_dbg_ = false;

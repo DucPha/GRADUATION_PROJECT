@@ -48,7 +48,13 @@ constexpr uint8_t PULSES_PER_REV = 4;             // Số lượng xung Hall / 1
 
 // Hằng số quy đổi từ Chu kỳ (us) sang Tốc độ (km/h) = (3.6 * 1,000,000 * Chu vi) / (Xung * Tỷ số)
 constexpr float PERIOD_TO_KMH_FACTOR = (3600000.0f * WHEEL_CIRCUMF) / (PULSES_PER_REV * GEAR_RATIO);
+// Chu kỳ ứng với MAX_VALID_SPEED_KMH. CHỈ dùng để tài liệu hoá / kiểm tra,
+// KHÔNG dùng làm điều kiện "có hợp lệ không" trong calcSpeed() - xem chú thích
+// tại nơi dùng. Ngưỡng loại nhiễu thực sự là hằng dưới đây.
 constexpr uint32_t MIN_HALL_PERIOD_US = (uint32_t)(PERIOD_TO_KMH_FACTOR / MAX_VALID_SPEED_KMH);
+// Ngưỡng chặn nhiễu Hall: chu kỳ ngắn hơn 3 ms (>= 12000 km/h theo hằng số
+// quy đổi) chắc chắn là nhiễu điện, không phải tốc độ thật.
+constexpr uint32_t MIN_HALL_PERIOD_US_NOISE = 3000;
 
 // --- Bộ lọc và Thời gian định thời (Timing & Filters) ---
 constexpr uint32_t PID_DT_US = 10000;      // 100Hz: Chu kỳ định thời thuật toán PID
@@ -211,7 +217,12 @@ void calcSpeed() {
   if (seq != last_seq && period > 0) {
     last_seq = seq;
 
-    if (period >= MIN_HALL_PERIOD_US) {
+    // Chặn dưới để bỏ xung nhiễu/khiếp khuyết (period rất nhỏ là nhiễu, không
+    // phải tốc độ cao). KHÔNG dùng MIN_HALL_PERIOD_US ở đây: hằng đó là
+    // "chu kỳ ứng với 20 km/h", dùng làm điều kiện nhận thì mọi tốc độ
+    // trên 20 km/h đều bị bỏ qua và tốc độ đo được đứng yên ở giá trị
+    // cuối cùng hợp lệ. Thay vào đó nhận mọi chu kỳ rồi KẸP tốc độ.
+    if (period >= MIN_HALL_PERIOD_US_NOISE) {
       const float raw_speed = PERIOD_TO_KMH_FACTOR / static_cast<float>(period);
       const float safe_speed = constrain(raw_speed, 0.0f, MAX_VALID_SPEED_KMH);
 

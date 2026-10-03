@@ -18,7 +18,7 @@
   <depend>builtin_interfaces</depend>
   <depend>cv_bridge</depend>
   <!-- OpenCV: tìm bằng find_package(OpenCV) trong CMakeLists.txt, không phải rosdep key -->
-  <depend>builtin_interfaces</depend>
+  <depend>jsoncpp</depend>
 
   <!-- bringup.launch.py gọi get_package_share_directory() để tìm file rviz -->
   <exec_depend>ament_index_python</exec_depend>

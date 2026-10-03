@@ -8,6 +8,15 @@
 
 namespace {
 
+// Nguồn thời gian duy nhất của state machine. Dùng steady_clock để đo ELAPSED
+// (khoảng trôi qua), không dùng system_clock: đồng hồ hệ thống có thể nhảy
+// khi NTP chỉnh, làm thời gian trạng thái âm.
+unsigned long now_ms() {
+    return static_cast<unsigned long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 // Chống log spam: các handler chạy ở tần số điều khiển (100 Hz). std::cout
 // không khóa nhưng vẫn tốn ~10-20 us/call và làm nhiễu console khi debug.
 class Throttle {
@@ -16,15 +25,13 @@ public:
         : interval_ms_(interval_ms) {}
 
     bool ready() {
-        const unsigned long now_ms = static_cast<unsigned long>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
+        const unsigned long t = now_ms();
         if (last_ms_ == 0) {
-            last_ms_ = now_ms;
+            last_ms_ = t;
             return true;
         }
-        if (now_ms - last_ms_ >= interval_ms_) {
-            last_ms_ = now_ms;
+        if (t - last_ms_ >= interval_ms_) {
+            last_ms_ = t;
             return true;
         }
         return false;
@@ -39,8 +46,12 @@ private:
 
 ObstacleAvoidance::ObstacleAvoidance()
     : current_state_(BypassState::NORMAL),
-      state_start_time_(std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now().time_since_epoch()).count()),
+      // steady_clock cho mọi phép đo thời gian của state machine. Bản cũ khởi
+      // tạo bằng steady_clock nhưng change_state()/get_state_elapsed_ms() đọc
+      // system_clock: NTP chỉnh đồng hồ là state_start_time_ bị lệch hàng giờ
+      // và get_state_elapsed_ms() có thể trả số âm -> so sánh < 300 / > 500
+      // sai hoàn toàn (bỏ qua hoặc kẹt vĩnh viễn ở một trạng thái).
+      state_start_time_(now_ms()),
       prev_bypass_left_dist_(std::nullopt),
       prev_bypass_right_dist_(std::nullopt),
       swerve_start_front_dist_(std::nullopt),
@@ -55,8 +66,7 @@ void ObstacleAvoidance::change_state(BypassState new_state) {
             current_state_ == BypassState::BYPASS_RIGHT;
 
         current_state_ = new_state;
-        state_start_time_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        state_start_time_ = now_ms();
 
         // Rời trạng thái bypass -> reset bộ nhớ "đã ghi nhận vật cản" để lần lái
         // tiếp theo không dùng khoảng cách cũ làm ngưỡng so sánh.
@@ -82,9 +92,8 @@ void ObstacleAvoidance::change_state(BypassState new_state) {
 }
 
 unsigned long ObstacleAvoidance::get_state_elapsed_ms() const {
-    unsigned long now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    return now - state_start_time_;
+    const unsigned long now = now_ms();
+    return (now > state_start_time_) ? (now - state_start_time_) : 0ul;
 }
 
 BypassCommand ObstacleAvoidance::update(const LidarStatus& lidar,

@@ -123,6 +123,10 @@ public:
     // Cơ chế Latest-Frame (không tích luỹ độ trễ)
     static constexpr size_t FRAME_BUFFER_COUNT = 2;
 
+    // Trần dò camera khi device_index < 0. Trên xe chỉ có 1 camera nên 8 là
+    // dư; quá cao thì lúc camera lỗi phải đợi dò hết mới báo.
+    static constexpr int MAX_PROBE_INDEX = 8;
+
     static constexpr bool ENABLE_VISUALIZATION = true;
     // Tô mask lên ảnh để kiểm chứng ngưỡng. Tốn ~1.5 ms/frame nên mặc định
     // tắt; bật lên khi camera không nhận được làn. Nếu thấy gần như toàn

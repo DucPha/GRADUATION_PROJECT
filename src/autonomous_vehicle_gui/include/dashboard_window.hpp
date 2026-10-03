@@ -1,8 +1,8 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QImage>
 #include <QMainWindow>
-#include <QPixmap>
 #include <QString>
 #include <QTimer>
 #include <QTime>
@@ -35,11 +35,14 @@ public:
     ~DashboardWindow() override = default;
 
     void setDemoMode(bool demo);
+
+    // Chỉ gọi từ GUI thread (onTick). Dữ liệu lấy từ hàng đợi trung gian
+    // của DashboardNode, không phải từ callback ROS.
     void updateStatus(const QString& json);
-    void updateRaw(const QPixmap& pm);
-    void updateVis(const QPixmap& pm);
-    void updateBin(const QPixmap& pm);
-    void updateRoi(const QPixmap& pm);
+    void updateRaw(const QImage& img);
+    void updateVis(const QImage& img);
+    void updateBin(const QImage& img);
+    void updateRoi(const QImage& img);
     void updateLink(int ok3);
 
 private slots:
@@ -72,5 +75,8 @@ private:
     ParamPanel* pSys_;
 
     double tLast_ = 0.0;
+    // Giây kể từ lúc bật của mẫu status gần nhất, dùng để tính khoảng cách
+    // thời gian cho trend plot. -1 = chưa có mẫu nào.
+    double last_sample_s_ = -1.0;
     QElapsedTimer elapsed_;
 };

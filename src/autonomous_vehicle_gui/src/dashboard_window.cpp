@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QKeyEvent>
 #include <QPainter>
 #include <QSplitter>
@@ -14,9 +15,11 @@
 
 #include <cmath>
 #include <sstream>
+#include <string>
 
 #include <json/json.h>
 
+#include "dashboard_node.hpp"
 #include "theme.hpp"
 
 // Bọc tìm trường JSON đơn giản, tránh crash khi thiếu field.
@@ -160,7 +163,7 @@ void DashboardWindow::updateStatus(const QString& json){
     if (!Json::parseFromStream(b,s,&v,&e)) return;
     const double t = elapsed_.elapsed() / 1000.0;
     (void)t;  // giữ symbol nếu sau này dùng; tLast_ vẫn cập nhật
-    tLast_ = elapsed_.elapsed() / 1000.0;
+    tLast_ = t;
 
     // LiDAR
     bool lok = getb(v,"lidar.ok",false);
@@ -205,11 +208,22 @@ void DashboardWindow::updateStatus(const QString& json){
     QString ltl = gets(v,"ai.light","NONE"); pAi_->setValue("light", ltl, lightColor(ltl));
     QString ttn = gets(v,"ai.turn","NONE");  pAi_->setValue("turn",  ttn,  ttn=="NONE"?Theme::gray():Theme::accent());
 
-    // trend
-    const double tlast = elapsed_.elapsed() / 1000.0;
-    double trel = tlast - (tlast > 10.0 ? 10.0 : 0.0);  // 10s window approx
-    pidPlot_->addPoint(trel, getd(v,"pid.sp",getd(v,"esp.v",0)), getd(v,"pid.pv",getd(v,"esp.v",0)));
-    steerPlot_->addPoint(trel, getd(v,"lane.dev",0), getd(v,"oa.dev",0));
+    // Trend plot. Trục X là "giây trước thời điểm hiện tại" trong cửa sổ
+    // TREND_SEC, nên mỗi mẫu mang tRel = -(thời gian đã trôi kể từ mẫu trước).
+    //
+    // Bản cũ truyền `tlast - 10` với tlast = số giây kể từ lúc bật -> giá trị
+    // tăng đơn điệu 0,1,2,3... Trong khi drawSeries() lại map trục X theo
+    // khoảng CỐ ĐỊNH [-10, 0]. Mọi điểm vì thế rơi ngoài mép phải ngay từ
+    // giây thứ 10 và đường biểu đồ biến mất hoàn toàn.
+    const double now_s = elapsed_.elapsed() / 1000.0;
+    const double dt = (last_sample_s_ >= 0.0)
+        ? std::max(0.0, now_s - last_sample_s_)
+        : 0.0;
+    last_sample_s_ = now_s;
+
+    pidPlot_->addPoint(-dt, getd(v,"pid.sp",getd(v,"esp.v",0)),
+                       getd(v,"pid.pv",getd(v,"esp.v",0)));
+    steerPlot_->addPoint(-dt, getd(v,"lane.dev",0), getd(v,"oa.dev",0));
 
     // link
     QVector<NodeLinkTable::Row> rows(5);
@@ -227,10 +241,31 @@ void DashboardWindow::updateStatus(const QString& json){
     pSys_->setValue("up", QTime(0,0,0).addMSecs(elapsed_.elapsed()).toString("hh:mm:ss"));
 }
 void DashboardWindow::updateLink(int ok3){ header_->setLink(QString("LINK  %1/3").arg(ok3), ok3==3?Theme::greenLight():ok3==0?Theme::redLight():Theme::amberLight()); }
-void DashboardWindow::updateRaw(const QPixmap& pm){ imgRaw_->setPixmap(pm); }
-void DashboardWindow::updateVis(const QPixmap& pm){ imgVis_->setPixmap(pm); }
-void DashboardWindow::updateBin(const QPixmap& pm){ imgBin_->setPixmap(pm); }
-void DashboardWindow::updateRoi(const QPixmap& pm){ imgRoi_->setPixmap(pm); }
-void DashboardWindow::onTick(){ if(demo_){} }
+void DashboardWindow::updateRaw(const QImage& img){ imgRaw_->setImage(img); }
+void DashboardWindow::updateVis(const QImage& img){ imgVis_->setImage(img); }
+void DashboardWindow::updateBin(const QImage& img){ imgBin_->setImage(img); }
+void DashboardWindow::updateRoi(const QImage& img){ imgRoi_->setImage(img); }
+
+// ============================================================================
+// TICK 30 Hz - điểm duy nhất chạm đối tượng Qt với dữ liệu từ node.
+//
+// Bản cũ onTick() rỗng và toàn bộ cập nhật nằm trong callback ROS chạy ở
+// spin thread: vừa chạm Qt sai thread, vừa không giữ được nhịp 30 Hz khi
+// ảnh về chậm hơn (mọi ô số liệu đứng yên).
+// ============================================================================
+void DashboardWindow::onTick(){
+    if (!node_) return;
+
+    std::string json;
+    if (node_->takeStatus(json)) updateStatus(QString::fromStdString(json));
+
+    QImage img;
+    if (node_->takeImage(img, DashboardNode::CH_RAW))  updateRaw(img);
+    if (node_->takeImage(img, DashboardNode::CH_VIS))  updateVis(img);
+    if (node_->takeImage(img, DashboardNode::CH_BIN))  updateBin(img);
+    if (node_->takeImage(img, DashboardNode::CH_ROI))  updateRoi(img);
+
+    if (demo_) return;
+}
 void DashboardWindow::onTextTick(){ QTime t=QTime::currentTime(); header_->setClock(t.toString("HH:mm:ss")); }
 void DashboardWindow::onKeyEsc(){ QApplication::quit(); }

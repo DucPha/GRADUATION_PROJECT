@@ -1,11 +1,22 @@
 #include "dashboard_node.hpp"
 
-#include <chrono>
+#include <QByteArray>
+#include <QImage>
+
 #include <thread>
+#include <utility>
 
 #include "dashboard_window.hpp"
 
-using namespace std::chrono_literals;
+// Giải mã JPEG thành QImage. QImage là kiểu CPU nên an toàn khi tạo ở
+// bất kỳ thread nào - khác với QPixmap.
+static QImage decodeJpeg(const sensor_msgs::msg::CompressedImage::SharedPtr& msg) {
+    QByteArray bytes(reinterpret_cast<const char*>(msg->data.data()),
+                     static_cast<int>(msg->data.size()));
+    QImage img;
+    if (!img.loadFromData(bytes, "JPEG")) return QImage();
+    return img;
+}
 
 DashboardNode::DashboardNode(const std::string& name)
     : rclcpp::Node(name),
@@ -63,38 +74,56 @@ void DashboardNode::stop() {
     spinThread_.reset();
 }
 
+// ============================================================================
+// PUSH (spin thread) - chỉ đẩy vào hàng đợi, KHÔNG chạm Qt widget
+// ============================================================================
+
+void DashboardNode::pushImage(int channel, const QImage& img) {
+    if (channel < 0 || channel >= CH_COUNT || img.isNull()) return;
+    std::lock_guard<std::mutex> lock(q_mtx_);
+    q_img_[channel] = img;
+    q_img_valid_[channel] = true;
+}
+
 void DashboardNode::onStatus(const std_msgs::msg::String::SharedPtr msg) {
-    if (win_) win_->updateStatus(QString::fromStdString(msg->data));
+    std::lock_guard<std::mutex> lock(q_mtx_);
+    q_status_ = msg->data;
+    q_status_valid_ = true;
 }
 
 void DashboardNode::onRaw(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
-    QPixmap pm;
-    if (pm.loadFromData(reinterpret_cast<const uchar*>(msg->data.data()),
-                        static_cast<uint>(msg->data.size()), "jpg")) {
-        if (win_) win_->updateRaw(pm);
-    }
+    pushImage(CH_RAW, decodeJpeg(msg));
 }
 
 void DashboardNode::onVis(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
-    QPixmap pm;
-    if (pm.loadFromData(reinterpret_cast<const uchar*>(msg->data.data()),
-                        static_cast<uint>(msg->data.size()), "jpg")) {
-        if (win_) win_->updateVis(pm);
-    }
+    pushImage(CH_VIS, decodeJpeg(msg));
 }
 
 void DashboardNode::onBin(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
-    QPixmap pm;
-    if (pm.loadFromData(reinterpret_cast<const uchar*>(msg->data.data()),
-                        static_cast<uint>(msg->data.size()), "jpg")) {
-        if (win_) win_->updateBin(pm);
-    }
+    pushImage(CH_BIN, decodeJpeg(msg));
 }
 
 void DashboardNode::onRoi(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
-    QPixmap pm;
-    if (pm.loadFromData(reinterpret_cast<const uchar*>(msg->data.data()),
-                        static_cast<uint>(msg->data.size()), "jpg")) {
-        if (win_) win_->updateRoi(pm);
-    }
+    pushImage(CH_ROI, decodeJpeg(msg));
+}
+
+// ============================================================================
+// TAKE (GUI thread) - kéo dữ liệu mới nhất ra
+// ============================================================================
+
+bool DashboardNode::takeStatus(std::string& out) {
+    std::lock_guard<std::mutex> lock(q_mtx_);
+    if (!q_status_valid_) return false;
+    out = q_status_;
+    q_status_valid_ = false;
+    return true;
+}
+
+bool DashboardNode::takeImage(QImage& out, int channel) {
+    if (channel < 0 || channel >= CH_COUNT) return false;
+    std::lock_guard<std::mutex> lock(q_mtx_);
+    if (!q_img_valid_[channel]) return false;
+    out = q_img_[channel];
+    q_img_valid_[channel] = false;
+    return true;
 }

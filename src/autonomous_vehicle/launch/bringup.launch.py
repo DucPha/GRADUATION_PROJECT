@@ -127,7 +127,10 @@ def generate_launch_description():
                               )),
 
         # Visualization
-        DeclareLaunchArgument("viz_hz", default_value="120.0",
+        # Ảnh HUD 1000x730 ở 120 Hz là ~126 MB/s trên DDS, gần bằng hết băng
+        # thông một card mạng 100 Mbps. Node cũng đã tách control (100 Hz)
+        # khỏi viz, nên viz chỉ cần đủ mượt để người vận hành nhìn.
+        DeclareLaunchArgument("viz_hz", default_value="10.0",
                               description="Tần số vẽ HUD (Hz)"),
         DeclareLaunchArgument("image_topic", default_value="/fusion_viz/image",
                               description="Topic ảnh HUD có vẽ bản đồ"),

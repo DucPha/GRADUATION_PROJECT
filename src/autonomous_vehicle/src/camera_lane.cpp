@@ -160,13 +160,42 @@ bool CameraLane::start() {
     if (running_)
         return true;
 
-    std::cout << "[CameraLane] Opening camera index " << device_index_ << "...\n";
-
     const int backend = use_v4l2_ ? CAP_V4L2 : CAP_ANY;
 
-    if (!cap_.open(device_index_, backend)) {
-        std::cerr << "[CameraLane] ERROR: Cannot open camera\n";
-        return false;
+    // device_index_ < 0 nghĩa là "tự dò". Launch mặc định -1 vì camera USB
+    // đổi số /dev/video sau mỗi lần rút/cắm lại, nhưng bản cũ truyền thẳng
+    // -1 vào cv::VideoCapture::open() -> luôn thất bại -> camera_stale vĩnh
+    // viễn -> xe không bao giờ chạy. Dò từ index 0 lên, lấy thiết bị đầu
+    // tiên mở được.
+    int index = device_index_;
+    bool opened = false;
+
+    if (index < 0) {
+        for (int i = 0; i < MAX_PROBE_INDEX; ++i) {
+            if (cap_.open(i, backend)) {
+                index = i;
+                opened = true;
+                break;
+            }
+            cap_.release();
+        }
+        if (!opened) {
+            std::cerr << "[CameraLane] ERROR: no camera found in /dev/video0.."
+                      << MAX_PROBE_INDEX - 1 << "\n";
+            return false;
+        }
+        std::cout << "[CameraLane] Auto-selected camera index " << index << "\n";
+        // Ghi lại index đã dò được: các lệnh V4L2 phía dưới dựng đường dẫn
+        // /dev/video%d từ device_index_, và -1 sẽ ra "/dev/video-1".
+        device_index_ = index;
+    } else {
+        std::cout << "[CameraLane] Opening camera index " << index << "...\n";
+        opened = cap_.open(index, backend);
+        if (!opened) {
+            std::cerr << "[CameraLane] ERROR: Cannot open camera index " << index
+                      << "\n";
+            return false;
+        }
     }
 
     cap_.set(CAP_PROP_FRAME_WIDTH, FRAME_W);
