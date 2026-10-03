@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>sllidar_ros2_node</name>
+  <version>1.0.0</version>
+  <description>LidarModule va ObstacleAvoidance cho RPLIDAR A1 tren /scan.</description>
+  <maintainer email="pmd0793724602@gmail.com">Pham Minh Duc</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>sensor_msgs</depend>
+  <depend>libopencv-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

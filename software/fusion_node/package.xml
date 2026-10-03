@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>fusion_node</name>
+  <version>1.0.0</version>
+  <description>Node dieu khien duy nhat: camera 2 lan -&gt; serial ESP32-S3.</description>
+  <maintainer email="pmd0793724602@gmail.com">Pham Minh Duc</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>libopencv-dev</depend>
+
+  <depend>camera_node</depend>
+  <depend>esp32s3_node</depend>
+  <depend>sllidar_ros2_node</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rplidar_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
