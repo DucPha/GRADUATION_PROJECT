@@ -1,19 +1,59 @@
-# ROS 2 / CMake build output
+# Build
 /build/
 /install/
 /log/
-**/build/
-**/install/
-**/log/
 
-# Python generated files
+# Colcon
+.colcon/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Python
 __pycache__/
-*.py[cod]
-
-# PlatformIO generated dependencies and build output
-.pio/
-**/.pio/
-
-# Local virtual environments
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
 .venv/
 venv/
+
+# VSCode
+.vscode/.history/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Recording/cache
+*.mp4
+*.avi
+*.bag
+*.csv
+recordings/
+cache/
+*.log
+
+# Large legacy archive (not needed in build)
+graduation_project-master/
+docs/_gen/__pycache__/
+
+# Local configs
+.env
+.local/
+
+# Qt build
+*.o
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.user
+*.autosave
