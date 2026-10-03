@@ -1,14 +1,46 @@
 // obstacle_avoidance.cpp
 #include "obstacle_avoidance.hpp"
 #include "lidar_module.hpp"
-#include <iostream>
+
 #include <chrono>
 #include <cmath>
+#include <iostream>
+
+namespace {
+
+// Chống log spam: các handler chạy ở tần số điều khiển (100 Hz). std::cout
+// không khóa nhưng vẫn tốn ~10-20 us/call và làm nhiễu console khi debug.
+class Throttle {
+public:
+    explicit Throttle(unsigned long interval_ms)
+        : interval_ms_(interval_ms) {}
+
+    bool ready() {
+        const unsigned long now_ms = static_cast<unsigned long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (last_ms_ == 0) {
+            last_ms_ = now_ms;
+            return true;
+        }
+        if (now_ms - last_ms_ >= interval_ms_) {
+            last_ms_ = now_ms;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    unsigned long interval_ms_;
+    unsigned long last_ms_ = 0;
+};
+
+}  // namespace
 
 ObstacleAvoidance::ObstacleAvoidance()
     : current_state_(BypassState::NORMAL),
       state_start_time_(std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::system_clock::now().time_since_epoch()).count()),
+          std::chrono::steady_clock::now().time_since_epoch()).count()),
       prev_bypass_left_dist_(std::nullopt),
       prev_bypass_right_dist_(std::nullopt),
       swerve_start_front_dist_(std::nullopt),
@@ -18,10 +50,26 @@ ObstacleAvoidance::ObstacleAvoidance()
 
 void ObstacleAvoidance::change_state(BypassState new_state) {
     if (current_state_ != new_state) {
+        const bool was_bypass =
+            current_state_ == BypassState::BYPASS_LEFT ||
+            current_state_ == BypassState::BYPASS_RIGHT;
+
         current_state_ = new_state;
         state_start_time_ = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        
+
+        // Rời trạng thái bypass -> reset bộ nhớ "đã ghi nhận vật cản" để lần lái
+        // tiếp theo không dùng khoảng cách cũ làm ngưỡng so sánh.
+        if (was_bypass &&
+            new_state != BypassState::BYPASS_LEFT &&
+            new_state != BypassState::BYPASS_RIGHT &&
+            new_state != BypassState::SWERVE_LEFT &&
+            new_state != BypassState::SWERVE_RIGHT) {
+            prev_bypass_left_dist_ = std::nullopt;
+            prev_bypass_right_dist_ = std::nullopt;
+            swerve_start_front_dist_ = std::nullopt;
+        }
+
         if (new_state == BypassState::BYPASS_LEFT) {
             prev_bypass_left_dist_ = std::nullopt;
         } else if (new_state == BypassState::BYPASS_RIGHT) {
@@ -44,32 +92,82 @@ BypassCommand ObstacleAvoidance::update(const LidarStatus& lidar,
                                         float dominant_slope,
                                         bool is_dual_lane,
                                         const std::string& traffic_light_decision,
-                                        float current_speed_kmh) {
+                                        float current_speed_kmh,
+                                        bool camera_stale,
+                                        bool lidar_stale) {
+    const BypassCommand cmd = update_impl(
+        lidar, dev_px, dominant_slope, is_dual_lane,
+        traffic_light_decision, current_speed_kmh, camera_stale, lidar_stale);
+
+    // Ghi lại sau khi đã đi qua toàn bộ các nhánh con. Nhiều nhánh return
+    // sớm (lidar_stale, camera_stale) nên ghi trong từng handler dễ sót,
+    // còn đặt ở đây thì chắc chắn khớp đúng lệnh vừa gửi ESP32.
+    speed_command_ = cmd.speed_control;
+    return cmd;
+}
+
+BypassCommand ObstacleAvoidance::update_impl(const LidarStatus& lidar,
+                                        int16_t dev_px,
+                                        float dominant_slope,
+                                        bool is_dual_lane,
+                                        const std::string& traffic_light_decision,
+                                        float current_speed_kmh,
+                                        bool camera_stale,
+                                        bool lidar_stale) {
     current_speed_kmh_ = current_speed_kmh;
+    camera_stale_ = camera_stale;
+    lidar_stale_ = lidar_stale;
     speed_margin_cm_ = 0.0f;
-    
+
+    if (!std::isfinite(current_speed_kmh)) current_speed_kmh = 0.0f;
+
     if (current_speed_kmh >= 4.0f) {
         float diff = current_speed_kmh - 4.0f;
         speed_margin_cm_ = diff * 10.0f;
-        
+
         if (speed_margin_cm_ > 100.0f) {
             speed_margin_cm_ = 100.0f;
         }
     }
-    
+
+    // Mất LiDAR: không biết có vật cản hay không -> dừng. Ưu tiên cao nhất vì
+    // đây là cảm biến an toàn.
+    if (lidar_stale) {
+        static Throttle log_stale(1000);
+        if (log_stale.ready()) {
+            std::cerr << "[SAFETY] LiDAR stale -> EMERGENCY_STOP" << std::endl;
+        }
+        change_state(BypassState::EMERGENCY_STOP);
+        return handle_lidar_stale(dev_px);
+    }
+
+    // Mất camera: vẫn có LiDAR nên vẫn tránh vật cản được, nhưng không được
+    // bánh lái theo số liệu lái cũ -> giữ thẳng và giảm tốc.
+    if (camera_stale) {
+        static Throttle log_stale(1000);
+        if (log_stale.ready()) {
+            std::cerr << "[SAFETY] Camera stale -> hold straight, speed=0" << std::endl;
+        }
+        return handle_camera_stale(lidar);
+    }
+
     if (lidar.ob_front_cm && *lidar.ob_front_cm <= (55.0f )) {
         if (current_state_ != BypassState::EMERGENCY_STOP) {
-            std::cout << "[OBSTACLE] EMERGENCY! Front <= " << (55.0f ) 
-                      << "cm (speed=" << current_speed_kmh << "km/h)" << std::endl;
+            static Throttle log_stop(2000);
+            if (log_stop.ready()) {
+                std::cout << "[OBSTACLE] EMERGENCY! Front <= 55cm (speed="
+                          << current_speed_kmh << "km/h)" << std::endl;
+            }
             change_state(BypassState::EMERGENCY_STOP);
         }
         return handle_emergency_stop(lidar, dev_px, traffic_light_decision);
     }
     if (traffic_light_decision == "RED" || traffic_light_decision == "STOP") {
         if (current_state_ != BypassState::EMERGENCY_STOP) {
-            if (prev_traffic_light_ != traffic_light_decision) {
-                std::cout << "[TRAFFIC] 🚨 " << traffic_light_decision 
-                          << " detected! Switching to EMERGENCY_STOP" << std::endl;
+            static Throttle log_red(2000);
+            if (log_red.ready() && prev_traffic_light_ != traffic_light_decision) {
+                std::cout << "[TRAFFIC] RED/STOP detected! Switching to EMERGENCY_STOP"
+                          << std::endl;
             }
             change_state(BypassState::EMERGENCY_STOP);
         }
@@ -104,6 +202,50 @@ BypassCommand ObstacleAvoidance::update(const LidarStatus& lidar,
             return handle_normal(lidar, dev_px);
     }
 }
+
+// ============================================================================
+// CHẾ ĐỘ AN TOÀN KHI MẤT CẢM BIẾN
+// ============================================================================
+
+BypassCommand ObstacleAvoidance::handle_lidar_stale(int16_t dev_px) {
+    BypassCommand cmd;
+    cmd.state = BypassState::EMERGENCY_STOP;
+    cmd.state_name = "EMERGENCY_STOP";
+    cmd.speed_control = 0;
+    cmd.dev_final_px = dev_px;
+    cmd.emergency_stop = true;
+    cmd.lidar_stale = true;
+    cmd.camera_stale = camera_stale_;
+    return cmd;
+}
+
+BypassCommand ObstacleAvoidance::handle_camera_stale(const LidarStatus& lidar) {
+    BypassCommand cmd;
+    cmd.camera_stale = true;
+
+    // Có vật cản phía trước thì vẫn phải né; nếu trống thì dừng chờ camera.
+    const bool obstacle_close =
+        lidar.ob_front_cm && *lidar.ob_front_cm <= (60.0f + speed_margin_cm_);
+
+    if (obstacle_close) {
+        cmd.state = BypassState::SLOW_DOWN;
+        cmd.state_name = "SLOW_DOWN";
+        cmd.speed_control = 30;
+        cmd.dev_final_px = 0;
+        cmd.emergency_stop = false;
+        return cmd;
+    }
+
+    cmd.state = current_state_;
+    cmd.state_name = current_state_ == BypassState::NORMAL
+        ? "NORMAL" : current_state_ == BypassState::EMERGENCY_STOP
+            ? "EMERGENCY_STOP" : "CAMERA_STALE";
+    cmd.speed_control = 0;
+    cmd.dev_final_px = 0;
+    cmd.emergency_stop = current_state_ == BypassState::EMERGENCY_STOP;
+    return cmd;
+}
+
 BypassCommand ObstacleAvoidance::handle_normal(const LidarStatus& lidar, int16_t dev_px) {
     BypassCommand cmd;
     cmd.state = BypassState::NORMAL;
@@ -224,8 +366,11 @@ BypassCommand ObstacleAvoidance::handle_swerve_left(const LidarStatus& lidar) {
     bool front_clear = false;
     if (lidar.ob_front_cm && swerve_start_front_dist_) {
         front_clear = (*lidar.ob_front_cm > *swerve_start_front_dist_ + 5.0f);
-        std::cout << "[SWERVE_LEFT] Front: " << *lidar.ob_front_cm
-                  << "cm (start: " << *swerve_start_front_dist_ << "cm)" << std::endl;
+        static Throttle log_d(1000);
+        if (log_d.ready()) {
+            std::cout << "[SWERVE_LEFT] Front: " << *lidar.ob_front_cm
+                      << "cm (start: " << *swerve_start_front_dist_ << "cm)" << std::endl;
+        }
     }
 
     if (front_clear /* && right_safe */) {
@@ -258,8 +403,11 @@ BypassCommand ObstacleAvoidance::handle_swerve_right(const LidarStatus& lidar) {
     bool front_clear = false;
     if (lidar.ob_front_cm && swerve_start_front_dist_) {
         front_clear = (*lidar.ob_front_cm > *swerve_start_front_dist_ + 5.0f);
-        std::cout << "[SWERVE_RIGHT] Front: " << *lidar.ob_front_cm
-                  << "cm (start: " << *swerve_start_front_dist_ << "cm)" << std::endl;
+        static Throttle log_d(1000);
+        if (log_d.ready()) {
+            std::cout << "[SWERVE_RIGHT] Front: " << *lidar.ob_front_cm
+                      << "cm (start: " << *swerve_start_front_dist_ << "cm)" << std::endl;
+        }
     }
 
 
@@ -280,20 +428,25 @@ BypassCommand ObstacleAvoidance::handle_bypass_left(const LidarStatus& lidar) {
     cmd.dev_final_px = 35;
     cmd.emergency_stop = false;
 
-    // ✅ Wall-following logic TRƯỚC (theo dõi vật cản bên phải)
+    // Wall-following (theo dõi vật cản bên phải)
     if (lidar.ob_right_cm) {
         float current_dist = *lidar.ob_right_cm;
+        static Throttle log_wall(1000);
         // Target: 30cm ± 5cm
         if (current_dist > 30.0f) {
             cmd.dev_final_px = + 25;
-            std::cout << "[BYPASS_LEFT] Too far (" << current_dist
-                      << "cm), steer right +20" << std::endl;
-        } 
+            if (log_wall.ready()) {
+                std::cout << "[BYPASS_LEFT] Too far (" << current_dist
+                          << "cm), steer right" << std::endl;
+            }
+        }
         if (current_dist < 20.0f) {
             cmd.dev_final_px = - 25;
-            std::cout << "[BYPASS_LEFT] Too close (" << current_dist
-                      << "cm), steer left -20" << std::endl;
-        } 
+            if (log_wall.ready()) {
+                std::cout << "[BYPASS_LEFT] Too close (" << current_dist
+                          << "cm), steer left" << std::endl;
+            }
+        }
         if (current_dist >= 20.0f && current_dist <= 30.0f) {
             cmd.dev_final_px = 0;
         }
@@ -316,17 +469,18 @@ BypassCommand ObstacleAvoidance::handle_bypass_left(const LidarStatus& lidar) {
 
         if (lidar.ob_right_cm && swerve_start_front_dist_) {
             right_clear = (*lidar.ob_right_cm > *swerve_start_front_dist_ + 5.0f);
-            std::cout << "[BYPASS_LEFT] Right: " << *lidar.ob_right_cm
-                      << "cm, Start: " << *swerve_start_front_dist_ << "cm" << std::endl;
         }
 
         if (rear_clear && right_clear) {
-            std::cout << "[OBSTACLE] Obstacle passed (rear=" << *lidar.ob_right_rear_cm
+            std::cout << "[BYPASS_LEFT] Obstacle passed (rear=" << *lidar.ob_right_rear_cm
                       << "cm, right=" << *lidar.ob_right_cm
                       << "cm), switching to RETURN_LANE_RIGHT" << std::endl;
             change_state(BypassState::RETURN_LANE_RIGHT);
             return handle_return_lane_right(lidar, false);
-        } else {
+        }
+
+        static Throttle log_wait(1000);
+        if (log_wait.ready()) {
             std::cout << "[BYPASS_LEFT] Waiting... rear_clear=" << rear_clear
                       << ", right_clear=" << right_clear << std::endl;
         }
@@ -345,16 +499,21 @@ BypassCommand ObstacleAvoidance::handle_bypass_right(const LidarStatus& lidar) {
 
     if (lidar.ob_left_cm) {
         float current_dist = *lidar.ob_left_cm;
+        static Throttle log_wall(1000);
         if (current_dist > 30.0f) {
             cmd.dev_final_px = - 25;
-            std::cout << "[BYPASS_RIGHT] Too far (" << current_dist
-                      << "cm), steer left -20" << std::endl;
-        } 
+            if (log_wall.ready()) {
+                std::cout << "[BYPASS_RIGHT] Too far (" << current_dist
+                          << "cm), steer left" << std::endl;
+            }
+        }
         if (current_dist < 20.0f) {
             cmd.dev_final_px = + 25;
-            std::cout << "[BYPASS_RIGHT] Too close (" << current_dist
-                      << "cm), steer right +20" << std::endl;
-        } 
+            if (log_wall.ready()) {
+                std::cout << "[BYPASS_RIGHT] Too close (" << current_dist
+                          << "cm), steer right" << std::endl;
+            }
+        }
         if (current_dist >= 20.0f && current_dist <= 30.0f) {
             cmd.dev_final_px = 0;
         }
@@ -377,17 +536,18 @@ BypassCommand ObstacleAvoidance::handle_bypass_right(const LidarStatus& lidar) {
 
         if (lidar.ob_left_cm && swerve_start_front_dist_) {
             left_clear = (*lidar.ob_left_cm > *swerve_start_front_dist_ + 5.0f);
-            std::cout << "[BYPASS_RIGHT] Left: " << *lidar.ob_left_cm
-                      << "cm, Start: " << *swerve_start_front_dist_ << "cm" << std::endl;
         }
 
         if (rear_clear && left_clear) {
-            std::cout << "[OBSTACLE] Obstacle passed (rear=" << *lidar.ob_left_rear_cm
+            std::cout << "[BYPASS_RIGHT] Obstacle passed (rear=" << *lidar.ob_left_rear_cm
                       << "cm, left=" << *lidar.ob_left_cm
                       << "cm), switching to RETURN_LANE_LEFT" << std::endl;
             change_state(BypassState::RETURN_LANE_LEFT);
             return handle_return_lane_left(lidar, false);
-        } else {
+        }
+
+        static Throttle log_wait(1000);
+        if (log_wait.ready()) {
             std::cout << "[BYPASS_RIGHT] Waiting... rear_clear=" << rear_clear
                       << ", left_clear=" << left_clear << std::endl;
         }
@@ -471,7 +631,11 @@ BypassCommand ObstacleAvoidance::handle_emergency_stop(const LidarStatus& lidar,
             change_state(BypassState::NORMAL);
             return handle_normal(lidar, dev_px);
         } else {
-            std::cout << "[TRAFFIC] GREEN but obstacle at " << *lidar.ob_front_cm << "cm" << std::endl;
+            static Throttle log_green(1000);
+            if (log_green.ready()) {
+                std::cout << "[TRAFFIC] GREEN but obstacle at "
+                          << *lidar.ob_front_cm << "cm" << std::endl;
+            }
         }
     }
     

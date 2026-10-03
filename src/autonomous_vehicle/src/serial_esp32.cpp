@@ -1,10 +1,13 @@
 #include "serial_esp32.hpp"
 
-#include <iostream>
+#include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstring>
-#include <sys/ioctl.h>
+#include <iostream>
+#include <string>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 // ============================================================================
@@ -154,6 +157,20 @@ ESP32Feedback SerialESP32::get_latest_feedback() const {
     return latest_feedback_;
 }
 
+std::chrono::steady_clock::time_point SerialESP32::steady_now() {
+    return std::chrono::steady_clock::now();
+}
+
+unsigned long SerialESP32::feedback_age_ms() const {
+    std::lock_guard<std::mutex> lock(feedback_mtx_);
+    if (!latest_feedback_.valid) {
+        return static_cast<unsigned long>(-1);
+    }
+    const auto age = std::chrono::steady_clock::now() - last_feedback_time_;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
+    return ms < 0 ? 0ul : static_cast<unsigned long>(ms);
+}
+
 // ============================================================================
 // LUỒNG NGẦM ĐỌC DATA (RX THREAD)
 // ============================================================================
@@ -236,12 +253,14 @@ void SerialESP32::process_rx_byte(uint8_t b) {
                     ESP32Feedback fb;
                     // Ép 4 bytes vào kiểu Float
                     std::memcpy(&fb.velocity_kmh, &rx_packet_[2], sizeof(float));
-                    fb.valid = true;
+                    fb.valid = std::isfinite(fb.velocity_kmh);
 
-                    // Ghi đè biến an toàn
-                    {
+                    // Gói có checksum đúng nhưng float NaN/inf -> coi như hỏng,
+                    // không ghi đè telemetry hợp lệ đang có.
+                    if (fb.valid) {
                         std::lock_guard<std::mutex> lock(feedback_mtx_);
                         latest_feedback_ = fb;
+                        last_feedback_time_ = steady_now();
                     }
                 }
                 

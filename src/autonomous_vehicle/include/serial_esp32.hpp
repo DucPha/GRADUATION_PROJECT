@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -62,7 +64,7 @@ public:
 
     explicit SerialESP32(
         const std::string& port =
-            "/dev/ttyESP32"
+            "/dev/ttyUSB0"
     );
 
     ~SerialESP32();
@@ -85,8 +87,12 @@ public:
     // Latest valid telemetry
     // ------------------------------------------------------------------------
 
-    ESP32Feedback
-    get_latest_feedback() const;
+ESP32Feedback
+        get_latest_feedback() const;
+
+    // Tuổi của telemetry gần nhất (ms). ESP32 gửi ở ~50 Hz nên giá trị > 200
+    // nghĩa là đã mất liên lạc -> node điều khiển phải dừng xe.
+    unsigned long feedback_age_ms() const;
 
 private:
 
@@ -124,6 +130,13 @@ private:
 
     ESP32Feedback
         latest_feedback_{};
+
+    // std::chrono::steady_clock::time_point của gói telemetry hợp lệ cuối
+    std::chrono::steady_clock::time_point
+        last_feedback_time_{};
+
+    // Nguồn thời gian cho feedback_age_ms()
+    static std::chrono::steady_clock::time_point steady_now();
 
     // ------------------------------------------------------------------------
     // RX parser

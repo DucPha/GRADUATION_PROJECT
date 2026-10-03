@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -18,6 +19,7 @@ find_package(Threads REQUIRED)
 add_executable(autonomous_vehicle_node
 	src/camera_lane.cpp
 	src/fusion_viz_node.cpp
+	src/lane_mask.cpp
 	src/lidar_module.cpp
 	src/obstacle_avoidance.cpp
 	src/serial_esp32.cpp
@@ -34,6 +36,7 @@ ament_target_dependencies(autonomous_vehicle_node
 	rclcpp
 	sensor_msgs
 	std_msgs
+	builtin_interfaces
 	cv_bridge
 )
 
@@ -54,5 +57,5 @@ install(DIRECTORY launch/
 )
 
 ament_export_include_directories(include)
-ament_export_dependencies(rclcpp sensor_msgs std_msgs cv_bridge)
+ament_export_dependencies(rclcpp sensor_msgs std_msgs builtin_interfaces cv_bridge)
 ament_package()
