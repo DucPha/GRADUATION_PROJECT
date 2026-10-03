@@ -126,8 +126,11 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
              (lane && lane->detector_mode == 1) ? "IPM" : "SCAN");
     cv::putText(full_img, text, {x3, y3}, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1, cv::LINE_AA);
 
-    // ESP32 và AI dồn chung cột 4. Dùng font nhỏ hơn vì cột hẹp ~130px.
-    int x4 = 780, y4 = 25;
+    // Ảnh rộng đúng 1000 (map 600 + panel 400). 5 cột phải nằm trong đó:
+    //   10 / 250 / 520 / 745 / 880, mỗi cột ~120px, cột cuối kết ở 990.
+    // Bản cũ xếp ở 15 / 300 / 615 / 865 / 1050 -> cột 4 và 5 nằm ngoài mép
+    // phải nên ESP32 và AI không bao giờ hiện.
+    int x4 = 745, y4 = 25;
     cv::putText(full_img, "ESP32", {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(255, 200, 100), 2, cv::LINE_AA);
     y4 += 21;
     snprintf(text, sizeof(text), "%s", serial_ok ? "OK" : "FAIL");
@@ -136,7 +139,7 @@ void draw_header(cv::Mat& full_img, const LaneOutput* lane, const LidarStatus& l
     snprintf(text, sizeof(text), "V: %.1f", esp_fb.valid ? esp_fb.velocity_kmh : 0.0f);
     cv::putText(full_img, text, {x4, y4}, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(200,200,200), 1, cv::LINE_AA);
 
-    int x5 = 895, y5 = 25;
+    int x5 = 880, y5 = 25;
     cv::putText(full_img, "AI", {x5, y5},
                 cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(255, 100, 255), 2, cv::LINE_AA);
     y5 += 21;
@@ -313,9 +316,22 @@ public:
         // Tốc độ NORMAL. 0 = để bộ lập của detector quyết (STRAIGHT 85 /
         // CURVE 60 / SHARP 45). Đặt 35 để quay lại hành vi cũ khi cần đo
         // lại hằng số bánh.
-        ObstacleAvoidance::set_speed_normal_override(
-            static_cast<uint8_t>(std::max(
-                0, std::min(255, declare_parameter("speed_normal_x10", 0)))));
+        //
+        // declare_parameter với literal 0 trả về int64_t, không phải int -
+        // std::min(255, <int64_t>) không có hàm nào khớp nên không compile.
+        // Ép kiểu rõ ràng thành int trước khi kẹp.
+        {
+            const int64_t raw = declare_parameter("speed_normal_x10", 0);
+            const int clamped = std::max(0, static_cast<int>(
+                std::min<int64_t>(255, raw)));
+            ObstacleAvoidance::set_speed_normal_override(
+                static_cast<uint8_t>(clamped));
+            RCLCPP_INFO(get_logger(),
+                        "Speed NORMAL: %s",
+                        clamped > 0
+                            ? "OVERRIDE (see oa.speed_override)"
+                            : "from lane planner");
+        }
 
         RCLCPP_INFO(get_logger(), "Waiting 2s for ESP32 to boot...");
         std::this_thread::sleep_for(std::chrono::milliseconds(2000));

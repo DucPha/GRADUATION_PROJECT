@@ -88,7 +88,9 @@ static constexpr unsigned long LIDAR_STALE_MS = 500;
 // không phải detector.
 
 static constexpr uint8_t SPEED_HOLD_X10 = 0;      // dừng / phanh
-static constexpr uint8_t SPEED_BYPASS_X10 = 30;   // né tránh, trả làn
+static constexpr uint8_t SPEED_BYPASS_X10 = 30;   // giữ vật cản bên phải/trái
+static constexpr uint8_t SPEED_SWERVE_X10 = 30;   // lách sang một bên
+static constexpr uint8_t SPEED_RETURN_X10 = 30;   // trả về làn
 
 // Detector mất lane -> target_speed_x10 = 0. KHÔNG dừng: xe còn đang trong làn,
 // chỉ là detector chập chờn. Dừng sẽ giật xe mỗi lần detector mất vài frame;
