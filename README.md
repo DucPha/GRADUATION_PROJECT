@@ -208,12 +208,77 @@ arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3 \
 5. Rút USB serial ⇒ log `serial FAIL`, node vẫn chạy.
 6. Bỏ vạch khỏi ảnh ⇒ `two_lanes=0`, tốc độ về `speed_hold_x10` rồi dừng sau 400 ms.
 
+## Lịch sử phát triển
+
+20 commit, 29/09/2026 → 04/10/2026. Chi tiết từng lỗi đã sửa: `docs/FIX_REPORT.md`
+(34 mục A1–A20, B1–B14).
+
+### 29/09 — Dựng workspace
+
+| Commit | Nội dung |
+|---|---|
+| `2a5d116` | Cấu trúc thư mục gốc |
+| `23d5aea` | Bật camera visualization, bridge `/image_raw` cho node AI, thêm launch file |
+| `d03669c` | Hỗ trợ cả ROS 2 Jazzy lẫn Humble (đường dẫn header `cv_bridge`) |
+| `e6ad491` | Sửa xung đột GPIO 19 ESP32 USB, exposure âm trên V4L2, mặc định an toàn |
+
+### 30/09 – 02/10 — Tính năng chính
+
+| Commit | Nội dung |
+|---|---|
+| `1c5361f`, `a7dcb44` | Cập nhật code ROS 2 |
+| `de9acb7` | Lane detection, obstacle avoidance, bộ công cụ test |
+
+### 03/10 — Sửa lỗi diện rộng và an toàn
+
+| Commit | Nội dung |
+|---|---|
+| `43531f2`, `883f27b` | Qt5 dashboard, debug publishers, `roi_y0`; sửa phép fit 3x3; giải quyết conflict |
+| `c647b1b` | `.gitignore`, tài liệu setup/arch/tuning; dọn cho NUC 8 GB |
+| `f60f2b7` | Sửa build Linux/ROS 2, V4L2 + `feedback_age_ms`, CMake, GUI deps |
+| `2c40c2a` | Dùng tham số `lidar_mount_offset_deg`, tự dò camera, chặn tốc độ ESP32, an toàn luồng GUI |
+| `a827256` | Thiếu `rclcpp::init` trong GUI main |
+| `19988f4` | Bỏ lặp tốc độ của detector cho state `NORMAL` |
+| `59845cf` | `SPEED_SWERVE`/`SPEED_RETURN` chưa khai báo, lỗi kiểu `min()` |
+| `ab9b951` | Sửa `lane_mask`, `fusion_viz_node`, `bringup.launch.py`, `.vscode`. **Message gốc là rác** (`ádasdasd`) |
+| `104f0f5` | Viết lại firmware (329 dòng) + `bringup.launch.py` (251 dòng), thêm `run_all.sh`. **Message gốc là rác** (`ádasdasd`) |
+
+Hai commit `ab9b951` và `104f0f5` để trống message nên không đọc được nội dung gì từ
+`git log`. Nội dung thật lấy từ `git show --stat` như bảng trên.
+
+Phần lớn commit trong ngày này thuộc đợt sửa 34 lỗi ghi ở `docs/FIX_REPORT.md`, trong đó
+lỗi chí mạng nhất: vùng quét LiDAR lệch 90° khiến xe **không bao giờ** thấy vật cản
+phía trước (A1), in chẩn đoán trên đúng UART mang protocol nhị phân làm mất gói (A10),
+vùng trước/sau chồng nhau kẹt BYPASS vĩnh viễn (A2).
+
+### 04/10 — Tái cấu trúc và hoàn thiện pipeline ảnh
+
+| Commit | Nội dung |
+|---|---|
+| `67afea9` | Bỏ layout cũ (`src/`, `tools/`, Docker, 3 video 65 MB), tách `software/` |
+| `0bbce1e` | 7 package ROS 2; pipeline 9 bước; đo cm bằng công thức pinhole thay IPM; sửa lỗi đo bề rộng ở sai cửa sổ |
+| `3f3855a` | Viết lại README và docs cho kiến trúc mới |
+
+Hai quyết định thiết kế đáng chú ý ở đợt này:
+
+- **Bỏ IPM.** Đo bề rộng làn theo centimet bằng công thức pinhole chỉ cần 2 số
+  (`CAMERA_HEIGHT_M`, `HORIZON_Y`) thay vì 4 điểm hiệu chỉnh + `warpPerspective`.
+  Nhờ vậy `dev_px` vẫn là pixel ảnh gốc nên **firmware không phải sửa**, protocol 11 byte
+  giữ nguyên.
+- **Sửa lỗi đo bề rộng.** Code đo bề rộng ở cửa sổ xa nhất (2 vạch hẹp nhất) thay vì
+  cửa sổ gần xe. Với làn 30 cm, ở cửa sổ xa chỉ còn 32 px < `LANE_WIDTH_MIN` nên bị lo.
+
 ## Tài liệu khác
 
 - `docs/SETUP_GUIDE.md` — cài đặt và xử lý sự cố
 - `docs/TUNING.md` — chỉnh detector
 - `docs/ARCHITECTURE.md` — luồng dữ liệu giữa các thành phần
-- `docs/FIX_REPORT.md` — lịch sử lỗi đã sửa (theo bố cục code cũ)
+- `docs/FIX_REPORT.md` — 34 lỗi đã sửa, theo bố cục code cũ
+- `docs/camera_lane_phan_tich.docx` — phân tích detector làn
+- `docs/lidar_module_phan_tich.docx` — phân tích LiDAR
+- `findings.md` — số liệu chứng minh cho quyết định thiết kế (vì sao ROI 0.45 sai,
+  vì sao bỏ IPM, bề rộng làn theo từng hàng)
+- `Advanced_Lane_Keeping.doc` — tài liệu tham khảo bài toán đường không vạch
 
 ## License
 
