@@ -1,27 +1,46 @@
 #!/usr/bin/env python3
+"""
+Turn Direction Detector using NCNN + Vulkan acceleration.
+Publishes detection decisions to /turn_detector/decision and debug images to /turn_detector/image_debug.
+"""
+
+import os
+import cv2
+import numpy as np
+from collections import deque
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 
-import cv2
-import numpy as np
-from collections import deque
-
 try:
     import ncnn  # type: ignore
 except Exception:
     from ncnn_vulkan import ncnn  # type: ignore
 
+# Default model paths (can be overridden by ROS parameters)
+# Ưu tiên: biến môi trường TURN_MODEL_DIR -> package share -> fallback cũ
+DEFAULT_TURN_MODEL_DIR = os.environ.get(
+    "TURN_MODEL_DIR",
+    os.path.expanduser("~/models/turn_lr_ncnn_model")
+)
+DEFAULT_MODEL_PARAM = os.path.join(DEFAULT_TURN_MODEL_DIR, "model.ncnn.param")
+DEFAULT_MODEL_BIN = os.path.join(DEFAULT_TURN_MODEL_DIR, "model.ncnn.bin")
 
-MODEL_PARAM = "/home/pi/models/turn_lr_ncnn_model/model.ncnn.param"
-MODEL_BIN   = "/home/pi/models/turn_lr_ncnn_model/model.ncnn.bin"
-INPUT_BLOB  = "in0"
-OUTPUT_BLOB = "out0"  # cat_18 -> out0 [file:173]
+INPUT_BLOB = "in0"
+OUTPUT_BLOB = "out0"
+
+# Topic mặc định. Tất cả đều khai báo được qua ROS parameter (xem __init__)
+# để đổi tên không phải sửa code.
+DEFAULT_TOPIC_IMAGE = "/turn_detector/image_debug"
+DEFAULT_TOPIC_DECISION = "/turn_detector/decision"
+DEFAULT_TOPIC_INPUT = "/image_raw"
 
 
 def letterbox_bgr(img, new_size=320, color=(114, 114, 114)):
+    """Resize with unchanged aspect ratio using padding."""
     h, w = img.shape[:2]
     r = min(new_size / w, new_size / h)
     nw, nh = int(round(w * r)), int(round(h * r))
@@ -38,12 +57,12 @@ def sigmoid(x):
 
 
 def ncnn_mat_to_np(mat_out):
+    """Convert ncnn Mat to numpy array."""
     a = np.array(mat_out).astype(np.float32)
     w = getattr(mat_out, "w", None)
     h = getattr(mat_out, "h", None)
     c = getattr(mat_out, "c", None)
 
-    # thÆ°á»ng out0 ra dáº¡ng (h, w) vá»›i h=6 w=2100
     if w is not None and h is not None and a.size == h * w:
         return a.reshape(h, w)
 
@@ -56,31 +75,39 @@ def ncnn_mat_to_np(mat_out):
 class TurnDetectorNCNNVulkan(Node):
     def __init__(self):
         super().__init__("turn_detector_ncnn_vulkan")
+        self.model_ready = False
 
         self.bridge = CvBridge()
-        self.sub = self.create_subscription(Image, "/image_raw", self.image_callback, 10)
-        self.pub_decision = self.create_publisher(String, "/turn_detector/decision", 10)
-        self.pub_img = self.create_publisher(Image, "/traffic_light/image_debug", 10)
-        self.model_param = self.declare_parameter("model_param", MODEL_PARAM).value
-        self.model_bin = self.declare_parameter("model_bin", MODEL_BIN).value
+
+        # Topic là tham số: trước đây viết cứng trong module nên không đổi
+        # được từ launch, và node C++ cũng chỉ subscribe đúng tên mặc định.
+        topic_input = self.declare_parameter("image_topic", DEFAULT_TOPIC_INPUT).value
+        topic_decision = self.declare_parameter("decision_topic", DEFAULT_TOPIC_DECISION).value
+        topic_image = self.declare_parameter("debug_image_topic", DEFAULT_TOPIC_IMAGE).value
+
+        self.sub = self.create_subscription(Image, topic_input, self.image_callback, 10)
+        self.pub_decision = self.create_publisher(String, topic_decision, 10)
+        self.pub_img = self.create_publisher(Image, topic_image, 10)
+
+        self.model_param = self.declare_parameter("model_param", DEFAULT_MODEL_PARAM).value
+        self.model_bin = self.declare_parameter("model_bin", DEFAULT_MODEL_BIN).value
 
         self.history = deque(maxlen=5)
         self.last_frame = None
+        # Định danh frame để không infer lại cùng một ảnh nhiều lần: nếu không,
+        # một mũi tên duy nhất bị "bỏ phiếu" nhiều lần và voting 3/5 trở nên vô
+        # nghĩa vì cả 5 phiếu đến từ một frame duy nhất.
+        self.frame_seq = 0
+        self.last_inferred_seq = -1
 
-        # Params
+        # Parameters
         self.declare_parameter("infer_hz", 30.0)
         self.declare_parameter("imgsz", 320)
-
-        # threshold class prob (vÃ¬ out0 lÃ  bbox + 2 class sigmoid theo graph) [file:173]
         self.declare_parameter("conf_keep", 0.05)
-
-        # filter bbox quÃ¡ nhá» (trÃ¡nh bbox â€œtÃ­ honâ€)
-        self.declare_parameter("min_box_area_ratio", 0.02)  # theo ROI area
-
+        self.declare_parameter("min_box_area_ratio", 0.02)
         self.declare_parameter("bbox_shrink", 0.12)
         self.declare_parameter("deadzone_ratio", 0.12)
         self.declare_parameter("min_area_ratio", 0.02)
-
         self.declare_parameter("invert_class", False)
 
         self.infer_hz = float(self.get_parameter("infer_hz").value)
@@ -90,31 +117,62 @@ class TurnDetectorNCNNVulkan(Node):
         self.imgsz = int(self.get_parameter("imgsz").value)
         self.conf_keep = float(self.get_parameter("conf_keep").value)
         self.min_box_area_ratio = float(self.get_parameter("min_box_area_ratio").value)
-
         self.bbox_shrink = float(self.get_parameter("bbox_shrink").value)
         self.deadzone_ratio = float(self.get_parameter("deadzone_ratio").value)
         self.min_area_ratio = float(self.get_parameter("min_area_ratio").value)
-
         self.invert_class = bool(self.get_parameter("invert_class").value)
 
-        # --- NCNN Vulkan ---
+        # Initialize NCNN
+        self._init_ncnn()
+
+        self.logged_once = False
+        self.last_log_ns = 0
+        self._last_published_decision = None
+        self._last_decision_pub_ns = 0
+        self.DECISION_HEARTBEAT_NS = 500_000_000   # 0.5s, nhỏ hơn ai_timeout_s (2s)
+
+        self.get_logger().info("TurnDetector NCNN Vulkan STARTED (iGPU/Vulkan)")
+        self.get_logger().info(f"  model_param = {self.model_param}")
+        self.get_logger().info(f"  decision topic = {topic_decision}")
+        self.timer = self.create_timer(1.0 / self.infer_hz, self.process_latest)
+
+    def _init_ncnn(self):
+        """Initialize NCNN network with error handling."""
         self.net = ncnn.Net()
         self.net.opt.use_vulkan_compute = True
         self.net.opt.num_threads = 4
 
-        self.net.load_param(self.model_param)
-        self.net.load_model(self.model_bin)
+        # Validate model files exist
+        if not os.path.exists(self.model_param):
+            raise FileNotFoundError(f"Model param file not found: {self.model_param}")
+        if not os.path.exists(self.model_bin):
+            raise FileNotFoundError(f"Model bin file not found: {self.model_bin}")
 
-        self.logged_once = False
-        self.last_log_ns = 0
+        # load_param/load_model return int (0 = success)
+        rc_param = self.net.load_param(self.model_param)
+        rc_model = self.net.load_model(self.model_bin)
+        if rc_param != 0 or rc_model != 0:
+            self.get_logger().error(
+                f"Failed to load NCNN model (param rc={rc_param}, bin rc={rc_model}).\n"
+                f"  model_param: {self.model_param}\n"
+                f"  model_bin  : {self.model_bin}\n"
+                f"Pass correct paths via ROS parameters: model_param:=... model_bin:=..."
+            )
+            raise RuntimeError(f"NCNN model load failed: {self.model_param}")
 
-        self.get_logger().info("âœ… TurnDetector NCNN Vulkan STARTED (iGPU/Vulkan)")
-        self.timer = self.create_timer(1.0 / self.infer_hz, self.process_latest)
+        self.model_ready = True
 
     def image_callback(self, msg: Image):
-        self.last_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert image: {e}")
+            return
+        self.frame_seq += 1
+        self.last_frame = frame
 
     def detect_arrow_direction(self, crop):
+        """Detect arrow direction using contour analysis."""
         if crop is None or crop.size == 0:
             return None
 
@@ -122,18 +180,17 @@ class TurnDetectorNCNNVulkan(Node):
         if ch < 10 or cw < 10:
             return None
 
-        # ✅ GAMMA CORRECTION: Tăng độ sáng cho màn hình tối
-        gamma = 1.5  # > 1 = sáng hơn, < 1 = tối hơn
+        # Gamma correction for dark screens
+        gamma = 1.5
         inv_gamma = 1.0 / gamma
-        table = np.array([(i / 255.0) ** inv_gamma * 255 
-                        for i in np.arange(0, 256)]).astype("uint8")
+        table = np.array([(i / 255.0) ** inv_gamma * 255 for i in np.arange(0, 256)]).astype("uint8")
         brightened = cv2.LUT(crop, table)
-        
+
         hsv = cv2.cvtColor(brightened, cv2.COLOR_BGR2HSV)
-        
-        # Giảm threshold
-        lower_white = np.array([0, 0, 130])  # ← GIẢM THÊM
-        upper_white = np.array([180, 100, 255])  # ← NỚI RỘNG Saturation
+
+        # White color threshold
+        lower_white = np.array([0, 0, 130])
+        upper_white = np.array([180, 100, 255])
         mask = cv2.inRange(hsv, lower_white, upper_white)
 
         kernel = np.ones((5, 5), np.uint8)
@@ -173,13 +230,12 @@ class TurnDetectorNCNNVulkan(Node):
         if abs(dx) < dead:
             return None
 
-        # báº¡n Ä‘Ã£ Ä‘áº£o cho phÃ¹ há»£p camera thá»±c táº¿
+        # Direction mapping (calibrated for actual camera)
         return "left" if dx < 0 else "right"
 
     def decode_box_auto(self, b4):
         b4 = b4.astype(np.float32).copy()
 
-        # normalized?
         if np.max(np.abs(b4)) <= 2.0:
             b4 *= float(self.imgsz)
 
@@ -190,32 +246,26 @@ class TurnDetectorNCNNVulkan(Node):
         cx, cy, bw, bh = b4
         return cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2
 
-    """ def publish_result(self, frame, decision):
-        cv2.putText(frame, f"TURN: {decision}", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-        self.pub_decision.publish(String(data=decision))
+    def publish_result(self, frame, decision):
+        """Publish decision and debug image."""
+        if decision == "TURN_LEFT":
+            cv2.putText(frame, "TURN LEFT", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+        elif decision == "TURN_RIGHT":
+            cv2.putText(frame, "TURN RIGHT", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+
         self.pub_img.publish(self.bridge.cv2_to_imgmsg(frame, "bgr8"))
 
+        # Chỉ phát String khi quyết định đổi; vẫn heartbeat 0.5s để watchdog
+        # `ai_timeout_s` của fusion_viz_node không xoá quyết định còn hợp lệ.
         now_ns = self.get_clock().now().nanoseconds
-        if now_ns - self.last_log_ns > 1_000_000_000:
-            self.last_log_ns = now_ns
-            l = self.history.count("left")
-            r = self.history.count("right")
-            self.get_logger().info(f"decision={decision}  L={l} R={r}") """
-    def publish_result(self, frame, decision):
-        # Hiá»‡n text vá»›i mÃ u khÃ¡c nhau
-        if decision == "TURN_LEFT":
-            cv2.putText(frame, "TURN LEFT", (20, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-        elif decision == "TURN_RIGHT":
-            cv2.putText(frame, "TURN RIGHT", (20, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-        # KhÃ´ng hiá»‡n gÃ¬ khi NONE
-        
-        self.pub_decision.publish(String(data=decision))
-        self.pub_img.publish(self.bridge.cv2_to_imgmsg(frame, "bgr8"))
-        
-        now_ns = self.get_clock().now().nanoseconds
+        if (decision != self._last_published_decision or
+                (now_ns - self._last_decision_pub_ns) >= self.DECISION_HEARTBEAT_NS):
+            self.pub_decision.publish(String(data=decision))
+            self._last_published_decision = decision
+            self._last_decision_pub_ns = now_ns
+
         if now_ns - self.last_log_ns > 1_000_000_000:
             self.last_log_ns = now_ns
             l = self.history.count("left")
@@ -223,8 +273,19 @@ class TurnDetectorNCNNVulkan(Node):
             self.get_logger().info(f"{decision=} L={l} R={r}")
 
     def process_latest(self):
+        if not self.model_ready:
+            self.get_logger().warn("Model not ready, skipping inference")
+            return
+
         if self.last_frame is None:
             return
+
+        # Chỉ xử lý frame mới. Timer 30 Hz chạy nhanh hơn tần suất ảnh vào,
+        # nên không có bước này thì cùng một frame bị infer lại nhiều lần và
+        # deque 5 phiếu đầy bằng 5 bản sao của một ảnh.
+        if self.frame_seq == self.last_inferred_seq:
+            return
+        self.last_inferred_seq = self.frame_seq
 
         frame = self.last_frame
         H, W, _ = frame.shape
@@ -237,13 +298,16 @@ class TurnDetectorNCNNVulkan(Node):
         rh, rw = roi.shape[:2]
         roi_area = float(rh * rw)
 
-        img_lb_bgr, r, padw, padh = letterbox_bgr(roi, new_size=self.imgsz)
+        if rw < 2 or rh < 2:
+            return
 
-        # IMPORTANT: Ultralytics preprocess cÃ³ bÆ°á»›c BGR->RGB, nÃªn custom ncnn cÅ©ng pháº£i Ä‘Æ°a RGB vÃ o [web:227][web:231]
+        img_lb_bgr, r, padw, padh = letterbox_bgr(roi, new_size=self.imgsz)
         img_lb_rgb = cv2.cvtColor(img_lb_bgr, cv2.COLOR_BGR2RGB)
 
-        mat_in = ncnn.Mat.from_pixels(img_lb_rgb, ncnn.Mat.PixelType.PIXEL_RGB, self.imgsz, self.imgsz)
-        mat_in.substract_mean_normalize([], [1/255.0, 1/255.0, 1/255.0])
+        mat_in = ncnn.Mat.from_pixels(
+            img_lb_rgb, ncnn.Mat.PixelType.PIXEL_RGB, self.imgsz, self.imgsz
+        )
+        mat_in.substract_mean_normalize([], [1 / 255.0, 1 / 255.0, 1 / 255.0])
 
         ex = self.net.create_extractor()
         ex.input(INPUT_BLOB, mat_in)
@@ -254,7 +318,7 @@ class TurnDetectorNCNNVulkan(Node):
 
         mat = ncnn_mat_to_np(mat_out)
 
-        # chuáº©n hoÃ¡ out vá» (N,6)
+        # Normalize output to (N, 6)
         if isinstance(mat, np.ndarray) and mat.ndim == 2:
             if mat.shape[1] == 6:
                 out = mat
@@ -271,52 +335,52 @@ class TurnDetectorNCNNVulkan(Node):
                 return
             out = flat.reshape(-1, 6)
 
-        # Debug 1 láº§n
         if not self.logged_once:
             self.logged_once = True
             self.get_logger().info(
-                f"out0 mat w={getattr(mat_out,'w',None)} h={getattr(mat_out,'h',None)} c={getattr(mat_out,'c',None)} "
-                f"-> out shape={out.shape}, min={out.min():.3f}, max={out.max():.3f}"
+                f"out0 mat w={getattr(mat_out,'w',None)} h={getattr(mat_out,'h',None)} "
+                f"c={getattr(mat_out,'c',None)} -> out shape={out.shape}, "
+                f"min={out.min():.3f}, max={out.max():.3f}"
             )
             self.get_logger().info(f"out0 row0={out[0].tolist()}")
 
         boxes4 = out[:, 0:4]
         probs = out[:, 4:6]
 
-        # náº¿u probs Ä‘ang lÃ  logits thÃ¬ sigmoid láº¡i (Ä‘á»ƒ cháº¯c cháº¯n) [file:173]
+        # Apply sigmoid if logits
         if probs.max() > 1.0 or probs.min() < 0.0:
             probs = sigmoid(probs)
 
         cls = np.argmax(probs, axis=1)
         score = probs[np.arange(probs.shape[0]), cls]
 
-        # chá»n candidate theo conf_keep
+        # Filter by confidence
         cand = np.where(score >= self.conf_keep)[0]
         if cand.size == 0:
             self.history.append("none")
             self.publish_result(frame, "NONE")
             return
 
-        # decode bbox cho candidates + lá»c bbox quÃ¡ nhá» + chá»n best theo score*sqrt(area)
+        # Select best candidate by score * sqrt(area)
         best_i = None
         best_metric = -1.0
         best_box = None
         best_cls = 0
         best_score = 0.0
 
-        for i in cand[:300]:  # giá»›i háº¡n Ä‘á»ƒ nháº¹
+        for i in cand[:300]:
             x1, y1, x2, y2 = self.decode_box_auto(boxes4[i])
 
-            # undo letterbox -> ROI
+            # Undo letterbox
             x1 = (x1 - padw) / r
             x2 = (x2 - padw) / r
             y1 = (y1 - padh) / r
             y2 = (y2 - padh) / r
 
             x1 = float(max(0.0, min(rw - 1.0, x1)))
-            x2 = float(max(0.0, min(rw * 1.0, x2)))
+            x2 = float(max(0.0, min(rw - 1.0, x2)))
             y1 = float(max(0.0, min(rh - 1.0, y1)))
-            y2 = float(max(0.0, min(rh * 1.0, y2)))
+            y2 = float(max(0.0, min(rh - 1.0, y2)))
             if x2 <= x1 or y2 <= y1:
                 continue
 
@@ -339,11 +403,11 @@ class TurnDetectorNCNNVulkan(Node):
 
         x1, y1, x2, y2 = best_box
 
-        # vá» full-frame coords
+        # Convert to full-frame coordinates
         x1 = int(x1 + roi_x1); x2 = int(x2 + roi_x1)
         y1 = int(y1 + roi_y1); y2 = int(y2 + roi_y1)
 
-        # siáº¿t bbox + clamp
+        # Shrink bbox
         padx = int(self.bbox_shrink * (x2 - x1))
         pady = int(self.bbox_shrink * (y2 - y1))
         x1 += padx; x2 -= padx
@@ -358,7 +422,7 @@ class TurnDetectorNCNNVulkan(Node):
             self.publish_result(frame, "NONE")
             return
 
-        # direction by model class (fallback)
+        # Direction from model class (with optional inversion)
         if self.invert_class:
             best_cls = 1 - best_cls
         direction_model = "left" if best_cls == 0 else "right"
@@ -368,16 +432,18 @@ class TurnDetectorNCNNVulkan(Node):
         direction = direction_contour if direction_contour else direction_model
 
         self.history.append(direction if direction else "none")
+
+        # Voting: require clear majority (>=3 votes with >=2 margin)
         l = self.history.count("left")
         r = self.history.count("right")
 
-        if l >= 3:
+        if l >= 3 and l - r >= 2:
             decision = "TURN_LEFT"
-        elif r >= 3:
+        elif r >= 3 and r - l >= 2:
             decision = "TURN_RIGHT"
         else:
             decision = "NONE"
-        # debug
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, f"arrow: {direction} ({best_score:.2f})",
                     (x1, max(0, y1 - 5)),
@@ -388,7 +454,12 @@ class TurnDetectorNCNNVulkan(Node):
 
 def main():
     rclpy.init()
-    node = TurnDetectorNCNNVulkan()
+    try:
+        node = TurnDetectorNCNNVulkan()
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"[turn_detector] ERROR: {e}")
+        rclpy.shutdown()
+        raise SystemExit(1)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

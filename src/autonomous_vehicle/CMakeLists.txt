@@ -12,8 +12,6 @@ find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
 find_package(Threads REQUIRED)
 
 add_executable(autonomous_vehicle_node
@@ -29,7 +27,6 @@ target_include_directories(autonomous_vehicle_node PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 	$<INSTALL_INTERFACE:include>
 	${OpenCV_INCLUDE_DIRS}
-	${JSONCPP_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(autonomous_vehicle_node
@@ -42,7 +39,6 @@ ament_target_dependencies(autonomous_vehicle_node
 
 target_link_libraries(autonomous_vehicle_node
 	${OpenCV_LIBS}
-	PkgConfig::JSONCPP
 	Threads::Threads
 )
 
@@ -55,7 +51,41 @@ install(DIRECTORY include/
 install(DIRECTORY launch/
 	DESTINATION share/${PROJECT_NAME}/launch
 )
+install(DIRECTORY rviz/
+	DESTINATION share/${PROJECT_NAME}/rviz
+)
 
 ament_export_include_directories(include)
 ament_export_dependencies(rclcpp sensor_msgs std_msgs builtin_interfaces cv_bridge)
 ament_package()
+
+# ============================================================================
+# TESTS
+# ============================================================================
+if(BUILD_TESTING)
+	find_package(ament_cmake_gtest REQUIRED)
+	ament_add_gtest(test_lidar_module
+		test/test_lidar_module.cpp
+		src/lidar_module.cpp
+	)
+	target_include_directories(test_lidar_module PRIVATE
+		/include
+		
+	)
+	target_link_libraries(test_lidar_module )
+	ament_target_dependencies(test_lidar_module sensor_msgs)
+	add_executable(test_camera_lane
+		test/test_camera_lane.cpp
+		src/camera_lane.cpp
+		src/lane_mask.cpp
+		src/lidar_module.cpp
+	)
+	target_include_directories(test_camera_lane PRIVATE
+		/include
+		
+		
+	)
+	target_link_libraries(test_camera_lane  PkgConfig::JSONCPP Threads::Threads)
+	ament_target_dependencies(test_camera_lane rclcpp sensor_msgs std_msgs cv_bridge)
+	install(TARGETS test_camera_lane DESTINATION lib/)
+endif()
