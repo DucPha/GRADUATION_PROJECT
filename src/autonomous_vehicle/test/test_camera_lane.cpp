@@ -2,6 +2,7 @@
 //
 //   ./build/autonomous_vehicle/test_camera_lane [seconds] [fps] [camera_index]
 //
+// camera_index = -1 nghĩa là tự dò /dev/video0..7 (giống launch).
 // In FPS thực (đo bằng frame_id, không tin CAP_PROP_FPS của OpenCV), tỉ lệ
 // frame có lane valid, và thời gian xử lý trung bình.
 #include "camera_lane.hpp"
@@ -19,7 +20,7 @@ using namespace std::chrono;
 int main(int argc, char** argv) {
     const int seconds = (argc > 1) ? std::atoi(argv[1]) : 20;
     const int target_fps = (argc > 2) ? std::atoi(argv[2]) : 30;
-    const int device_index = (argc > 3) ? std::atoi(argv[3]) : 0;
+    const int device_index = (argc > 3) ? std::atoi(argv[3]) : -1;
 
     CameraLane cam(device_index, target_fps, true);
     if (!cam.start()) {

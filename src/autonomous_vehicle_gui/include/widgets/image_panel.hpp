@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QImage>
+#include <QPixmap>
 #include <QString>
 #include <QWidget>
 
