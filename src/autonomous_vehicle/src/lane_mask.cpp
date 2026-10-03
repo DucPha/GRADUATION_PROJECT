@@ -153,10 +153,8 @@ bool build_lane_mask(
     // Đã chuyển sang xoá trên mask nhị phân, xem bước 4b.
 
     // -----------------------------------------------------------------------
-    // 2. CLAHE 3 kênh rồi bóc kênh L
-    // CLAHE trên ảnh màu xử lý được cả 3 kênh trong một lượt OpenCV, rẻ hơn
-    // split() rồi CLAHE từng kênh. Bản cũ chỉ CLAHE kênh G cho Sobel còn kênh
-    // R quyết định mask thì để nguyên -> chỗ quyết định không được cân bằng.
+    // 2. Chuyển Lab -> CLAHE trên kênh L -> trở lại BGR
+    // CLAHE trong OpenCV chỉ hỗ trợ ảnh 1 kênh. Chuyển Lab, apply L, convert back.
     // -----------------------------------------------------------------------
     static cv::Ptr<cv::CLAHE> cached_clahe;
     static int cached_clip = -1;
@@ -176,16 +174,25 @@ bool build_lane_mask(
         cached_gy = opts.clahe_grid_y;
     }
 
-    cv::Mat equalized;
-    cached_clahe->apply(work, equalized);
-
     cv::Mat lab;
-    cv::cvtColor(equalized, lab, cv::COLOR_BGR2Lab);
+    cv::cvtColor(work, lab, cv::COLOR_BGR2Lab);
 
-    // L trong OpenCV Lab nằm ở byte 0 (0..255 đã scale sẵn).
     std::vector<cv::Mat> lab_channels;
     cv::split(lab, lab_channels);
-    const cv::Mat& l_channel = lab_channels[0];
+    cv::Mat l_channel = lab_channels[0];
+
+    cv::Mat l_equalized;
+    cached_clahe->apply(l_channel, l_equalized);
+    lab_channels[0] = l_equalized;
+
+    cv::Mat equalized_lab;
+    cv::merge(lab_channels, equalized_lab);
+
+    cv::Mat equalized;
+    cv::cvtColor(equalized_lab, equalized, cv::COLOR_Lab2BGR);
+
+    // L trong OpenCV Lab nằm ở byte 0 (0..255 đã scale sẵn).
+    // Đã có l_channel từ trên
 
     // -----------------------------------------------------------------------
     // 3. Ngưỡng thích nghi theo phân vị

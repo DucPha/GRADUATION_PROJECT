@@ -116,8 +116,8 @@ DashboardWindow::DashboardWindow(DashboardNode* node, QWidget* parent)
     top->setSizes({320,800});
 
     QWidget* bot = new QWidget();
-    QHBoxLayout* bh = new QHBoxLayout(bot);
-    bh->setSpacing(4);
+    QSplitter* bh = new QSplitter(bot);
+    bh->setStyleSheet("QSplitter::handle { width: 4px; }"); // hoặc chỉnh khoảng cách thông qua layout bên trong splitter nếu có
     bh->setContentsMargins(0,0,0,0);
 
     pidPlot_ = new TrendPlot("PID SPEED","km/h",0,20,false);

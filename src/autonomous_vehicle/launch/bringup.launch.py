@@ -175,9 +175,9 @@ def generate_launch_description():
                               description="Ngưỡng coi quyết định AI là cũ (s)"),
 
         # AI detectors
-        DeclareLaunchArgument("enable_traffic", default_value="true",
+        DeclareLaunchArgument("enable_traffic", default_value="false",
                               description="Bật node nhận dạng đèn giao thông"),
-        DeclareLaunchArgument("enable_turn", default_value="true",
+        DeclareLaunchArgument("enable_turn", default_value="false",
                               description="Bật node nhận dạng mũi tên rẽ"),
         DeclareLaunchArgument("traffic_model_param",
                               default_value=_default_traffic_model("model.ncnn.param")),

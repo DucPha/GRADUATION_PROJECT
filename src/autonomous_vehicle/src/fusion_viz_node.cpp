@@ -354,9 +354,11 @@ public:
             RCLCPP_INFO(get_logger(), " Serial port opened successfully");
         }
 
+        // RPLiDAR publishes with RELIABLE QoS, SensorDataQoS is BEST_EFFORT -> mismatch
+        auto scan_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile();
         sub_scan_ = create_subscription<sensor_msgs::msg::LaserScan>(
             declare_parameter("scan_topic", "/scan"),
-            rclcpp::SensorDataQoS(),
+            scan_qos,
             std::bind(&FusionVizNode::on_scan, this, _1)
         );
 
