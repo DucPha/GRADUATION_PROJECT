@@ -354,12 +354,16 @@ public:
             RCLCPP_INFO(get_logger(), " Serial port opened successfully");
         }
 
-        // RPLiDAR publishes with RELIABLE QoS, SensorDataQoS is BEST_EFFORT -> mismatch
-        auto scan_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile();
+        // RPLiDAR publishes with RELIABLE QoS. Use default QoS to ensure compatibility.
+        std::string scan_topic = declare_parameter("scan_topic", "/scan");
+        RCLCPP_INFO(get_logger(), "Subscribing to LiDAR topic: '%s'", scan_topic.c_str());
         sub_scan_ = create_subscription<sensor_msgs::msg::LaserScan>(
-            declare_parameter("scan_topic", "/scan"),
-            scan_qos,
-            std::bind(&FusionVizNode::on_scan, this, _1)
+            scan_topic,
+            rclcpp::QoS(10),
+            [this](const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "on_scan callback triggered!");
+                this->on_scan(msg);
+            }
         );
 
         // Góc hiệu chỉnh lắp đặt LiDAR. KHÔNG được bỏ qua: LiDARModule mặc
@@ -499,6 +503,10 @@ private:
         }
         last_lidar_time_ = t;
         last_lidar_ = lidar_.update(*msg);
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, 
+            "LiDAR scan received: %zu points, has_data=%d, fps=%.1f, front=%.1f",
+            msg->ranges.size(), last_lidar_.has_data, lidar_fps_, 
+            last_lidar_.front_min_cm.value_or(-1.0));
     }
 
     void on_signs(const std_msgs::msg::String::SharedPtr msg) {

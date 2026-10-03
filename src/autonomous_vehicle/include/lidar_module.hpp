@@ -78,7 +78,7 @@ public:
     static constexpr int MAP_RADIUS_CM = 80;
     static constexpr float PX_PER_CM = 3.75f;
 
-    static constexpr int DETECT_RADIUS_CM = 200;
+    static constexpr int DETECT_RADIUS_CM = 500;
 
     static constexpr float SAFE_FRONT_DISTANCE = 60.0f;
     static constexpr float DANGER_FRONT_DISTANCE = 40.0f;
