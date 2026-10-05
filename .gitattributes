@@ -1,0 +1,21 @@
+# File shell phai LF, neu la CRLR thi Ubuntu khong chay duoc
+*.sh text eol=lf
+
+# Source code: giu nguyen trong repo
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.py text eol=lf
+*.ino text eol=lf
+*.txt text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+CMakeLists.txt text eol=lf
+
+# Van ban: giu CRLF de Windows doc dep
+*.md text eol=crlf
+
+# Nhung file nay khong phai text
+*.docx binary
+*.doc binary
+*.png binary
+*.jpg binary

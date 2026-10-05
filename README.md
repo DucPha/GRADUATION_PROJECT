@@ -13,30 +13,49 @@ và gửi lệnh lái/tốc độ xuống ESP32-S3 qua **USB-OTG**.
 | Động cơ | DC motor + ESC | GPIO 33 |
 | Steering | Servo | GPIO 32 |
 
-Pin lấy từ `firmware/esp32s3/autonomous_vehicle/autonomous_vehicle/autonomous_vehicle.ino`:
+Pin lấy từ `firmware/esp32s3/autonomous_vehicle/autonomous_vehicle.ino`:
 `PIN_STEER=32`, `PIN_ESC=33`, `PIN_TURN_L=25`, `PIN_TURN_R=26`, `PIN_BRAKE=27`, `PIN_HALL=4`.
 
 ## Cấu trúc
 
+Repo **là** workspace colcon của ROS 2: `src/` nằm ngay trong repo nên clone về
+`~/autocar_ws` là build được, không cần symlink.
+
 ```
-GRADUATION_PROJECT/
-├── software/                      # workspace con đưa vào src/ của colcon
-│   ├── camera_node/               # package camera_node  — detector 2 làn (OpenCV, không rclcpp)
-│   ├── esp32s3_node/              # package esp32s3_node — driver serial (không rclcpp)
-│   ├── sllidar_ros2_node/         # package sllidar_ros2_node — LidarModule + ObstacleAvoidance
-│   ├── fusion_node/               # package fusion_node — node điều khiển duy nhất + launch
-│   ├── gui_node/                  # package autonomous_vehicle_gui (Qt5, đang tự phát triển)
-│   ├── traffic_light_detector/    # Python, chưa nối vào phase 1
-│   ├── turn_detector/             # Python, chưa nối vào phase 1
-│   └── launch/dashboard.launch.py # (tham chiếu, GUI tự làm sau)
-├── firmware/esp32s3/
-│   ├── autonomous_vehicle/autonomous_vehicle/  # firmware xe (đang dùng)
-│   ├── motor_test/  servo_test/  esp32s3_wifi/  # sketch kiểm tra từng phần
-├── docs/                          # SETUP_GUIDE, TUNING, ARCHITECTURE, FIX_REPORT
-├── spec/, template/, skills/      # đặc tả và hướng dẫn làm việc
-├── graduation_project-master/     # tài liệu tham khảo gốc
-└── run_all.sh                     # chạy toàn bộ hệ thống
+GRADUATION_PROJECT/                  # = ~/autocar_ws
+├── run.sh                           # build + chạy toàn bộ hệ thống
+├── src/                             # package ROS 2 (colcon chỉ tìm ở đây)
+│   ├── camera_node/                  # thư viện detector 2 làn (OpenCV, không rclcpp)
+│   │   └── camera_node.hpp           #   toàn bộ hằng số detector
+│   ├── esp32s3_node/                 # thư viện driver serial 11/7 byte
+│   ├── sllidar_ros2_node/            # LidarModule + ObstacleAvoidance
+│   ├── fusion_node/                  # node điều khiển duy nhất
+│   │   ├── fusion_viz_node.cpp
+│   │   └── launch/fusion.launch.py   #   launch có tham số
+│   ├── gui_matplotlib/               # dashboard Python + matplotlib
+│   ├── traffic_light_detector/       # Python, chưa nối vào phase 1
+│   └── turn_detector/                # Python, chưa nối vào phase 1
+├── firmware/esp32s3/                 # Arduino sketch (.ino)
+│   ├── autonomous_vehicle/           # firmware xe đang dùng
+│   └── motor_test/  servo_test/  esp32s3_wifi/
+├── docs/                             # tài liệu
+│   ├── SETUP_GUIDE.md  TUNING.md  ARCHITECTURE.md  FIX_REPORT.md
+│   ├── camera_lane_phan_tich.docx    # phân tích detector làn
+│   ├── lidar_module_phan_tich.docx   # phân tích LiDAR
+│   ├── notes/                        # task_plan, progress, findings
+│   └── legacy/                       # tài liệu v1.0.1 đã cũ
+├── tools/docgen/                     # script sinh file .docx
+└── .agent/                           # skills + template cho agent
 ```
+
+Package C++ đặt `.cpp`/`.hpp` ngay gốc — mỗi package chỉ 1–4 file nên tách `src/`,
+`include/` chỉ thêm tầng thư mục không mang thông tin. Chỉ giữ lại hai thư mục con có
+ý nghĩa chức năng: `launch/` (nơi `ros2 launch` tìm file) và `resource/<tên_package>`
+(marker ament index, thiếu là `ros2 run` không tìm thấy package). Package Python bắt buộc
+phải có thư mục trùng tên vì `setup.py` khai báo `packages=[<tên>]`.
+
+Header vẫn được `install(FILES ...)` vào `include/` trong không gian cài đặt, nên các
+package khác include phẳng (`#include "camera_node.hpp"`) là đúng.
 
 Phase 1 chỉ dùng **camera + serial**. LiDAR vẫn chạy và `/scan` vẫn có dữ liệu để quan
 sát, nhưng **không** đưa vào quyết định lái: `ObstacleAvoidance` có cờ emergency stop
@@ -48,32 +67,43 @@ khi mất dữ liệu, chưa phù hợp khi chưa dùng tới.
 export ROS_DISTRO=jazzy
 
 sudo apt update && sudo apt install -y \
-  ros-${ROS_DISTRO}-desktop libopencv-dev python3-opencv python3-numpy v4l-utils
+  ros-${ROS_DISTRO}-desktop libopencv-dev python3-opencv python3-numpy \
+  python3-matplotlib v4l-utils
 
 # quyền phần cứng
 sudo usermod -a -G video,dialout $USER     # rồi đăng xuất/đăng nhập lại
 
 # workspace
-mkdir -p ~/autocar_ws/src
+git clone <repo> ~/autocar_ws
 cd ~/autocar_ws
-ln -s /path/to/GRADUATION_PROJECT/software/* src/
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install
 source install/setup.bash
 ```
 
+`traffic_light_detector` và `turn_detector` cần `ncnn` + model riêng. Nếu chưa có, build
+phần xe bằng:
+
+```bash
+colcon build --symlink-install --packages-select \
+  camera_node esp32s3_node sllidar_ros2_node fusion_node gui_matplotlib
+```
+
 ## Chạy
 
 ```bash
-./run_all.sh                       # hoặc:
-ros2 launch fusion_node fusion.launch.py
+./run.sh                              # build nếu cần, rồi launch
+./run.sh --no-build                   # chỉ launch
+./run.sh --gui                        # kèm dashboard matplotlib
+./run.sh speed_x10:=30 camera_index:=0 dev_sign:=-1
 
-# ghi đè tham số
-ros2 launch fusion_node fusion.launch.py speed_x10:=30 camera_index:=0 dev_sign:=-1
+# hoặc gọi launch trực tiếp
+ros2 launch fusion_node fusion.launch.py
 ```
 
-Cổng serial **tự nhận**: ESP32 ưu tiên `/dev/serial/by-id/*esp*` rồi `/dev/ttyACM*`;
-LiDAR là `/dev/ttyUSB*` còn lại. Launch tự spawn driver:
+`./run.sh` tự cấp quyền `/dev/tty*` `/dev/video*`, build lại, source môi trường rồi launch.
+Nội dung phần cứng: cổng serial **tự nhận** — ESP32 ưu tiên `/dev/serial/by-id/*esp*` rồi
+`/dev/ttyACM*`; LiDAR là `/dev/ttyUSB*` còn lại. Launch tự spawn driver:
 
 ```
 ros2 run rplidar_ros rplidar_composition --ros-args \
@@ -108,6 +138,7 @@ Không tìm thấy cổng USB thứ hai thì bỏ qua driver LiDAR, xe vẫn ch�
 | `viz_hz` | `10` | Tần suố phát `/lane/vis` |
 | `enable_viz` | `true` | Tắt để nhẹ máy |
 | `enable_lidar` | `true` | Chỉ quyết định có subscribe `/scan` |
+| `lidar_mount_offset_deg` | `-90.0` | Góc lệch lắp LiDAR, `0` = trước, `90` = trái (REP-103) |
 | `log_level` | `info` | `debug` để in nhiều hơn |
 
 ## Detector 2 làn (cửa sổ trượt)
@@ -115,19 +146,19 @@ Không tìm thấy cổng USB thứ hai thì bỏ qua driver LiDAR, xe vẫn ch�
 Ảnh 640x480 → resize 320x240 → xám → **Gaussian blur(5,5)** → **CLAHE** → **mask ROI
 hình thang** → Otsu `BINARY_INV` → `CLOSE(5,15)` + `OPEN(3,3)`.
 
-Chỉ xét vùng `[0.58, 0.97]` chiều cao ảnh, chia **5 cửa sổ × 18 hàng**:
+Chỉ xét vùng `[0.58, 0.93]` chiều cao ảnh, chia **5 cửa sổ × 16 hàng**:
 
 ```
 y=0..139     bỏ trên (trời)
-y=139..233   5 cửa sổ, quét từ cửa sổ XA nhất xuống cửa sổ GẦN xe
-              cửa sổ 4 (y 143..161) = xa nhất, 2 vạch hẹp nhất
-              cửa sổ 0 (y 215..233) = gần xe nhất, 2 vạch RỘNG NHẤT
-y=233..240   bỏ đáy (sát đầu xe: nhòe, 2 vạch dính nhau)
+y=139..223   5 cửa sổ, quét từ cửa sổ XA nhất xuống cửa sổ GẦN xe
+              cửa sổ 4 (y 143..159) = xa nhất, 2 vạch hẹp nhất
+              cửa sổ 0 (y 207..223) = gần xe nhất, 2 vạch RỘNG NHẤT
+y=223..240   bỏ đáy (sát đầu xe: nhòe, 2 vạch dính nhau)
 ```
 
-> `ROI_BOTTOM_FRAC = 0.97` kéo vùng tới sát đầu xe. Cửa sổ 0 là nơi lấy seed và
-> nơi đo bề rộng làn — ở đó 2 vạch rộng nhất nên seed đáng tin nhất. Đổi lại phải
-> nới `LANE_WIDTH_MAX`, xem `docs/TUNING.md`.
+> `ROI_BOTTOM_FRAC = 0.93` chừa khoảng trống hai bên làn thay vì kéo tới sát đầu xe.
+> Cửa sổ 0 là nơi lấy seed và nơi đo bề rộng làn — ở đó 2 vạch rộng nhất nên seed đáng
+> tin nhất. Đổi lại phải nới `LANE_WIDTH_MAX`, xem `docs/TUNING.md`.
 
 - Cửa sổ 4 → 3 → 2 lần lượt thử tách 2 vạch: lấy **đoạn trái nhất** và **đoạn phải
   nhất** làm seed, loại đoạn rộng > 25 px (bóng đổ, vật cản).
@@ -268,17 +299,34 @@ Hai quyết định thiết kế đáng chú ý ở đợt này:
 - **Sửa lỗi đo bề rộng.** Code đo bề rộng ở cửa sổ xa nhất (2 vạch hẹp nhất) thay vì
   cửa sổ gần xe. Với làn 30 cm, ở cửa sổ xa chỉ còn 32 px < `LANE_WIDTH_MIN` nên bị lo.
 
-## Tài liệu khác
+### 06/10 — Chuyển `software/` thành `src/`, gộp dashboard
 
-- `docs/SETUP_GUIDE.md` — cài đặt và xử lý sự cố
-- `docs/TUNING.md` — chỉnh detector
-- `docs/ARCHITECTURE.md` — luồng dữ liệu giữa các thành phần
-- `docs/FIX_REPORT.md` — 34 lỗi đã sửa, theo bố cục code cũ
-- `docs/camera_lane_phan_tich.docx` — phân tích detector làn
-- `docs/lidar_module_phan_tich.docx` — phân tích LiDAR
-- `findings.md` — số liệu chứng minh cho quyết định thiết kế (vì sao ROI 0.45 sai,
-  vì sao bỏ IPM, bề rộng làn theo từng hàng)
-- `Advanced_Lane_Keeping.doc` — tài liệu tham khảo bài toán đường không vạch
+| Commit | Nội dung |
+|---|---|
+| (hiện tại) | Repo thành workspace colcon thật: `software/*` → `src/*`. Bỏ `gui_node` (Qt5), giữ `gui_matplotlib`. Ghi chú → `docs/notes/`, script sinh docx → `tools/docgen/`, skills → `.agent/`. Gộp `run_all.sh` thành `run.sh` build + chạy. Thêm `.gitattributes` ép LF cho `.sh` |
+
+Bỏ `gui_node` vì dashboard Qt5 bị thay bằng bản matplotlib nhẹ hơn, build được trên mọi
+máy không cần `qtbase5-dev`.
+
+## Tài liệu
+
+| File | Nội dung |
+|---|---|
+| `docs/SETUP_GUIDE.md` | cài đặt, chạy, xử lý sự cố |
+| `docs/ARCHITECTURE.md` | luồng dữ liệu giữa các thành phần |
+| `docs/TUNING.md` | chỉnh detector (hằng số trong `src/camera_node/camera_node.hpp`) |
+| `docs/FIX_REPORT.md` | 34 lỗi đã sửa, theo bố cục code cũ |
+| `docs/camera_lane_phan_tich.docx` | phân tích detector làn |
+| `docs/lidar_module_phan_tich.docx` | phân tích LiDAR |
+| `docs/notes/findings.md` | số liệu chứng minh cho quyết định thiết kế (vì sao ROI 0.45 sai, vì sao bỏ IPM, bề rộng làn theo từng hàng) |
+| `docs/notes/task_plan.md`, `docs/notes/progress.md` | kế hoạch và tiến độ các đợt làm việc |
+
+Sinh lại 2 file `.docx` trong `docs/` bằng `tools/docgen/` (cần `python3-docx`):
+
+```bash
+python3 -m pip install python-docx
+python3 tools/docgen/build.py
+```
 
 ## License
 

@@ -8,12 +8,14 @@
 | `esp32s3_node` | thư viện C++ | `SerialESP32`: khung nhị phân 11/7 byte, tự dò cổng USB |
 | `sllidar_ros2_node` | thư viện C++ | `LidarModule` + `ObstacleAvoidance` (chưa nối vào phase 1) |
 | `fusion_node` | node ROS 2 | node điều khiển duy nhất: nối 3 thư viện trên + timer + publisher |
-| `autonomous_vehicle_gui` | node Qt5 | dashboard, đang phát triển riêng |
+| `gui_matplotlib` | node Python | dashboard matplotlib + bản đồ polar LiDAR, chạy cùng `fusion_node` |
 | `traffic_light_detector`, `turn_detector` | node Python | detector NCNN, chưa launch trong phase 1 |
 
 Ba thư viện C++ được `ament_export_libraries` + `ament_export_include_directories`, nên
 `fusion_node` chỉ cần `find_package(camera_node)` / `find_package(esp32s3_node)` /
-`find_package(sllidar_ros2_node)` rồi `ament_target_dependencies`.
+`find_package(sllidar_ros2_node)` rồi `ament_target_dependencies`. Header đặt ngay gốc
+package và được `install(FILES ...)` vào `include/` trong không gian cài đặt, nên
+`fusion_node` include phẳng (`#include "camera_node.hpp"`) là đúng.
 
 ## 2. Luồng dữ liệu
 
@@ -80,7 +82,6 @@ seed riêng của từng bên. Sau đó fit đường bậc 2 qua các điểm m
 
 ## 7. Phần còn lại
 
-`traffic_light_detector`, `turn_detector`, `gui_node` và `ObstacleAvoidance` đều còn
-trong repo và build được, nhưng chưa nối vào đường điều khiển. Nối `ObstacleAvoidance`
-lại phải xử lý điều kiện LiDAR stale trước, nếu không xe sẽ đứng yên mỗi lần `/scan`
-tụt.
+`traffic_light_detector`, `turn_detector` và `ObstacleAvoidance` đều còn trong repo và
+build được, nhưng chưa nối vào đường điều khiển. Nối `ObstacleAvoidance` lại phải xử lý
+điều kiện LiDAR stale trước, nếu không xe sẽ đứng yên mỗi lần `/scan` tụt.

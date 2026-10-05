@@ -1,6 +1,6 @@
 # HƯỚNG DẪN HIỆU CHỈNH NHANH
 
-Mọi hằng số detector nằm trong `software/camera_node/include/camera_node.hpp`. Sửa ở đó
+Mọi hằng số detector nằm trong `src/camera_node/camera_node.hpp`. Sửa ở đó
 rồi build lại. Tham số nào tiện thì expose qua launch (`ros2 launch fusion_node
 fusion.launch.py <tên>=<giá trị>`).
 
@@ -30,7 +30,7 @@ fusion.launch.py <tên>=<giá trị>`).
 | Hằng số | Mặc định | Ý nghĩa |
 |---|---|---|
 | `ROI_TOP_FRAC` | 0.58 | bỏ phần trên ảnh (trời, chân trời) |
-| `ROI_BOTTOM_FRAC` | 0.97 | kéo vùng tới sát đầu xe; cửa sổ 0 là nơi lấy seed |
+| `ROI_BOTTOM_FRAC` | 0.93 | chừa khoảng trống hai bên làn; cửa sổ 0 là nơi lấy seed |
 
 `ROI_TOP_FRAC` có thể chỉnh lúc chạy bằng tham số `roi_top_frac` mà không cần build lại.
 `ROI_BOTTOM_FRAC` phải sửa trong header.
@@ -71,14 +71,19 @@ Công thức: `W_cm = w_px · CAMERA_HEIGHT_M · 100 / (y − HORIZON_Y)`
 > **Hai hằng số này ràng buộc lẫn nhau — kéo `ROI_BOTTOM_FRAC` xuống mà quên nới
 > `LANE_WIDTH_MAX` thì xe sẽ tự dừng.** Bề rộng làn ở cửa sổ 0 là:
 >
-> | `ROI_BOTTOM_FRAC` | hàng | làn 30 cm | làn 50 cm | làn 60 cm |
+> | `ROI_BOTTOM_FRAC` | hàng đáy | làn 30 cm | làn 50 cm | làn 60 cm |
 > |---|---|---|---|---|
 > | 0.92 | 221 | 101 px | 168 px | 202 px |
-> | **0.97** | **233** | **104 px** | **173 px** | **208 px** |
+> | **0.93** (hiện tại) | **223** | — đo lại — | — đo lại — | — đo lại — |
+> | 0.97 | 233 | 104 px | 173 px | 208 px |
 > | 0.98 | 235 | 115 px | 192 px | 230 px |
 >
 > Còn `LANE_WIDTH_MAX = 230` nên chấp nhận làn tới 0.63 m. Muốn kéo xuống 0.98 thì
 > phải nới `LANE_WIDTH_MAX` lên ~250.
+>
+> ⚠️ Các số px ở hàng 0.97 là số **đo thật** trên xe. Hàng đáy đã hạ từ 233 xuống 223 nên
+> độ rộng px sẽ nhỏ lại một chút — cần đo lại ở 0.93 trước khi chạy thật, không dùng lại
+> số cũ.
 
 Đo thật bằng cách nhìn ảnh overlay rồi chọn khoảng bao quanh.
 

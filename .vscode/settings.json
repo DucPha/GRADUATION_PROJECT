@@ -1,3 +1,11 @@
 {
-    "cmake.sourceDirectory": "C:/Users/Duc Pham/Documents/GRADUATION_PROJECT/software/camera_node"
+    "cmake.sourceDirectory": "${workspaceFolder}/src/fusion_node",
+    "cmake.environment": {
+        "ROS_DISTRO": "jazzy"
+    },
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
+    "files.associations": {
+        "*.ino": "cpp",
+        "*.launch.py": "python"
+    }
 }

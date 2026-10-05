@@ -1,12 +1,8 @@
-# Build
+# Colcon / CMake
 /build/
 /install/
 /log/
-
-# Colcon
-.colcon/
-
-# CMake
+/.colcon/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -24,6 +20,14 @@ __pycache__/
 .venv/
 venv/
 
+# Qt (dashboard da chuyen sang matplotlib, giu lai de phong an)
+*.o
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.user
+*.autosave
+
 # VSCode
 .vscode/.history/
 
@@ -33,32 +37,15 @@ Thumbs.db
 *.swp
 *.swo
 
-# Recording/cache
+# Du lieu do va cache
 *.mp4
 *.avi
 *.bag
 *.csv
+*.log
 recordings/
 cache/
-*.log
 
-# Large legacy archive (not needed in build)
-graduation_project-master/
-docs/_gen/__pycache__/
-
-# Local configs
+# Bien cuc bo
 .env
 .local/
-
-# Qt build
-*.o
-moc_*.cpp
-ui_*.h
-qrc_*.cpp
-*.user
-*.autosave
-build/
-install/
-log/
-__pycache__/
-*.pyc

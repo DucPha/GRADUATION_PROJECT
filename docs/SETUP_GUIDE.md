@@ -23,29 +23,34 @@ id -nG | tr ' ' '\n' | grep -xE 'video|dialout'
 
 ## 3. Build
 
+Repo **chính là** workspace colcon: `src/` nằm ngay trong repo, nên clone về `~/autocar_ws`
+rồi build luôn, không cần symlink.
+
 ```bash
-mkdir -p ~/autocar_ws/src
+git clone <repo> ~/autocar_ws
 cd ~/autocar_ws
-ln -s /path/to/GRADUATION_PROJECT/software/* src/
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-`gui_node` cần Qt5 (`sudo apt install qtbase5-dev`). Nếu chưa cài mà chưa dùng GUI thì
-bỏ qua nó:
+Chỉ build phần xe (bỏ 2 detector NCNN chưa dùng, cần `ncnn` + model riêng):
 
 ```bash
 colcon build --symlink-install --packages-select \
-  camera_node esp32s3_node sllidar_ros2_node fusion_node
+  camera_node esp32s3_node sllidar_ros2_node fusion_node gui_matplotlib
 ```
 
 ## 4. Chạy
 
 ```bash
-cd ~/GRADUATION_PROJECT
-./run_all.sh
-# hoặc
+cd ~/autocar_ws
+./run.sh                  # build nếu cần, rồi launch
+./run.sh --no-build       # chỉ launch
+./run.sh --gui            # kèm dashboard matplotlib
+./run.sh speed_x10:=30    # gốc tham số launch truyền nguyên
+
+# hoặc gọi launch trực tiếp
 ros2 launch fusion_node fusion.launch.py
 ```
 
@@ -86,7 +91,21 @@ dmesg | tail -20          # xác nhận board đã enumerate
 
 Node tự dò: by-id chứa `esp` → `ttyACM*` → `ttyUSB*`. Có thể ép cổng bằng `serial_port:=`.
 
-## 8. Lỗi thường gặp
+## 8. Hai detector NCNN (tu chọn)
+
+`traffic_light_detector` và `turn_detector` cần `ncnn` + file model `.param`/`.bin`.
+`ncnn` **không** phải rosdep key nên phải cài tay, và cần Vulkan driver:
+
+```bash
+pip install ncnn
+vulkaninfo | head -5          # xác nhận GPU/Vulkan hoạt động
+```
+
+Cài rồi build được cả 7 package. Nếu chưa cài hoặc chưa có model thì dùng
+`--packages-select` ở mục 3 để build phần xe. Phần cần thiết để chạy xe là
+`camera_node`, `esp32s3_node`, `sllidar_ros2_node`, `fusion_node`.
+
+## 9. Lỗi thường gặp
 
 | Triệu chứng | Nguyên nhân | Xử lý |
 |---|---|---|
@@ -97,7 +116,7 @@ Node tự dò: by-id chứa `esp` → `ttyACM*` → `ttyUSB*`. Có thể ép c�
 | LiDAR không có `/scan` | không tìm thấy cổng USB thứ hai | xem dòng log `[fusion] LiDAR port (auto)` |
 | `ParameterTypeException` | không dùng launch mà truyền tham số tay | ép kiểu: `-p camera_fps:=30` (số, không để chuỗi) |
 
-## 9. Kiểm tra firmware
+## 10. Kiểm tra firmware
 
 ```bash
 arduino-cli compile --fqbn esp32:esp32:esp32s3 \
