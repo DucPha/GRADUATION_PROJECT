@@ -27,6 +27,14 @@ from rclpy.node import Node
 
 from std_msgs.msg import String
 from sensor_msgs.msg import Image, LaserScan
+
+# BAT BUOC: nap PyQt5 + tao QApplication TRUOC cv_bridge.
+# cv_bridge tu nap cv2 (ban pip trong ~/.local co Qt goi kem). Neu cv2 nap truoc,
+# libQt5Core cua cv2 se chiem vao QApplication -> Qt tim plugin xcb trong thu muc
+# cua cv2 -> "Could not load the Qt platform plugin xcb" va crash khi mo cua so.
+from PyQt5.QtWidgets import QApplication
+QApplication.instance() or QApplication([])
+
 from cv_bridge import CvBridge
 
 
@@ -138,13 +146,9 @@ class DashboardMatplotlib(Node):
         self.im_artist = None
 
         # Polar
+        # NOTE: _setup_polar() da tao scat_artist + txt_*_artist cho self,
+        # khong duoc gan lai None o day (gây FuncAnimation crash: NoneType.set_animated)
         self._setup_polar()
-        self.scat_artist = None
-        self.txt_f_artist = None
-        self.txt_l_artist = None
-        self.txt_r_artist = None
-        self.txt_b_artist = None
-        self.txt_lidar_state = None
 
         # Trend
         self._setup_trend()
@@ -409,6 +413,11 @@ class DashboardMatplotlib(Node):
         serial_s = sd.get('serial', 'closed')
         w_s = sd.get('w', '-1')
         devm_s = sd.get('devm', '-1')
+        # Du lieu moi: lenh dong co, van toc thuc te tu ESP32, tuoi goi RX, canh bao LiDAR
+        spd_s = sd.get('spd', '0.0')
+        kmh_s = sd.get('kmh', '-1')
+        fbage_s = sd.get('fbage', '-1')
+        alert_s = sd.get('alert', 'CLEAR')
 
         lane_state = 'TRACKING' if two_l == '1' else 'LOST'
         lane_col = 'green' if two_l == '1' else 'red'
@@ -431,6 +440,17 @@ class DashboardMatplotlib(Node):
         status_lines.append(f"LIDAR: {lidar_state_s}")
         status_lines.append(f"Front: {front_s}")
         status_lines.append(f"Serial: {ser_state}")
+        # Du lieu dong co + LiDAR (chi them hang moi, hang cu giu nguyen)
+        spd_f = _to_float(spd_s)
+        kmh_f = _to_float(kmh_s)
+        fbage_f = _to_float(fbage_s)
+        spd_txt = '---' if spd_f < 0 else f'{spd_f:.1f}'
+        kmh_txt = '---' if kmh_f < 0 else f'{kmh_f:.2f}'
+        rx_txt = '---' if fbage_f < 0 else f'{int(fbage_f)} ms'
+        status_lines.append(f"Speed cmd: {spd_txt} km/h")
+        status_lines.append(f"Velocity: {kmh_txt} km/h")
+        status_lines.append(f"ESP32 RX: {rx_txt}")
+        status_lines.append(f"Lidar alert: {alert_s}")
         status_lines.append(f"Uptime: {str(timedelta(seconds=int(now - self.t0)))}")
 
         txt = '\n'.join(status_lines)

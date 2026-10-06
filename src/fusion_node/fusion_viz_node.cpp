@@ -55,7 +55,9 @@ public:
         const auto serial_port = declare_parameter<std::string>("serial_port", "");
         const auto camera_index = declare_parameter<int>("camera_index", -1);
         const auto camera_fps = declare_parameter<int>("camera_fps", 30);
-        const auto roi_top_frac = declare_parameter<double>("roi_top_frac", CameraLane::ROI_TOP_FRAC);
+        // CameraLane khong con hieu ROI_TOP_FRAC; mac dinh lay tu CameraProfile (0.58)
+        const auto roi_top_frac = declare_parameter<double>(
+            "roi_top_frac", CameraProfile{}.roi_top_frac);
         const auto speed_x10 = declare_parameter<int>("speed_x10", 40);
         const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 20);
         const auto dev_sign = declare_parameter<int>("dev_sign", 1);
@@ -218,6 +220,10 @@ private:
             }
         }
 
+        // 2 bien nay chi de bao cao, khong gui xuong ESP32 -> luu lai cho status_tick()
+        last_dev_cm_ = dev_cm;
+        last_width_cm_ = width_cm;
+
         age_ms_ = lane.age_ms;
         proc_ms_ = lane.proc_ms;
         frame_id_ = lane.frame_id;
@@ -227,6 +233,9 @@ private:
         cmd.dev_final_px = static_cast<int16_t>(std::clamp(dev, -32768, 32767));
         cmd.speed_control = static_cast<uint8_t>(std::clamp(speed, 0, 255));
         cmd.emergency_stop = emg;
+
+        // Chi de bao cao len GUI: lenh toc do da gui cho dong co (km/h x10)
+        last_speed_ = cmd.speed_control;
 
         if (!serial_->send_command(cmd)) {
             RCLCPP_WARN_THROTTLE(
@@ -303,11 +312,19 @@ private:
             ? -1L
             : static_cast<long>(age_ms_);
 
+        // Telemetry dong co tu ESP32 (~50 Hz): van toc thuc te + tuoi goi RX
+        const auto fb = serial_->get_latest_feedback();
+        const unsigned long fb_age = serial_->feedback_age_ms();
+        const long fbage_log = (fb_age == static_cast<unsigned long>(-1))
+            ? -1L
+            : static_cast<long>(fb_age);
+
         char buf[384];
         std::snprintf(
             buf, sizeof(buf),
             "two_lanes=%d dev=%d emg=%d age=%ldms proc=%.1fms fps=%.1f "
-            "lidar=%s front=%.0fcm serial=%s w=%.0fcm devm=%.0fcm",
+            "lidar=%s front=%.0fcm serial=%s w=%.0fcm devm=%.0fcm "
+            "spd=%.1f kmh=%.2f fbage=%ld alert=%s",
             (two_lanes_ ? 1 : 0),
             last_dev_px_,
             (emg_ ? 1 : 0),
@@ -318,8 +335,12 @@ private:
             (front_cm < 0.0f ? -1.0f : front_cm),
             (serial_->is_open() ? "open" : "closed"),
             // 0 = khong do duoc (mat 2 vanh, hoac qua gan chan troi)
-            (width_cm > 0.0f ? width_cm : -1.0f),
-            (two_lanes_ ? dev_cm : -1.0f)
+            (last_width_cm_ > 0.0f ? last_width_cm_ : -1.0f),
+            (two_lanes_ ? last_dev_cm_ : -1.0f),
+            (static_cast<float>(last_speed_) / 10.0f),
+            (fb.valid ? fb.velocity_kmh : -1.0f),
+            fbage_log,
+            lidar_status_.alert.c_str()
         );
 
         std_msgs::msg::String msg;
@@ -361,6 +382,13 @@ private:
 
     bool two_lanes_ = false;
     bool emg_ = false;
+
+    // Gia tri do duoc o control_tick(), chi de status_tick() log
+    float last_dev_cm_ = 0.0f;
+    float last_width_cm_ = 0.0f;
+
+    // Lenh toc do (km/h x10) da gui cho dong co o tick gan nhat, chi de bao cao
+    uint8_t last_speed_ = 0;
 
     unsigned long age_ms_ = 0;
     double proc_ms_ = 0.0;

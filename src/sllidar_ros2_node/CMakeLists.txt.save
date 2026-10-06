@@ -9,7 +9,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 
@@ -20,37 +19,38 @@ add_library(lidar_module STATIC
 	obstacle_avoidance.cpp
 )
 
-# Include dirs: bat buoc keyword PUBLIC/PRIVATE.
-# ament_target_dependencies() phia duoi cung dung PUBLIC cho include nen deu la keyword.
 target_include_directories(lidar_module PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 	$<INSTALL_INTERFACE:include>
-	${OpenCV_INCLUDE_DIRS}
 )
 
-# 1. Dependency ROS 2:
-ament_target_dependencies(lidar_module
-  rclcpp
-  sensor_msgs
-)
-
-# 2. Dependency OpenCV thuyan:
-# ament_target_dependencies() dung plain signature cho target_link_libraries
-# nen o day PHAI dung plain (khong duoc PUBLIC/PRIVATE - CMake se bao loi tron signature).
-target_link_libraries(lidar_module ${OpenCV_LIBS})
+target_link_libraries(lidar_module PUBLIC ${OpenCV_LIBS})
+ament_target_dependencies(lidar_module sensor_msgs)
 
 install(FILES lidar_node.hpp obstacle_avoidance.hpp
-        DESTINATION include
+	DESTINATION include
 )
 
-install(TARGETS lidar_module
-        ARCHIVE DESTINATION lib
-        LIBRARY DESTINATION lib
-        RUNTIME DESTINATION bin
+target_link_libraries(lidar_module PUBLIC
+  ${rclcpp_LIBRARIES}
+install(TARGETS
+  sllidar_node
+  # hoặc lidar_module tùy tên target của bạn
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY launch rviz params
+  DESTINATION share/${PROJECT_NAME}
+)  ${sensor_msgs_LIBRARIES}
+  # ... các lib khác
+)
+# Bỏ hoặc comment dòng ament_target_dependencies(lidar_module ...)install(TARGETS lidar_module	ARCHIVE DESTINATION lib
+	LIBRARY DESTINATION lib
+	RUNTIME DESTINATION bin
 )
 
 ament_export_include_directories(include)
 ament_export_libraries(lidar_module)
-ament_export_dependencies(rclcpp sensor_msgs OpenCV)
+ament_export_dependencies(OpenCV sensor_msgs)
 
 ament_package()

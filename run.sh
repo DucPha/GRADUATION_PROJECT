@@ -1,16 +1,16 @@
 #!/bin/bash
 # Build + chay toan bo he thong xe tu hanh.
 #
-#   ./run.sh                      # build neu can, roi chay
+#   ./run.sh                      # build neu can, roi chay (tu dong mo dashboard)
 #   ./run.sh --no-build           # chi chay, khong build lai
-#   ./run.sh --gui                # them dashboard matplotlib
+#   ./run.sh --gui                # (mac dinh da mo) dashboard matplotlib
 #   ./run.sh speed_x10:=30        # goc tham so launch truyen nguyen
 set -e
 
 cd "$(dirname "$0")"
 
 BUILD=1
-GUI=0
+GUI=1
 declare -a ARGS=()
 
 for arg in "$@"; do
@@ -48,7 +48,7 @@ VEHICLE_PID=$!
 
 if [ "$GUI" -eq 1 ]; then
 	echo "==== KHOI DONG DASHBOARD ===="
-	ros2 run gui_matplotlib gui_matplotlib
+	ros2 run gui_matplotlib gui_matplotlib || true
 fi
 
 wait "$VEHICLE_PID"
