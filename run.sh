@@ -3,7 +3,7 @@
 #
 #   ./run.sh                      # build neu can, roi chay (tu dong mo dashboard)
 #   ./run.sh --no-build           # chi chay, khong build lai
-#   ./run.sh --gui                # (mac dinh da mo) dashboard matplotlib
+#   ./run.sh --gui                # (mac dinh da mo) dashboard PySide6
 #   ./run.sh speed_x10:=30        # goc tham so launch truyen nguyen
 set -e
 
@@ -48,7 +48,7 @@ VEHICLE_PID=$!
 
 if [ "$GUI" -eq 1 ]; then
 	echo "==== KHOI DONG DASHBOARD ===="
-	ros2 run gui_matplotlib gui_matplotlib || true
+	python3 src/gui/gui.py &
 fi
 
 wait "$VEHICLE_PID"

@@ -186,6 +186,9 @@ void CameraLane::get_latest(LaneOutput &out, bool copy_vis) const {
 
   // Vong dieu khien 100 Hz khong can anh, chi luong ve 10 Hz moi can
   out.vis = copy_vis ? latest_.vis : cv::Mat();
+  out.raw = copy_vis ? latest_.raw : cv::Mat();
+  out.roi = copy_vis ? latest_.roi : cv::Mat();
+  out.bin = copy_vis ? latest_.bin : cv::Mat();
 
   out.left_pts = latest_.left_pts;
   out.right_pts = latest_.right_pts;
@@ -280,6 +283,9 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out) {
   const int fy1 = std::clamp(static_cast<int>(std::lround(bottom * sy)),
                              fy0 + 1, frame.rows);
 
+  // Anh ROI goc do phan giai (khong resize) cho GUI
+  out.roi = frame.rowRange(fy0, fy1).clone();
+
   cv::Mat gray;
   {
     cv::Mat roi_bgr;
@@ -326,6 +332,9 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out) {
     cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, k_close);
     cv::morphologyEx(bin, bin, cv::MORPH_OPEN, k_open);
   }
+
+  // Mask nhi phan cho GUI (0/1, chua resize)
+  out.bin = bin.clone();
 
   // ---- 5. Cua so truot tu XA ve GAN, du doan vi tri theo phoi canh -----
   // Vach cach truc camera x px o hang cach chan troi d0 thi o hang d1 se
@@ -666,7 +675,8 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out) {
   out.speed_scale = speed;
 
   // ---- 10. Ve anh quan sat ----------------------------------------------
-  out.vis = frame.clone();
+  out.raw = frame.clone();
+  out.vis = out.raw.clone();
 
   auto to_vis = [&](int x, int y) {
     return cv::Point(cvRound(x * sx), cvRound(y * sy));

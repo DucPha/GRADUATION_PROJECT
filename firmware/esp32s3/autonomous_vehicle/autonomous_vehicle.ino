@@ -21,8 +21,8 @@ constexpr uint8_t PIN_HALL   = 4;
 // [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
 // ============================================================================
 constexpr int STEER_CENTER = 90;
-constexpr int STEER_MIN = 45;
-constexpr int STEER_MAX = 135;
+constexpr int STEER_MIN = 60;
+constexpr int STEER_MAX = 120;
 
 constexpr float CAM_DEADZONE = 10.0f;
 constexpr float CAM_MAX_DEV = 50.0f;

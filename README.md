@@ -32,7 +32,7 @@ GRADUATION_PROJECT/                  # = ~/autocar_ws
 │   ├── fusion_node/                  # node điều khiển duy nhất
 │   │   ├── fusion_viz_node.cpp
 │   │   └── launch/fusion.launch.py   #   launch có tham số
-│   ├── gui_matplotlib/               # dashboard Python + matplotlib
+│   ├── gui/                          # dashboard PySide6 (gui.py, chạy trực tiếp)
 │   ├── traffic_light_detector/       # Python, chưa nối vào phase 1
 │   └── turn_detector/                # Python, chưa nối vào phase 1
 ├── firmware/esp32s3/                 # Arduino sketch (.ino)
@@ -70,6 +70,9 @@ sudo apt update && sudo apt install -y \
   ros-${ROS_DISTRO}-desktop libopencv-dev python3-opencv python3-numpy \
   python3-matplotlib v4l-utils
 
+# dashboard PySide6 (gui/gui.py)
+pip3 install pyside6
+
 # quyền phần cứng
 sudo usermod -a -G video,dialout $USER     # rồi đăng xuất/đăng nhập lại
 
@@ -86,7 +89,7 @@ phần xe bằng:
 
 ```bash
 colcon build --symlink-install --packages-select \
-  camera_node esp32s3_node sllidar_ros2_node fusion_node gui_matplotlib
+  camera_node esp32s3_node sllidar_ros2_node fusion_node
 ```
 
 ## Chạy
@@ -94,7 +97,7 @@ colcon build --symlink-install --packages-select \
 ```bash
 ./run.sh                              # build nếu cần, rồi launch
 ./run.sh --no-build                   # chỉ launch
-./run.sh --gui                        # kèm dashboard matplotlib
+./run.sh --gui                        # kèm dashboard PySide6
 ./run.sh speed_x10:=30 camera_index:=0 dev_sign:=-1
 
 # hoặc gọi launch trực tiếp

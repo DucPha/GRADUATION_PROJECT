@@ -14,11 +14,13 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <opencv2/core/mat.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include "camera_node.hpp"
 #include "esp32s3_node.hpp"
@@ -32,6 +34,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -40,6 +44,30 @@ namespace {
 std::chrono::nanoseconds period_from_hz(double hz) {
     const double safe_hz = (hz > 1.0) ? hz : 1.0;
     return std::chrono::nanoseconds(static_cast<int64_t>(1e9 / safe_hz));
+}
+
+// Ma hoa anh thanh CompressedImage. JPEG cho anh mau, PNG cho mask nhi phan
+// (lossless, GUI gian doan > 127 thi khong bi nhieu ring).
+sensor_msgs::msg::CompressedImage encode_image(const cv::Mat& img,
+                                               const std::string& ext) {
+    sensor_msgs::msg::CompressedImage out;
+    if (img.empty()) {
+        return out;
+    }
+
+    std::vector<int> params;
+    if (ext == ".jpg") {
+        params = {cv::IMWRITE_JPEG_QUALITY, 80};
+    }
+
+    std::vector<uchar> buf;
+    if (!cv::imencode(ext, img, buf, params)) {
+        return out;
+    }
+
+    out.format = (ext == ".jpg") ? "jpeg" : "png";
+    out.data = std::move(buf);
+    return out;
 }
 
 }   // namespace
@@ -109,6 +137,14 @@ public:
 
         if (enable_viz) {
             vis_pub_ = create_publisher<sensor_msgs::msg::Image>("/lane/vis", 2);
+
+            // Anh debug cho GUI: khung goc, vung ROI, mask nhi phan
+            raw_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
+                "/autocar/dbg/cam_raw/compressed", 1);
+            roi_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
+                "/autocar/dbg/lane_roi/compressed", 1);
+            bin_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
+                "/autocar/dbg/lane_bin/compressed", 1);
         }
 
         if (enable_lidar) {
@@ -279,6 +315,18 @@ private:
         }
 
         vis_pub_->publish(msg);
+
+        // Anh debug cho GUI, cung toc do voi /lane/vis
+        if (!lane.raw.empty()) {
+            raw_pub_->publish(encode_image(lane.raw, ".jpg"));
+        }
+        if (!lane.roi.empty()) {
+            roi_pub_->publish(encode_image(lane.roi, ".jpg"));
+        }
+        if (!lane.bin.empty()) {
+            const cv::Mat bin255 = lane.bin * 255;
+            bin_pub_->publish(encode_image(bin255, ".png"));
+        }
     }
 
     // =========================================================================
@@ -368,6 +416,9 @@ private:
 
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr vis_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr raw_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr roi_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr bin_pub_;
 
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr viz_timer_;

@@ -218,6 +218,12 @@ public:
     bool stale = true;
 
     cv::Mat vis;
+
+    // Anh debug cho GUI: chi duoc dien khi copy_vis = true
+    cv::Mat raw;   // khung camera goc, chua ve gi
+    cv::Mat roi;   // vung ROI goc (do phan giai camera), tu fy0..fy1
+    cv::Mat bin;   // mask nhi phan 0/1 sau morphology, WORK_W x roi_h
+
     double proc_ms = 0.0;
     long frame_id = 0;
   };
