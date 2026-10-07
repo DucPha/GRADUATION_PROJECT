@@ -83,11 +83,13 @@ public:
         const auto serial_port = declare_parameter<std::string>("serial_port", "");
         const auto camera_index = declare_parameter<int>("camera_index", -1);
         const auto camera_fps = declare_parameter<int>("camera_fps", 30);
-        // CameraLane khong con hieu ROI_TOP_FRAC; mac dinh lay tu CameraProfile (0.58)
+        // CameraLane khong con hieu ROI_TOP_FRAC; mac dinh lay tu CameraProfile (0.52)
         const auto roi_top_frac = declare_parameter<double>(
             "roi_top_frac", CameraProfile{}.roi_top_frac);
-        const auto speed_x10 = declare_parameter<int>("speed_x10", 40);
-        const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 20);
+        const auto speed_x10 = declare_parameter<int>("speed_x10", 30);
+        const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 15);
+        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 15);
+        const auto speed_ramp_x10 = declare_parameter<int>("speed_ramp_x10", 8);
         const auto dev_sign = declare_parameter<int>("dev_sign", 1);
         const auto lane_lost_stop_ms = declare_parameter<int>("lane_lost_stop_ms", 400);
         const auto control_hz = declare_parameter<int>("control_hz", 100);
@@ -101,6 +103,9 @@ public:
 
         speed_x10_ = speed_x10;
         speed_hold_x10_ = speed_hold_x10;
+        speed_corner_x10_ = speed_corner_x10;
+        speed_ramp_x10_ = static_cast<float>(speed_ramp_x10);
+        dt_control_s_ = 1.0f / static_cast<float>(std::max(1, control_hz));
         lane_lost_stop_ms_ = lane_lost_stop_ms;
         dev_sign_ = (dev_sign < 0) ? -1 : 1;
 
@@ -210,7 +215,7 @@ private:
         const auto t_now = std::chrono::steady_clock::now();
 
         int dev = 0;
-        int speed = 0;
+        int target = 0;
         bool emg = false;
 
         // Chi bao cao, khong gui xuong ESP32
@@ -222,21 +227,41 @@ private:
             last_dev_px_ = 0;
             lane_lost_since_ = {};
             two_lanes_ = false;
+            track_ = 0;
             width_cm = 0.0f;
             emg = true;
         } else if (lane.two_lanes) {
-            // Du 2 vanh: dung huong moi va reset dong ho mat lane
+            // Du 2 vanh: duong thang speed_scale = 1 -> day du speed_x10
+            // (tang dan theo ramp); dang vao cong 2 vanh speed_scale tu giam
+            // (0.45..1.0 theo do cong tu camera) -> toc do cham lai de xe
+            // van giua duong tam, thang lai thi ramp dan tro len.
             last_dev_px_ = dev_sign_ * lane.dev_px;
             lane_lost_since_ = t_now;
             two_lanes_ = true;
+            track_ = 2;
             dev = last_dev_px_;
-            speed = speed_x10_;
+            const float scale = std::clamp(lane.speed_scale, 0.0f, 1.0f);
+            target = static_cast<int>(
+                static_cast<float>(speed_x10_) * scale + 0.5f);
             dev_cm = static_cast<float>(dev_sign_) * lane.dev_cm;
             width_cm = lane.lane_width_cm;
+        } else if (lane.state == LaneState::ONE_LINE) {
+            // Chi thay 1 vach (khuc cua): van lai theo vach thay duoc (dev dang
+            // hop le) va cham cham. Khong dong dong ho mat lane -> xe khong dung
+            // giua cua khi di qua doan cong dai.
+            two_lanes_ = false;
+            track_ = 1;
+            lane_lost_since_ = t_now;
+            last_dev_px_ = dev_sign_ * lane.dev_px;
+            dev = last_dev_px_;
+            target = speed_corner_x10_;
+            dev_cm = static_cast<float>(dev_sign_) * lane.dev_cm;
+            width_cm = 0.0f;
         } else {
-            // Camera con song nhung mat 2 vanh: giu huong lai, hao toan trong
+            // Camera con song nhung mat ca 2 vanh: giu huong lai, hao toan trong
             // thoi gian ngan, qua doan thi dung han.
             two_lanes_ = false;
+            track_ = 0;
             width_cm = 0.0f;
 
             if (lane_lost_since_ == std::chrono::steady_clock::time_point{}) {
@@ -252,9 +277,22 @@ private:
                 emg = true;
             } else {
                 dev = last_dev_px_;
-                speed = speed_hold_x10_;
+                target = speed_hold_x10_;
             }
         }
+
+        // Lenh toc do: tang tu khi muc tieu cao hon (speed_ramp_x10_ don vi x10
+        // moi giay), giam ngay khi muc tieu thap hon de phanh/cham lap tuc.
+        if (emg) {
+            speed_cur_x10_f_ = 0.0f;
+        } else if (static_cast<float>(target) > speed_cur_x10_f_) {
+            speed_cur_x10_f_ = std::min(
+                static_cast<float>(target),
+                speed_cur_x10_f_ + speed_ramp_x10_ * dt_control_s_);
+        } else {
+            speed_cur_x10_f_ = static_cast<float>(target);
+        }
+        const int speed = static_cast<int>(speed_cur_x10_f_ + 0.5f);
 
         // 2 bien nay chi de bao cao, khong gui xuong ESP32 -> luu lai cho status_tick()
         last_dev_cm_ = dev_cm;
@@ -368,12 +406,14 @@ private:
             : static_cast<long>(fb_age);
 
         char buf[384];
+        const char* kTrack[] = {"lost", "one", "two"};
         std::snprintf(
             buf, sizeof(buf),
-            "two_lanes=%d dev=%d emg=%d age=%ldms proc=%.1fms fps=%.1f "
+            "two_lanes=%d track=%s dev=%d emg=%d age=%ldms proc=%.1fms fps=%.1f "
             "lidar=%s front=%.0fcm serial=%s w=%.0fcm devm=%.0fcm "
             "spd=%.1f kmh=%.2f fbage=%ld alert=%s",
             (two_lanes_ ? 1 : 0),
+            kTrack[(track_ >= 0 && track_ <= 2) ? track_ : 0],
             last_dev_px_,
             (emg_ ? 1 : 0),
             age_log,
@@ -384,7 +424,8 @@ private:
             (serial_->is_open() ? "open" : "closed"),
             // 0 = khong do duoc (mat 2 vanh, hoac qua gan chan troi)
             (last_width_cm_ > 0.0f ? last_width_cm_ : -1.0f),
-            (two_lanes_ ? last_dev_cm_ : -1.0f),
+            // dev_m co y nghia ca khi chi thay 1 vach (khuc cua)
+            (track_ >= 1 ? last_dev_cm_ : -1.0f),
             (static_cast<float>(last_speed_) / 10.0f),
             (fb.valid ? fb.velocity_kmh : -1.0f),
             fbage_log,
@@ -424,9 +465,16 @@ private:
     rclcpp::TimerBase::SharedPtr viz_timer_;
     rclcpp::TimerBase::SharedPtr status_timer_;
 
-    int speed_x10_ = 40;
-    int speed_hold_x10_ = 20;
+    int speed_x10_ = 30;
+    int speed_hold_x10_ = 15;
+    int speed_corner_x10_ = 15;
+    float speed_ramp_x10_ = 8.0f;    // don vi x10 moi giay (8 = 0.8 km/h/s)
+    float speed_cur_x10_f_ = 0.0f;   // lenh hien tai, tang dan khi ramp
+    float dt_control_s_ = 0.01f;     // 1 / control_hz
     int dev_sign_ = 1;
+
+    // Trang thai lan cho status: 0 = mat vach, 1 = 1 vach, 2 = du 2 vach
+    int track_ = 0;
 
     int last_dev_px_ = 0;
     int lane_lost_stop_ms_ = 400;

@@ -333,9 +333,6 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out) {
     cv::morphologyEx(bin, bin, cv::MORPH_OPEN, k_open);
   }
 
-  // Mask nhi phan cho GUI (0/1, chua resize)
-  out.bin = bin.clone();
-
   // ---- 5. Cua so truot tu XA ve GAN, du doan vi tri theo phoi canh -----
   // Vach cach truc camera x px o hang cach chan troi d0 thi o hang d1 se
   // cach x * d1 / d0. Nho vay WINDOW_MARGIN chi con phai bu cho do cong.
@@ -447,13 +444,96 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out) {
     return t;
   };
 
-  Track trk = run_pass(true);
-  if (trk.matched < MIN_MATCHED_WINDOWS) {
-    Track alt = run_pass(false);
-    if (alt.score() > trk.score()) {
-      trk = std::move(alt);
+  auto run_both = [&]() {
+    Track t = run_pass(true);
+    if (t.matched < MIN_MATCHED_WINDOWS) {
+      Track alt = run_pass(false);
+      if (alt.score() > t.score()) {
+        t = std::move(alt);
+      }
+    }
+    return t;
+  };
+
+  Track trk = run_both();
+
+  // ---- 5b. Phuc hoi doan vach bi ngat do anh den cham ---------------------
+  // Anh den cham rua sang lam vach toi thoat len -> THRESH_BINARY_INV loi di
+  // doan vach, cua so truot khong tim duoc dinh. Neu 2 ben doan dut con vach
+  // lam moc thi suy vi tri noi suy tuyen tinh theo hang, ve vach lai vao bin
+  // (phan nhin thay tren panel mask cung duoc phuc hoi) roi chay lai
+  // tracking. Doan qua dai (lon hon BRIDGE_MAX_BANDS cua so) thi khong noi.
+  auto bridge_gaps = [&](const Track &t) -> bool {
+    bool painted = false;
+    const std::vector<int> *sides[2] = {&t.peak_left, &t.peak_right};
+
+    for (const std::vector<int> *peaks : sides) {
+      for (int i = 0; i < N_WINDOWS; ++i) {
+        if ((*peaks)[i] < 0) {
+          continue;
+        }
+
+        // Moc hop le tiep theo ben duoi doan dut
+        int j = i + 1;
+        while (j < N_WINDOWS && (*peaks)[j] < 0) {
+          ++j;
+        }
+        if (j >= N_WINDOWS) {
+          break; // het moc ben duoi -> khong suy, chi noi 2 doan co vach
+        }
+        if (j - i - 1 > BRIDGE_MAX_BANDS) {
+          continue; // doan qua dai, bo qua va tim moc tiep theo
+        }
+
+        int ya0 = 0, ya1 = 0, yb0 = 0, yb1 = 0;
+        band_of(i, ya0, ya1);
+        band_of(j, yb0, yb1);
+        const int xa = (*peaks)[i];
+        const int xb = (*peaks)[j];
+        const int y_a = (ya0 + ya1) / 2;
+        const int y_b = (yb0 + yb1) / 2;
+        const double span = static_cast<double>(y_b - y_a);
+        if (span < 1.0) {
+          continue;
+        }
+
+        for (int b = i + 1; b < j; ++b) {
+          int y0 = 0;
+          int y1 = 0;
+          band_of(b, y0, y1);
+          for (int y = y0; y < y1; ++y) {
+            const int dy = y - horizon_y_;
+            const int yy = y - top;
+            if (dy <= 1 || yy < 0 || yy >= bin.rows) {
+              continue;
+            }
+            const int x = cvRound(xa + (xb - xa) * (y - y_a) / span);
+            const int half = std::max(1, lane_px(0.5f * TAPE_MAX_M, dy));
+            const int x0 = std::max(0, x - half);
+            const int x1 = std::min(WORK_W - 1, x + half);
+            if (x1 >= x0) {
+              bin.row(yy).colRange(x0, x1 + 1).setTo(1);
+              painted = true;
+            }
+          }
+        }
+        // Khong nhay i = j: anchor j van co the la moc ben tren cua doan dut
+        // tiep theo (vd vach hop le 0,3,5 -> phai noi ca (0,3) lan (3,5))
+      }
+    }
+
+    return painted;
+  };
+
+  if (bridge_gaps(trk)) {
+    Track fixed = run_both();
+    if (fixed.score() > trk.score()) {
+      trk = std::move(fixed);
     }
   }
+
+  // Mask nhi phan cho GUI (0/1, chua resize) - lay SAU khi da phuc hoi doan dut
+  out.bin = bin.clone();
 
   const std::vector<bool> &band_ok = trk.band_ok;
   const std::vector<int> &peak_left = trk.peak_left;
@@ -669,6 +749,12 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out) {
     // khong biet do cong thi cung giam toc
     if (state == LaneState::ONE_LINE ||
         static_cast<int>(cpts.size()) <= MIN_MATCHED_WINDOWS) {
+      speed = std::min(speed, SPEED_ONE_LINE);
+    }
+
+    // Fit that bai: khong do duoc do cong duong tam -> khong biet duong
+    // thang hay dang cua -> khong phep day toc
+    if (!out.fit_ok) {
       speed = std::min(speed, SPEED_ONE_LINE);
     }
   }

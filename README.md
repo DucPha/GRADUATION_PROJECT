@@ -132,9 +132,11 @@ Không tìm thấy cổng USB thứ hai thì bỏ qua driver LiDAR, xe vẫn ch�
 | `lidar_port` | tự dò | Cổng LiDAR |
 | `camera_index` | `-1` | -1 = tự dò 0..3 |
 | `camera_fps` | `30` | FPS yêu cầu |
-| `roi_top_frac` | `0.58` | Bỏ qua phần trên ảnh (trời, chân trời) |
-| `speed_x10` | `40` | Tốc độ khi đủ 2 làn (km/h × 10) |
-| `speed_hold_x10` | `20` | Tốc độ khi mất 2 làn (km/h × 10) |
+| `roi_top_frac` | `0.52` | Đầu ROI tính từ trên xuống; nhỏ hơn = thấy xa hơn (làn rộng) |
+| `speed_x10` | `30` | Tốc độ khi đủ 2 làn & đi thẳng (`speed_scale` = 1); cua 2 vạch tự giảm theo độ cong — tăng dần theo ramp (km/h × 10) |
+| `speed_hold_x10` | `15` | Tốc độ giữ hướng khi mất cả 2 vạch (km/h × 10) |
+| `speed_corner_x10` | `15` | Tốc độ khi chỉ thấy 1 vạch — khúc cua (km/h × 10) |
+| `speed_ramp_x10` | `8` | Mức tăng tốc, x10 mỗi giây (`8` = 0.8 km/h/s) |
 | `lane_lost_stop_ms` | `400` | Mất 2 làn quá lâu thì dừng |
 | `dev_sign` | `1` | `-1` nếu servo lắp ngược |
 | `control_hz` | `100` | Tần suố gửi lệnh xuống ESP32 |
@@ -147,15 +149,21 @@ Không tìm thấy cổng USB thứ hai thì bỏ qua driver LiDAR, xe vẫn ch�
 ## Detector 2 làn (cửa sổ trượt)
 
 Ảnh 640x480 → resize 320x240 → xám → **Gaussian blur(5,5)** → **CLAHE** → **mask ROI
-hình thang** → Otsu `BINARY_INV` → `CLOSE(5,15)` + `OPEN(3,3)`.
+hình thang** → Otsu `BINARY_INV` → `CLOSE(5,15)` + `OPEN(3,3)` → **sửa đứt đoạn**.
 
-Chỉ xét vùng `[0.58, 0.93]` chiều cao ảnh, chia **5 cửa sổ × 16 hàng**:
+**Sửa đứt đoạn** (`bridge_gaps`): đèn trần chiếu vào làm vạch bị rửa sáng → `bin` đứt
+nửa chừng. Nếu hai bên đoạn đứt vẫn còn vạch làm mốc thì nội suy tuyến tính vẽ lại vạch
+vào mask (tối đa `BRIDGE_MAX_BANDS = 3` cửa sổ liên tiếp, đoạn dài hơn không vẽ để không
+bịa đường) rồi chạy lại tracking. Đoạn được vẽ lại cũng hiện trên panel mask ở GUI.
+
+Chỉ xét vùng `[0.52, 0.93]` chiều cao ảnh (đỉnh thật bị kẹp ở chân trời + `ROI_MIN_DY`
+= 12 hàng ≈ hàng 132 với chân trời 120), chia **6 cửa sổ × ~15 hàng**:
 
 ```
-y=0..139     bỏ trên (trời)
-y=139..223   5 cửa sổ, quét từ cửa sổ XA nhất xuống cửa sổ GẦN xe
-              cửa sổ 4 (y 143..159) = xa nhất, 2 vạch hẹp nhất
-              cửa sổ 0 (y 207..223) = gần xe nhất, 2 vạch RỘNG NHẤT
+y=0..132     bỏ trên (trời; hàng 132 ≈ chân trời 120 + ROI_MIN_DY 12)
+y=132..223   6 cửa sổ, quét từ cửa sổ XA nhất xuống cửa sổ GẦN xe
+              cửa sổ 5 = xa nhất, 2 vạch hẹp nhất
+              cửa sổ 0 = gần xe nhất, 2 vạch RỘNG NHẤT
 y=223..240   bỏ đáy (sát đầu xe: nhòe, 2 vạch dính nhau)
 ```
 
@@ -163,12 +171,12 @@ y=223..240   bỏ đáy (sát đầu xe: nhòe, 2 vạch dính nhau)
 > Cửa sổ 0 là nơi lấy seed và nơi đo bề rộng làn — ở đó 2 vạch rộng nhất nên seed đáng
 > tin nhất. Đổi lại phải nới `LANE_WIDTH_MAX`, xem `docs/TUNING.md`.
 
-- Cửa sổ 4 → 3 → 2 lần lượt thử tách 2 vạch: lấy **đoạn trái nhất** và **đoạn phải
+- Cửa sổ 5 → 4 → 3 → 2 lần lượt thử tách 2 vạch: lấy **đoạn trái nhất** và **đoạn phải
   nhất** làm seed, loại đoạn rộng > 25 px (bóng đổ, vật cản).
 - Mỗi cửa sổ phía trên chỉ dò trong `seed ± 30 px`, cập nhật seed riêng cho từng bên
   ⇒ 2 làn không bao giờ chạy chéo. Cửa sổ nào `trái ≥ phải` hoặc 2 vạch cách < 30 px thì loại.
-- `two_lanes = true` khi **≥ 3/5 cửa sổ** khớp cả 2 phía và bề rộng làn ở **cửa sổ 0**
-  ∈ [50, 230] px. Đo ở cửa sổ 0 vì đó là điểm rộng nhất; đo ở cửa sổ 4 sẽ lo nhầm
+- `two_lanes = true` khi **≥ 3/6 cửa sổ** khớp cả 2 phía và bề rộng làn ở **cửa sổ 0**
+  ∈ [50, 230] px. Đo ở cửa sổ 0 vì đó là điểm rộng nhất; đo ở cửa sổ 5 sẽ lo nhầm
   làn thon (làn 30 cm chỉ còn 32 px < 50).
 - **Fit đường bậc 2** qua các điểm mỗi bên (`x = a·t² + b·t + c`, toạ độ y chuẩn hoá
   [0,1], giải bằng `cv::solve` vì OpenCV 4.11 không có `cv::fitPoly`). `dev_px` lấy từ
@@ -203,10 +211,17 @@ DC BA | float32 velocity_kmh | XOR(byte 2..5)
 
 | Trạng thái | `dev` | `speed` | `emg` |
 |---|---|---|---|
-| camera OK + đủ 2 làn | `dev_px × dev_sign` | `speed_x10` | 0 |
-| camera OK, mất 2 làn < `lane_lost_stop_ms` | giữ hướng lái cuối | `speed_hold_x10` | 0 |
-| mất 2 làn ≥ `lane_lost_stop_ms` | 0 | 0 | **1** |
+| camera OK + đủ 2 làn | `dev_px × dev_sign` | `speed_x10 × speed_scale` (thẳng = ×1.0, cua 2 vạch tự giảm; tăng dần theo `speed_ramp_x10`) | 0 |
+| camera OK, chỉ 1 vạch (khúc cua) | `dev_px × dev_sign` | `speed_corner_x10` | 0 |
+| camera OK, mất cả 2 vạch < `lane_lost_stop_ms` | giữ hướng lái cuối | `speed_hold_x10` | 0 |
+| mất cả 2 vạch ≥ `lane_lost_stop_ms` | 0 | 0 | **1** |
 | camera mất frame (> 200 ms) | 0 | 0 | **1** |
+
+Tốc độ **giảm ngay** khi thiếu vạch, chỉ **tăng dần** khi có lại đủ 2 vạch
+(`speed_ramp_x10` đơn vị x10 mỗi giây). Đủ 2 làn mà đang vào cong thì camera gửi thêm
+`speed_scale` (0.45..1.0 theo độ cong) → `speed_x10` bị nhân vào; về đường thẳng
+`speed_scale` = 1.0 rồi ramp lên. Đổi mặc định ngay khi launch:
+`./run.sh speed_x10:=25 speed_corner_x10:=12`.
 
 Khi node tắt, nó gửi một lệnh EMG trước khi đóng serial.
 
@@ -240,7 +255,8 @@ arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3 \
    chạy lại với `dev_sign:=-1`.
 4. Che camera ⇒ `emg=1` và ESC về neutral, node không crash.
 5. Rút USB serial ⇒ log `serial FAIL`, node vẫn chạy.
-6. Bỏ vạch khỏi ảnh ⇒ `two_lanes=0`, tốc độ về `speed_hold_x10` rồi dừng sau 400 ms.
+6. Bỏ 1 vạch khỏi ảnh ⇒ `track=one`, xe chạy chậm ở `speed_corner_x10`; bỏ cả 2 vạch
+   ⇒ `track=lost`, giữ hướng ở `speed_hold_x10` rồi dừng sau 400 ms.
 
 ## Lịch sử phát triển
 

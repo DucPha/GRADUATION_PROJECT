@@ -293,9 +293,9 @@ class RosFeeder(threading.Thread):
 
         def on_status(msg):
             """ /lane/status (2 Hz, key=value, node C++ in kèm đơn vị):
-            two_lanes=1 dev=-12 emg=0 age=12ms proc=2.1ms fps=29.4
+            two_lanes=1 track=two dev=-12 emg=0 age=12ms proc=2.1ms fps=29.4
             lidar=ok front=142cm serial=open w=50cm devm=-4cm
-            spd=4.0 kmh=0.00 fbage=12 alert=CLEAR """
+            spd=3.0 kmh=0.00 fbage=12 alert=CLEAR """
             d = {}
             for tok in str(msg.data).split():
                 if "=" in tok:
@@ -320,9 +320,14 @@ class RosFeeder(threading.Thread):
             kmh = parse_num(d.get("kmh"))
             speed = kmh if kmh is not None and kmh >= 0 else None
 
+            # track = two/one/lost (node C++ thêm mới); bản cũ không có key này
+            # -> suy từ two_lanes như cũ
+            track = d.get("track")
             if emg:
                 state = "EMERGENCY STOP"
-            elif two_lanes:
+            elif track == "one":
+                state = "ONE LANE"
+            elif track == "two" or (track is None and two_lanes):
                 state = "FOLLOW LANE"
             else:
                 state = "LANE LOST"

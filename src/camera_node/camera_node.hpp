@@ -17,7 +17,8 @@
 //
 // Quy trinh: cat ROI -> xam -> blur -> CLAHE -> Otsu (chi tinh trong hinh
 // thang)
-//   -> morphology -> cua so truot (xa -> gan, du doan theo phoi canh)
+//   -> morphology -> phuc hoi doan vach bi ngat (anh den cham rua sang)
+//   -> cua so truot (xa -> gan, du doan vi tri theo phoi canh)
 //   -> diem tam tung cua so (2 vach: trung diem, 1 vach: vach +/- nua lan)
 //   -> fit tam lan -> do lech tai hang nhin truoc.
 //
@@ -52,9 +53,10 @@ struct CameraProfile {
   // -9999 = tu tinh tu 3 so tren. Do duoc thi nen dien, chinh xac hon tinh.
   int horizon_y = -9999;
 
-  // ROI theo ti le chieu cao anh, tinh tu tren xuong. Day ROI con bi
-  // gioi han them boi LANE_W_FIT_M, xem tren.
-  float roi_top_frac = 0.58f;
+  // ROI theo ti le chieu cao anh, tinh tu tren xuong. Nho hon = dinh ROI
+  // cao hon, thay xa hon (lan rong, 2 vach xa nhau). Day ROI con bi gioi
+  // han them boi LANE_W_FIT_M va ROI_MIN_DY, xem tren.
+  float roi_top_frac = 0.52f;
   float roi_bottom_frac = 0.93f;
 };
 
@@ -123,12 +125,21 @@ public:
   // dong deu. Gia tri hien tren anh vis (ctr=...), chinh theo do do thuc te.
   static constexpr double MIN_CONTRAST = 15.0;
 
+  // Doan vach bi ngat do anh den cham rua sang (THRESH_BINARY_INV loi di vach
+  // toi): noi suy tuyen tinh giua 2 moc vach va ve lai vao bin, toi da
+  // BRIDGE_MAX_BANDS cua so lien tiep. Doan dai hon thi khong noi (khong
+  // doan duong gia).
+  static constexpr int BRIDGE_MAX_BANDS = 3;
+
   // ------------------------------------------------------------------------
   // Hinh hoc
   // ------------------------------------------------------------------------
 
-  // Dinh ROI bi ep nam duoi chan troi it nhat ROI_MIN_DY hang
-  static constexpr int ROI_MIN_DY = 20;
+  // Dinh ROI khong duoc cao hon chan troi + ROI_MIN_DY hang: qua gan chan
+  // troi thi vach chi con ~2 px (bi MORPH_OPEN(3,3) an mat) va px_to_cm
+  // cua doan xat nhieu loi hon. 12 cho phep thay xa them ~2 m duong dat
+  // so voi 20 cu (f ~ 230 px, h = 0.3 m: dy 20 -> 3.4 m, dy 12 -> 5.7 m).
+  static constexpr int ROI_MIN_DY = 12;
 
   // Day ROI tu dong keo len de 1 lan rong LANE_W_FIT_M cong moi ben
   // ROI_SIDE_MARGIN_M van nam tron trong be ngang anh. Cam cui xuong thi
@@ -308,7 +319,7 @@ private:
   float roi_bottom_frac_ = 0.93f;
   bool logged_geometry_ = false;
 
-  std::atomic<float> roi_top_frac_{0.58f};
+  std::atomic<float> roi_top_frac_{0.52f};
 
   cv::VideoCapture cap_;
 

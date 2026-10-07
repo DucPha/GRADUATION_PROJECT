@@ -29,15 +29,19 @@ fusion.launch.py <tên>=<giá trị>`).
 
 | Hằng số | Mặc định | Ý nghĩa |
 |---|---|---|
-| `ROI_TOP_FRAC` | 0.58 | bỏ phần trên ảnh (trời, chân trời) |
+| `ROI_TOP_FRAC` | 0.52 | bỏ phần trên ảnh; nhỏ hơn = thấy xa hơn (làn 2 vạch rộng) |
 | `ROI_BOTTOM_FRAC` | 0.93 | chừa khoảng trống hai bên làn; cửa sổ 0 là nơi lấy seed |
+| `ROI_MIN_DY` (camera_node.hpp) | 12 | đỉnh ROI không cao hơn chân trời + 12 hàng |
 
 `ROI_TOP_FRAC` có thể chỉnh lúc chạy bằng tham số `roi_top_frac` mà không cần build lại.
 `ROI_BOTTOM_FRAC` phải sửa trong header.
 
 **Cách hiệu chỉnh `ROI_TOP_FRAC`:** nhìn `/lane/vis`. Nếu cửa sổ trên cùng vẽ đè lên
 trời (không thấy vạch nào trong khung), tăng lên. Nếu 2 làn bị mất quá sớm ở giữa khung,
-giảm xuống. Camera cao 0.30 m thì chân trời ở khoảng hàng 120 ⇒ `0.58` là điểm khởi đầu.
+giảm xuống. Camera cao 0.30 m thì chân trời ở khoảng hàng 120 ⇒ với mặc định `0.52`
+đỉnh thật bị kẹp ở hàng 132 (chân trời + `ROI_MIN_DY = 12`). Muốn thấy xa hơn nữa thì
+giảm `ROI_MIN_DY` trong `camera_node.hpp`, nhưng dưới ~10 hàng thì vạch xa mỏng hơn
+2 px và bị `MORPH_OPEN(3,3)` xóa mất.
 
 Lưu ý: điểm rộng nhất của 2 làn **không** nằm ở đáy ảnh, nên đừng đặt
 `ROI_BOTTOM_FRAC` quá gần 1.0.
@@ -94,8 +98,11 @@ Công thức: `W_cm = w_px · CAMERA_HEIGHT_M · 100 / (y − HORIZON_Y)`
 | `EMA_ALPHA` | 0.35 | lái càng mềm càng giảm (0.2); càng nhạy càng tăng (0.5) |
 | `STALE_AGE_MS` | 200 | quá tuổi thì coi như mất camera |
 | `lane_lost_stop_ms` (launch) | 400 | mất 2 làn bao lâu thì dừng |
-| `speed_x10` (launch) | 40 | tốc độ khi đủ 2 làn (km/h × 10) |
-| `speed_hold_x10` (launch) | 20 | tốc độ khi mất 2 làn (km/h × 10) |
+| `BRIDGE_MAX_BANDS` (camera_node.hpp) | 3 | vạch đứt đoạn do đèn trần: nội suy vẽ lại tối đa bao nhiêu cửa sổ |
+| `speed_x10` (launch) | 30 | tốc độ đủ 2 làn & đi thẳng; cua 2 vạch camera nhân `speed_scale` (0.45..1.0); tăng dần theo ramp (km/h × 10) |
+| `speed_hold_x10` (launch) | 15 | tốc độ khi mất cả 2 vạch (km/h × 10) |
+| `speed_corner_x10` (launch) | 15 | tốc độ khi chỉ thấy 1 vạch / khúc cua (km/h × 10) |
+| `speed_ramp_x10` (launch) | 8 | mức tăng tốc, x10 mỗi giây (8 = 0.8 km/h/s) |
 
 ## 5. Ngưỡng ảnh
 
