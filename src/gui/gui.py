@@ -254,16 +254,27 @@ class RosFeeder(threading.Thread):
             n = len(msg.ranges)
             if n == 0:
                 return
-            angles = np.degrees(msg.angle_min + np.arange(n, dtype=np.float32)
+            raw = np.asarray(msg.ranges, dtype=np.float32)
+            # Chi giu cac tia co vat can THAT: loc inf/nan/0 (khong co phan hoi,
+            # vuot tam) va ngoai [range_min, range_max] - truoc day bi map thanh
+            # diem gia tai 12m / 15cm nen ban do day nhung diem "tao lao".
+            ok = np.isfinite(raw) & (raw > 0.0)
+            if msg.range_min > 0.0:
+                ok &= raw >= msg.range_min
+            if msg.range_max > 0.0:
+                ok &= raw <= msg.range_max
+            idx = np.flatnonzero(ok)
+            if idx.size == 0:
+                return
+            angles = np.degrees(msg.angle_min + idx.astype(np.float32)
                                 * msg.angle_increment) % 360.0
-            dist = np.nan_to_num(np.asarray(msg.ranges, dtype=np.float32),
-                                 nan=DMAX / 1000, posinf=DMAX / 1000, neginf=0) * 1000
-            dist = np.clip(dist, 150, DMAX)
+            # mm; clip 150..DMAX chi de hien thi, khong tao them diem ma
+            dist = np.clip(raw[idx] * 1000.0, 150, DMAX)
             if len(msg.intensities) == n:
-                inten = np.asarray(msg.intensities, dtype=np.float32)
+                inten = np.asarray(msg.intensities, dtype=np.float32)[idx]
             else:
-                inten = np.zeros(n, dtype=np.float32)
-            hub.put_scan(np.column_stack((inten, angles, dist)), nbytes=n * 8)
+                inten = np.zeros(idx.size, dtype=np.float32)
+            hub.put_scan(np.column_stack((inten, angles, dist)), nbytes=idx.size * 8)
 
         def on_roi(msg):
             img = decode(msg, cv2.IMREAD_COLOR)

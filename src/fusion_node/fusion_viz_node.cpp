@@ -105,7 +105,8 @@ public:
         speed_hold_x10_ = speed_hold_x10;
         speed_corner_x10_ = speed_corner_x10;
         speed_ramp_x10_ = static_cast<float>(speed_ramp_x10);
-        dt_control_s_ = 1.0f / static_cast<float>(std::max(1, control_hz));
+        // declare_parameter<int> tra ve int64_t (long int) -> khop kieu voi std::max
+        dt_control_s_ = 1.0f / static_cast<float>(std::max<int64_t>(1, control_hz));
         lane_lost_stop_ms_ = lane_lost_stop_ms;
         dev_sign_ = (dev_sign < 0) ? -1 : 1;
 
