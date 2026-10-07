@@ -3,13 +3,14 @@
 <package format="3">
   <name>camera_node</name>
   <version>1.0.0</version>
-  <description>Nhanh 2 lan bang cua so truot tren anh 640x480. Khong phu thuoc rclcpp.</description>
+  <description>Nhan 2 lan bang cua so truot (camera MJPG 1920x1080, tu giai ma libjpeg). Khong phu thuoc rclcpp.</description>
   <maintainer email="pmd0793724602@gmail.com">Pham Minh Duc</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>libopencv-dev</depend>
+  <depend>libjpeg</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

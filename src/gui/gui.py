@@ -1,129 +1,146 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AUTOCAR MONITOR HMI
-===================
-PySide6 cho giao diện realtime (ảnh vẽ bằng QPainter, không qua Matplotlib).
-Matplotlib CHỈ dùng cho panel LiDAR, giữ đúng thiết kế của code RPLIDAR gốc.
-OpenCV dùng để giải mã/resize ảnh nhận từ ROS 2.
+AUTOCAR MONITOR - dashboard realtime cho xe tu hanh
+===================================================
 
-Chạy (dữ liệu thật từ ROS 2): python3 gui.py
-Nhịp vẽ 60 FPS               : python3 gui.py --fps 60
+Moi so lieu xu ly anh deu do node C++ (fusion_node) tinh. GUI KHONG tu xu ly
+anh: chi giai ma va hien thi, nen nhung gi thay tren man hinh dung la nhung gi
+bo dieu khien dang dung.
+
+  /autocar/dbg/lane_vis/compressed  anh camera + overlay detector (C++ ve)
+  /autocar/dbg/lane_roi/compressed  vung ROI cua anh camera
+  /autocar/dbg/lane_bin/compressed  mask nhi phan sau morphology
+  /lane/status                      trang thai key=value, 10 Hz
+  /scan                             LaserScan tu driver RPLIDAR
+  /autocar/run   (GUI phat)         std_msgs/Bool, 10 Hz: true = cho xe chay
+
+Phim tat:  SPACE = chay / dung    ESC = dung ngay
+Xe chi chay khi GUI dang mo va gui heartbeat; dong GUI -> xe dung.
+
+Chay: python3 src/gui/gui.py [--fps 60] [--width 1280 --height 760]
+Can: PySide6 (hoac PySide2), matplotlib, numpy, opencv (python3-opencv), rclpy.
 """
 
 import argparse
+import math
 import sys
 import threading
 import time
-from dataclasses import dataclass
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
-from PySide6.QtWidgets import (
-    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QMainWindow, QSizePolicy, QVBoxLayout, QWidget,
-)
+# ---- Qt: uu tien PySide6, khong co thi dung PySide2 (apt) ----
+try:
+    from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QKeySequence, QShortcut
+    from PySide6.QtWidgets import (
+        QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
+        QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    )
+    QT_BINDING = "PySide6"
+except ImportError:  # pragma: no cover - chi dung khi may chua co PySide6
+    from PySide2.QtCore import Qt, QTimer, QRectF, QPointF
+    from PySide2.QtGui import QColor, QFont, QImage, QPainter, QPen, QKeySequence
+    from PySide2.QtWidgets import (
+        QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
+        QPushButton, QShortcut, QSizePolicy, QVBoxLayout, QWidget,
+    )
+    QT_BINDING = "PySide2"
 
-# Matplotlib chỉ dành cho widget LiDAR.
+# Matplotlib chi dung cho ban do LiDAR (import SAU Qt de chon dung binding)
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 
 # ============================================================================
-# CONFIG
+# CAU HINH
 # ============================================================================
 
 APP_TITLE = "AUTOCAR MONITOR"
 
-DMAX = 12000
-IMIN = 0
-IMAX = 50
-
-CAM_W, CAM_H = 640, 400
-ROI_Y0, ROI_Y1 = 120, 400
-ROI_H = ROI_Y1 - ROI_Y0
-
-LANE_THR_PX = 10
-LINK_TIMEOUT_S = 1.0
-STATUS_PERIOD_S = 0.25
-
-TOPIC_SCAN = "/scan"
-TOPIC_RAW = "/autocar/dbg/cam_raw/compressed"
+TOPIC_VIS = "/autocar/dbg/lane_vis/compressed"
 TOPIC_ROI = "/autocar/dbg/lane_roi/compressed"
 TOPIC_BIN = "/autocar/dbg/lane_bin/compressed"
 TOPIC_STATUS = "/lane/status"
+TOPIC_SCAN = "/scan"
+TOPIC_RUN = "/autocar/run"
 
-NODES = ("CAMERA", "LIDAR", "ESP32-S3")
+RUN_HEARTBEAT_HZ = 10.0      # GUI gui /autocar/run deu dan (fusion: timeout 600 ms)
+LINK_TIMEOUT_S = 1.0         # khong co du lieu qua lau -> mat ket noi
+FUSION_LOST_STOP_S = 1.5     # mat /lane/status qua lau -> tu bo lenh chay
+NO_SIGNAL_S = 1.0            # anh dung qua lau -> hien "NO SIGNAL"
+STATUS_UI_PERIOD_S = 0.1     # cap nhat chu/so 10 Hz
+
+# LiDAR: giu thiet ke ban do goc (polar, mm, 4 dai mau do/cam/vang/xanh).
+# Xe 1/10 chi quan tam vat trong vai met -> mac dinh 3 m. O thang 12 m, tay
+# dua lai gan (20-50 cm) chi cach tam vai pixel, bi bieu tuong xe che mat.
+DMAX = 12000
+LIDAR_RANGES_M = (0.5, 1, 2, 3, 4, 6, 8, 12)   # lan chuot de doi tam nhin
+LIDAR_DEFAULT_RANGE_M = 3
+# Dai mau theo DUNG nguong canh bao cua LidarModule C++ (mm):
+#   do < 40 cm (DANGER), cam < 60 cm (WARNING), vang < 1.5 m, xanh >= 1.5 m
+LIDAR_COLOR_BOUNDS_MM = (0, 400, 600, 1500, DMAX + 1)
+# RPLIDAR A1 khong do duoc vat gan hon 15 cm (driver khong tra ve tia nao)
+LIDAR_BLIND_MM = 150
+# Mau diem: van bo do/cam/vang/xanh nhung DAM hon de noi ro tren nen trang
+# (vang "yellow" cua matplotlib gan nhu bien mat tren nen trang).
+LIDAR_COLORS = ("#DC2626", "#EA580C", "#CA8A04", "#15803D")
+LIDAR_POINT_SIZE = 22
+DEFAULT_LIDAR_OFFSET_DEG = -90.0          # = lidar_mount_offset_deg cua launch
+
+LINKS = ("FUSION", "CAMERA", "LIDAR", "ESP32")
 
 
 # ============================================================================
-# THEME
+# GIAO DIEN: MAU + FONT
 # ============================================================================
 
-C_BG = "#F3F4F6"
-C_WHITE = "#FFFFFF"
-C_HEAD = "#111827"
-C_HEAD_2 = "#1F2937"
-
-C_TEXT = "#1F2937"
-C_TEXT_2 = "#4B5563"
-C_MUTED = "#737D8B"
-C_LINE = "#D9DEE5"
-C_LINE_2 = "#E8EBEF"
-C_PANEL_INNER = "#F8FAFC"
+C_BG = "#EEF1F5"
+C_CARD = "#FFFFFF"
+C_HEAD = "#0F172A"
+C_HEAD_2 = "#1E293B"
+C_TEXT = "#0F172A"
+C_TEXT_2 = "#475569"
+C_MUTED = "#64748B"
+C_LINE = "#DCE2EA"
+C_LINE_2 = "#E9EDF2"
+C_SOFT = "#F8FAFC"
+C_VIEW_BG = "#0B1220"
 
 C_BLUE = "#2563EB"
-C_BLUE_SOFT = "#EAF2FF"
-C_GREEN = "#1F9D55"
-C_GREEN_SOFT = "#EAF7EF"
+C_GREEN = "#16A34A"
 C_ORANGE = "#D97706"
-C_ORANGE_SOFT = "#FFF4DE"
-C_RED = "#DC3B3B"
-C_RED_SOFT = "#FDECEC"
+C_RED = "#DC2626"
 
-FONT_UI = "Segoe UI"
-FONT_MONO = "Consolas"
+KIND_COLOR = {"blue": C_BLUE, "green": C_GREEN, "orange": C_ORANGE,
+              "red": C_RED, "muted": C_MUTED}
+KIND_SOFT = {"blue": "#EAF1FF", "green": "#E8F7EE", "orange": "#FFF3DC",
+             "red": "#FDECEC", "muted": "#EEF1F5"}
 
-BADGE_STYLES = {
-    "blue": (C_BLUE_SOFT, C_BLUE, "#D5E5FF"),
-    "green": (C_GREEN_SOFT, C_GREEN, "#D2ECD9"),
-    "orange": (C_ORANGE_SOFT, C_ORANGE, "#F4DEB2"),
-    "red": (C_RED_SOFT, C_RED, "#F2C9C9"),
-}
-KIND_COLOR = {"blue": C_BLUE, "green": C_GREEN, "orange": C_ORANGE, "red": C_RED}
-
-# Tổng thời gian vẽ (ms) các viewport ảnh, để hiển thị trên tiêu đề.
-PERF = {"paint": 0.0}
+FONT_UI = '"Noto Sans", "DejaVu Sans", "Segoe UI", sans-serif'
+FONT_MONO = '"DejaVu Sans Mono", "Liberation Mono", "Consolas", monospace'
+FONT_UI_FAMILY = "Noto Sans"
 
 
 # ============================================================================
-# HELPERS
+# TIEN ICH
 # ============================================================================
 
-def perf_now():
+def now():
     return time.perf_counter()
 
 
-def format_uptime(seconds):
-    s = max(0, int(seconds))
-    return f"{s // 3600:02d}:{(s // 60) % 60:02d}:{s % 60:02d}"
-
-
 def parse_num(text):
-    """Đọc số từ giá trị key=value của /lane/status.
-
-    Node C++ in cả đơn vị sau số: age=12ms, proc=2.1ms, front=142cm...
-    '2.1ms' -> 2.1, '142cm' -> 142.0, 'ok' -> None.
-    """
+    """'12ms' -> 12.0, '-4.5cm' -> -4.5, 'ok' -> None, None -> None."""
+    if text is None:
+        return None
     s = str(text)
     i = 1 if s[:1] in ("+", "-") else 0
     dot = False
     while i < len(s) and (s[i].isdigit() or (s[i] == "." and not dot)):
-        if s[i] == ".":
-            dot = True
+        dot = dot or s[i] == "."
         i += 1
     body = s[:i]
     if not any(c.isdigit() for c in body):
@@ -134,90 +151,114 @@ def parse_num(text):
         return None
 
 
-# ============================================================================
-# DATA HUB: chỉ giữ dữ liệu MỚI NHẤT của mỗi nguồn (không hàng đợi -> không tràn)
-# ============================================================================
+def parse_status(text):
+    """'a=1 b=2ms ...' -> {'a': '1', 'b': '2ms'}"""
+    d = {}
+    for tok in str(text).split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            d[k] = v
+    return d
 
-@dataclass
-class NodeStat:
-    msgs: int = 0
-    rx: int = 0
-    tx: int = 0
-    err: int = 0
-    t_last: float = 0.0
 
+def fmt_uptime(seconds):
+    s = max(0, int(seconds))
+    return f"{s // 3600:02d}:{(s // 60) % 60:02d}:{s % 60:02d}"
+
+
+class RateMeter:
+    """Dem tan so nhan (Hz) tren cua so truot ~1 s."""
+
+    def __init__(self):
+        self.count = 0
+        self.t0 = now()
+        self.hz = 0.0
+        self.t_last = 0.0
+
+    def tick(self):
+        self.count += 1
+        self.t_last = now()
+
+    def update(self):
+        t = now()
+        dt = t - self.t0
+        if dt >= 1.0:
+            self.hz = self.count / dt
+            self.count = 0
+            self.t0 = t
+        return self.hz
+
+    def alive(self):
+        return self.t_last > 0 and now() - self.t_last < LINK_TIMEOUT_S
+
+
+# ============================================================================
+# DATA HUB: chi giu du lieu MOI NHAT cua moi nguon (khong hang doi, khong tre)
+# ============================================================================
 
 class Hub:
-    def __init__(self):
+    def __init__(self, lidar_offset_deg):
         self.lock = threading.Lock()
-        self.scan = None
+        self.images = {"vis": None, "roi": None, "bin": None}
+        self.image_seq = {"vis": 0, "roi": 0, "bin": 0}
+        self.image_t = {"vis": 0.0, "roi": 0.0, "bin": 0.0}
+        self.scan = None            # (theta_rad, dist_mm) khung XE
         self.scan_seq = 0
-        self.cam = None
-        self.cam_seq = 0
-        self.stats = {name: NodeStat() for name in NODES}
-        self.info = {
-            "proc_ms": None, "tx": "--", "rx": "--",
-            "speed": None, "steer": None,
-            "mode": "AUTONOMOUS", "state": "FOLLOW LANE",
-        }
+        self.status = {}
+        self.status_seq = 0
+        self.status_t = 0.0
+        self.rates = {name: RateMeter() for name in ("FUSION", "CAMERA", "LIDAR")}
+        self.lidar_offset_deg = lidar_offset_deg
+        self.want_run = False       # lenh nguoi dung (SPACE)
+        self.run_dirty = False      # can gui ngay, khong doi nhip heartbeat
 
-    def _touch(self, node, rx=0, tx=0, err=None):
-        s = self.stats[node]
-        s.msgs += 1
-        s.rx += int(rx)
-        s.tx += int(tx)
-        s.t_last = time.time()
-        if err is not None:
-            s.err = int(err)
-
-    # Mảng đưa vào Hub phải là mảng MỚI mỗi lần (không sửa tại chỗ sau khi put).
-    def put_cam(self, frame, roi, binary, lane_center, nbytes, proc_ms=None):
+    def put_image(self, key, img):
         with self.lock:
-            self.cam = (frame, roi, binary, lane_center)
-            self.cam_seq += 1
-            self.info["proc_ms"] = proc_ms
-            self._touch("CAMERA", rx=nbytes)
+            self.images[key] = img
+            self.image_seq[key] += 1
+            self.image_t[key] = now()
+            if key == "vis":
+                self.rates["CAMERA"].tick()
 
-    def put_scan(self, scan, nbytes):
+    def put_scan(self, theta_rad, dist_mm):
         with self.lock:
-            self.scan = scan
+            self.scan = (theta_rad, dist_mm)
             self.scan_seq += 1
-            self._touch("LIDAR", rx=nbytes)
+            self.rates["LIDAR"].tick()
 
-    def put_esp(self, tx_text, rx_text, tx_bytes, rx_bytes, err=0,
-                speed=None, steer=None, mode=None, state=None):
+    def put_status(self, d):
         with self.lock:
-            self.info["tx"] = tx_text
-            self.info["rx"] = rx_text
-            self.info["speed"] = speed
-            self.info["steer"] = steer
-            if mode is not None:
-                self.info["mode"] = mode
-            if state is not None:
-                self.info["state"] = state
-            self._touch("ESP32-S3", rx=rx_bytes, tx=tx_bytes, err=err)
+            self.status = d
+            self.status_seq += 1
+            self.status_t = now()
+            self.rates["FUSION"].tick()
+            lofs = parse_num(d.get("lofs"))
+            if lofs is not None:
+                self.lidar_offset_deg = lofs
 
-    def set_info(self, **kw):
+    def set_run(self, value):
         with self.lock:
-            self.info.update(kw)
+            if self.want_run != value:
+                self.want_run = value
+                self.run_dirty = True
 
-    def snapshot(self):
+    def take_run(self):
+        """(want_run, can_gui_ngay)"""
         with self.lock:
-            stats = {n: (s.msgs, s.rx, s.tx, s.err, s.t_last)
-                     for n, s in self.stats.items()}
-            return (self.scan, self.scan_seq, self.cam, self.cam_seq,
-                    stats, dict(self.info))
+            dirty, self.run_dirty = self.run_dirty, False
+            return self.want_run, dirty
 
 
 # ============================================================================
-# ROS 2 FEEDER
+# LUONG ROS 2
 # ============================================================================
 
-class RosFeeder(threading.Thread):
+class RosWorker(threading.Thread):
     def __init__(self, hub):
         super().__init__(daemon=True)
         self.hub = hub
         self.stop_event = threading.Event()
+        self.error = None
 
     def stop(self):
         self.stop_event.set()
@@ -229,483 +270,462 @@ class RosFeeder(threading.Thread):
             from rclpy.node import Node
             from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
             from sensor_msgs.msg import CompressedImage, LaserScan
-            from std_msgs.msg import String
+            from std_msgs.msg import Bool, String
         except ImportError as exc:
-            print(f"[ROS 2] import error: {exc}")
+            self.error = f"ROS 2 import error: {exc} (da source /opt/ros/jazzy/setup.bash?)"
+            print("[GUI]", self.error)
             return
 
         hub = self.hub
-        # depth=1 + best effort: ROS không xếp hàng, luôn lấy gói mới nhất
+        # depth 1 + best effort: luon lay goi MOI NHAT, khong xep hang -> khong tre
         qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                          reliability=ReliabilityPolicy.BEST_EFFORT)
-        last = {"roi": None, "binary": None, "lane_center": None}
-        proc = {"ms": None}
 
         def decode(msg, flag):
             return cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), flag)
 
-        def fit(img, w, h, interp):
-            # Chỉ resize khi kích thước khác
-            if img.shape[1] == w and img.shape[0] == h:
-                return img
-            return cv2.resize(img, (w, h), interpolation=interp)
-
-        def on_scan(msg):
-            n = len(msg.ranges)
-            if n == 0:
-                return
-            raw = np.asarray(msg.ranges, dtype=np.float32)
-            # Chi giu cac tia co vat can THAT: loc inf/nan/0 (khong co phan hoi,
-            # vuot tam) va ngoai [range_min, range_max] - truoc day bi map thanh
-            # diem gia tai 12m / 15cm nen ban do day nhung diem "tao lao".
-            ok = np.isfinite(raw) & (raw > 0.0)
-            if msg.range_min > 0.0:
-                ok &= raw >= msg.range_min
-            if msg.range_max > 0.0:
-                ok &= raw <= msg.range_max
-            idx = np.flatnonzero(ok)
-            if idx.size == 0:
-                return
-            angles = np.degrees(msg.angle_min + idx.astype(np.float32)
-                                * msg.angle_increment) % 360.0
-            # mm; clip 150..DMAX chi de hien thi, khong tao them diem ma
-            dist = np.clip(raw[idx] * 1000.0, 150, DMAX)
-            if len(msg.intensities) == n:
-                inten = np.asarray(msg.intensities, dtype=np.float32)[idx]
-            else:
-                inten = np.zeros(idx.size, dtype=np.float32)
-            hub.put_scan(np.column_stack((inten, angles, dist)), nbytes=idx.size * 8)
+        def on_vis(msg):
+            img = decode(msg, cv2.IMREAD_COLOR)
+            if img is not None:
+                hub.put_image("vis", img)
 
         def on_roi(msg):
             img = decode(msg, cv2.IMREAD_COLOR)
             if img is not None:
-                last["roi"] = fit(img, CAM_W, ROI_H, cv2.INTER_LINEAR)
+                hub.put_image("roi", img)
 
         def on_bin(msg):
             img = decode(msg, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                return
-            img = (fit(img, CAM_W, ROI_H, cv2.INTER_NEAREST) > 127).astype(np.uint8) * 255
-            cols = np.flatnonzero(img[-6])
-            last["binary"] = img
-            last["lane_center"] = ((float(cols[0]) + float(cols[-1])) / 2
-                                   if cols.size >= 2 else None)
+            if img is not None:
+                hub.put_image("bin", img)
 
-        def on_raw(msg):
-            img = decode(msg, cv2.IMREAD_COLOR)
-            if img is None:
+        def on_scan(msg):
+            # QUY LUAT DU LIEU LiDAR (giong het LidarModule C++):
+            #  1. Tia i co goc ROS a_i = angle_min + i * angle_increment (rad),
+            #     nguoc chieu kim dong ho, 0 = truc +X cua LiDAR.
+            #  2. Chi giu tia co vat that: so huu han, > 0, trong
+            #     [range_min, range_max] (inf = khong phan hoi, KHONG phai vat).
+            #  3. Doi sang KHUNG XE: goc_xe = a_i + lidar_mount_offset_deg
+            #     -> 0 = TRUOC, 90 = TRAI, 180 = SAU, 270 = PHAI (REP-103).
+            #  Ban do ve 0 do o phia TREN, tang nguoc chieu kim dong ho.
+            r = np.asarray(msg.ranges, dtype=np.float32)
+            if r.size == 0:
                 return
-            img = fit(img, CAM_W, CAM_H, cv2.INTER_LINEAR)
-            roi = last["roi"] if last["roi"] is not None else img[ROI_Y0:ROI_Y1].copy()
-            binary = (last["binary"] if last["binary"] is not None
-                      else np.zeros((ROI_H, CAM_W), dtype=np.uint8))
-            hub.put_cam(img, roi, binary, last["lane_center"],
-                        nbytes=len(msg.data), proc_ms=proc["ms"])
+            ok = np.isfinite(r) & (r > 0.0)
+            if msg.range_min > 0.0:
+                ok &= r >= msg.range_min
+            if msg.range_max > 0.0:
+                ok &= r <= msg.range_max
+            idx = np.flatnonzero(ok)
+            if idx.size == 0:
+                hub.put_scan(np.empty(0, np.float32), np.empty(0, np.float32))
+                return
+            ang = msg.angle_min + idx.astype(np.float64) * msg.angle_increment
+            ang += math.radians(hub.lidar_offset_deg)
+            theta = np.mod(ang, 2.0 * math.pi).astype(np.float32)
+            hub.put_scan(theta, r[idx] * 1000.0)
 
         def on_status(msg):
-            """ /lane/status (2 Hz, key=value, node C++ in kèm đơn vị):
-            two_lanes=1 track=two dev=-12 emg=0 age=12ms proc=2.1ms fps=29.4
-            lidar=ok front=142cm serial=open w=50cm devm=-4cm
-            spd=3.0 kmh=0.00 fbage=12 alert=CLEAR """
-            d = {}
-            for tok in str(msg.data).split():
-                if "=" in tok:
-                    key, val = tok.split("=", 1)
-                    d[key] = val
-            if not d:
-                return
+            d = parse_status(msg.data)
+            if d:
+                hub.put_status(d)
 
-            proc["ms"] = parse_num(d.get("proc"))
+        try:
+            # Ctrl+C do Qt (main) xu ly; rclpy khong cai signal handler rieng,
+            # neu khong luong nay se chet giua chung khi bam Ctrl+C
+            from rclpy.signals import SignalHandlerOptions
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+            node = Node("autocar_monitor")
+            node.create_subscription(CompressedImage, TOPIC_VIS, on_vis, qos)
+            node.create_subscription(CompressedImage, TOPIC_ROI, on_roi, qos)
+            node.create_subscription(CompressedImage, TOPIC_BIN, on_bin, qos)
+            node.create_subscription(LaserScan, TOPIC_SCAN, on_scan, qos)
+            node.create_subscription(String, TOPIC_STATUS, on_status, 10)
+            run_pub = node.create_publisher(Bool, TOPIC_RUN, 10)
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"ROS 2 init error: {exc}"
+            print("[GUI]", self.error)
+            return
 
-            dev = parse_num(d.get("dev")) or 0.0
-            emg = int(parse_num(d.get("emg")) or 0)
-            two_lanes = int(parse_num(d.get("two_lanes")) or 0)
-
-            # Góc servo mà firmware tính từ dev (calcSteerPID: deadzone 10 px,
-            # max 50 px -> servo 60..120°, tâm 90°). ESP chỉ báo vận tốc nên
-            # góc servo tính lại theo đúng công thức, không đọc được từ serial.
-            off = min(max(abs(dev) - 10.0, 0.0), 40.0) / 40.0 * 30.0
-            steer = 90.0 + off if dev < 0 else 90.0 - off
-
-            # Vận tốc THỰC TẾ từ ESP32 (-1 = chưa có telemetry)
-            kmh = parse_num(d.get("kmh"))
-            speed = kmh if kmh is not None and kmh >= 0 else None
-
-            # track = two/one/lost (node C++ thêm mới); bản cũ không có key này
-            # -> suy từ two_lanes như cũ
-            track = d.get("track")
-            if emg:
-                state = "EMERGENCY STOP"
-            elif track == "one":
-                state = "ONE LANE"
-            elif track == "two" or (track is None and two_lanes):
-                state = "FOLLOW LANE"
-            else:
-                state = "LANE LOST"
-
-            fbage = parse_num(d.get("fbage"))
-            serial_ok = d.get("serial") == "open"
-            err = 0 if serial_ok and fbage is not None and 0 <= fbage <= 200 else 1
-            spd_cmd = parse_num(d.get("spd")) or 0.0
-
-            rx_text = f"VEL {speed:.2f} km/h" if speed is not None else "VEL --"
-            if fbage is not None and fbage >= 0:
-                rx_text += f"  age={fbage:.0f} ms"
-
-            hub.put_esp(
-                f"CMD dev={dev:+.0f}px spd={spd_cmd:.1f} emg={emg}",
-                rx_text,
-                tx_bytes=11, rx_bytes=7, err=err,
-                speed=speed, steer=steer, state=state)
-
-        rclpy.init()
-        node = Node("autocar_monitor_py")
-        node.create_subscription(LaserScan, TOPIC_SCAN, on_scan, qos)
-        node.create_subscription(CompressedImage, TOPIC_ROI, on_roi, qos)
-        node.create_subscription(CompressedImage, TOPIC_BIN, on_bin, qos)
-        node.create_subscription(CompressedImage, TOPIC_RAW, on_raw, qos)
-        node.create_subscription(String, TOPIC_STATUS, on_status, qos)
+        period = 1.0 / RUN_HEARTBEAT_HZ
+        t_next = 0.0
         while rclpy.ok() and not self.stop_event.is_set():
-            rclpy.spin_once(node, timeout_sec=0.02)
-        node.destroy_node()
-        rclpy.shutdown()
+            try:
+                rclpy.spin_once(node, timeout_sec=0.005)
+            except Exception as exc:  # noqa: BLE001 - context bi tat tu ngoai
+                self.error = f"ROS 2 stopped: {exc}"
+                break
+
+            # An toan: mat lien lac voi fusion_node -> tu bo lenh chay, de khi
+            # node song lai xe KHONG tu chay ma phai bam SPACE lan nua
+            if hub.want_run and hub.status_t > 0 and now() - hub.status_t > FUSION_LOST_STOP_S:
+                hub.set_run(False)
+
+            want, dirty = hub.take_run()
+            t = now()
+            if dirty or t >= t_next:
+                run_pub.publish(Bool(data=bool(want)))
+                t_next = t + period
+
+        # Dong GUI: bao dung xe vai lan cho chac roi moi thoat
+        try:
+            for _ in range(3):
+                run_pub.publish(Bool(data=False))
+                time.sleep(0.02)
+            node.destroy_node()
+        except Exception:  # noqa: BLE001
+            pass
+        rclpy.try_shutdown()
 
 
 # ============================================================================
-# SMALL UI BUILDING BLOCKS
+# KHOI GIAO DIEN NHO
 # ============================================================================
 
 class PanelHeader(QFrame):
-    def __init__(self, title, subtitle=""):
+    """Thanh tieu de panel: TIEU DE  phu de  ............  [badge] [badge]"""
+
+    def __init__(self, title, subtitle="", n_badges=1):
         super().__init__()
         self.setObjectName("panelHeader")
-        self.setFixedHeight(34)
+        self.setFixedHeight(30)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 0, 8, 0)
+        lay.setSpacing(8)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(11, 0, 10, 0)
-        layout.setSpacing(8)
-
-        self.title = QLabel(title.upper())
-        self.title.setObjectName("panelTitle")
+        t = QLabel(title.upper())
+        t.setObjectName("panelTitle")
+        lay.addWidget(t)
         self.subtitle = QLabel(subtitle.upper())
         self.subtitle.setObjectName("panelSubtitle")
-        self.badge = QLabel("")
-        self.badge.setObjectName("panelBadge")
-        self._badge_text = ""
-        self._badge_kind = None
+        lay.addWidget(self.subtitle)
+        lay.addStretch()
 
-        layout.addWidget(self.title)
-        if subtitle:
-            layout.addWidget(self.subtitle)
-        layout.addStretch()
-        layout.addWidget(self.badge)
+        self.badges = []
+        for _ in range(n_badges):
+            b = Badge()
+            lay.addWidget(b)
+            self.badges.append(b)
 
-    def set_badge(self, text, kind="blue"):
-        # setStyleSheet chỉ gọi khi đổi màu; mỗi khung ảnh chỉ đổi chữ
-        if text != self._badge_text:
-            self._badge_text = text
-            self.badge.setText(text)
-        if not text or kind == self._badge_kind:
+    def set_subtitle(self, text):
+        text = text.upper()
+        if self.subtitle.text() != text:
+            self.subtitle.setText(text)
+
+
+class Badge(QLabel):
+    """Nhan nho bo tron; chi doi stylesheet khi doi mau (setStyleSheet ton CPU)."""
+
+    def __init__(self):
+        super().__init__("")
+        self._kind = None
+        self.hide()
+
+    def set(self, text, kind="blue"):
+        if not text:
+            self.hide()
             return
-        self._badge_kind = kind
-        bg, fg, border = BADGE_STYLES.get(kind, BADGE_STYLES["blue"])
-        self.badge.setStyleSheet(
-            f"#panelBadge {{ background: {bg}; color: {fg};"
-            f" border: 1px solid {border}; border-radius: 8px;"
-            f" padding: 2px 7px; font-size: 7pt; font-weight: 700; }}")
+        if self.text() != text:
+            self.setText(text)
+        if kind != self._kind:
+            self._kind = kind
+            self.setStyleSheet(
+                f"QLabel {{ background: {KIND_SOFT[kind]}; color: {KIND_COLOR[kind]};"
+                f" border-radius: 9px; padding: 2px 8px; font-family: {FONT_MONO};"
+                f" font-size: 8pt; font-weight: 700; }}")
+        self.show()
 
 
-class ImageViewport(QWidget):
-    def __init__(self, raw=False, processed=False):
+class ImageView(QWidget):
+    """Ve anh numpy bang QPainter: giu ti le, nen toi, khong copy du lieu."""
+
+    def __init__(self, placeholder="WAITING FOR IMAGE"):
         super().__init__()
-        self.raw = raw
-        self.processed = processed
-        self.image = QImage()
-        self._buf = None                  # giữ mảng numpy sống cùng QImage
-        self.lane_center = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(80, 40)
+        self.image = QImage()
+        self._buf = None             # giu mang numpy song cung QImage
+        self.placeholder = placeholder
+        self.stale = True
+        self._bg = QColor(C_VIEW_BG)
+        self._font = QFont(FONT_UI_FAMILY, 9)
+        self._font.setBold(True)
 
-        self._bg = QColor("#F8FAFC")
-        self._pen_border = QPen(QColor(C_LINE), 1)
-        self._pen_roi = QPen(QColor(C_BLUE), 2)
-        self._pen_center = QPen(QColor(C_BLUE), 1, Qt.PenStyle.DashLine)
-        self._pen_lane = QPen(QColor(C_RED), 2)
-        self._font_wait = QFont(FONT_UI, 10)
-        self._font_chip = QFont(FONT_UI, 8)
-        self._font_chip.setBold(True)
-
-    def set_frame(self, arr, lane_center=None):
-        """arr: uint8, HxWx3 (BGR như OpenCV) hoặc HxW (xám).
-        Dùng trực tiếp bộ nhớ numpy, không đổi kênh màu, không sao chép."""
+    def set_frame(self, arr):
         arr = np.ascontiguousarray(arr)
         h, w = arr.shape[:2]
-        fmt = (QImage.Format.Format_Grayscale8 if arr.ndim == 2
-               else QImage.Format.Format_BGR888)
+        fmt = QImage.Format.Format_Grayscale8 if arr.ndim == 2 else QImage.Format.Format_BGR888
         self.image = QImage(arr.data, w, h, arr.strides[0], fmt)
         self._buf = arr
-        self.lane_center = lane_center
+        self.stale = False
         self.update()
 
-    def paintEvent(self, event):
-        t0 = perf_now()
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        painter.fillRect(self.rect(), self._bg)
+    def set_stale(self, stale):
+        if stale != self.stale:
+            self.stale = stale
+            self.update()
 
+    def set_placeholder(self, text):
+        if text != self.placeholder:
+            self.placeholder = text
+            self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), self._bg)
         if self.image.isNull():
-            painter.setPen(QColor(C_MUTED))
-            painter.setFont(self._font_wait)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "WAITING FOR IMAGE")
-            painter.end()
+            self._center_text(p, self.placeholder)
+            p.end()
             return
 
         iw, ih = self.image.width(), self.image.height()
         scale = min(self.width() / iw, self.height() / ih)
-        dw, dh = max(1, int(iw * scale)), max(1, int(ih * scale))
-        x = (self.width() - dw) // 2
-        y = (self.height() - dh) // 2
-        target = QRectF(x, y, dw, dh)
+        dw, dh = iw * scale, ih * scale
+        target = QRectF((self.width() - dw) / 2, (self.height() - dh) / 2, dw, dh)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.drawImage(target, self.image)
 
-        painter.drawImage(target, self.image)
-        painter.setPen(self._pen_border)
-        painter.drawRect(target.adjusted(0, 0, -1, -1))
+        if self.stale:
+            p.fillRect(target, QColor(11, 18, 32, 170))
+            self._center_text(p, self.placeholder)
+        p.end()
 
-        # Khung ROI trên ảnh raw
-        if self.raw and ih == CAM_H:
-            top = y + ROI_Y0 * scale
-            bottom = y + ROI_Y1 * scale
-            painter.setPen(self._pen_roi)
-            painter.drawRect(QRectF(x + 1, top, max(1, dw - 2), bottom - top))
-            self._chip(painter, "ROI", x + 10, top + 6, C_BLUE)
-
-        # Tâm làn và độ lệch trên ảnh kết quả
-        if self.processed:
-            cx = x + dw / 2
-            painter.setPen(self._pen_center)
-            painter.drawLine(QPointF(cx, y), QPointF(cx, y + dh))
-
-            if self.lane_center is not None:
-                lx = x + max(0, min(CAM_W - 1, float(self.lane_center))) * scale
-                painter.setPen(self._pen_lane)
-                painter.setBrush(QColor(C_RED))
-                painter.drawEllipse(QPointF(lx, y + dh - 13), 5, 5)
-                dev = self.lane_center - CAM_W / 2
-                self._chip(painter, f"DEV {dev:+.0f}px", x + 9, y + dh - 31, C_HEAD)
-
-        painter.end()
-        PERF["paint"] += (perf_now() - t0) * 1000
-
-    def _chip(self, painter, text, x, y, bg):
-        painter.setFont(self._font_chip)
-        m = painter.fontMetrics()
-        rect = QRectF(x, y, m.horizontalAdvance(text) + 14, m.height() + 7)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(bg))
-        painter.drawRoundedRect(rect, 4, 4)
-        painter.setPen(QColor("#FFFFFF"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    def _center_text(self, p, text):
+        p.setPen(QColor("#94A3B8"))
+        p.setFont(self._font)
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
 
-class ImagePanel(QFrame):
-    def __init__(self, title, raw=False, processed=False):
+class Card(QFrame):
+    """Khung trang bo goc co header."""
+
+    def __init__(self, title, subtitle="", n_badges=1):
         super().__init__()
-        self.setObjectName("imagePanel")
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        self.header = PanelHeader(title)
-        root.addWidget(self.header)
-        self.view = ImageViewport(raw=raw, processed=processed)
-        root.addWidget(self.view, 1)
+        self.setObjectName("card")
+        self.root = QVBoxLayout(self)
+        self.root.setContentsMargins(1, 1, 1, 1)
+        self.root.setSpacing(0)
+        self.header = PanelHeader(title, subtitle, n_badges)
+        self.root.addWidget(self.header)
 
 
-# ============================================================================
-# STATUS SIDE PANEL
-# ============================================================================
+class ImageCard(Card):
+    def __init__(self, title, subtitle="", n_badges=1, placeholder="WAITING FOR IMAGE"):
+        super().__init__(title, subtitle, n_badges)
+        self.view = ImageView(placeholder)
+        self.root.addWidget(self.view, 1)
 
-class NodeRow(QFrame):
+
+class Metric(QFrame):
+    """O so lieu: NHAN nho o tren, GIA TRI lon o duoi."""
+
+    def __init__(self, label, unit=""):
+        super().__init__()
+        self.setObjectName("metric")
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(9, 6, 6, 6)
+        lay.setSpacing(1)
+        lab = QLabel(label)
+        lab.setObjectName("metricLabel")
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self.value = QLabel("--")
+        self.value.setObjectName("metricValue")
+        self.unit = QLabel(unit)
+        self.unit.setObjectName("metricUnit")
+        row.addWidget(self.value)
+        row.addWidget(self.unit, 0, Qt.AlignmentFlag.AlignBottom)
+        row.addStretch()
+        lay.addWidget(lab)
+        lay.addLayout(row)
+        self._color = None
+
+    def set(self, text, color=None):
+        if self.value.text() != text:
+            self.value.setText(text)
+        color = color or C_TEXT
+        if color != self._color:
+            self._color = color
+            self.value.setStyleSheet(f"color: {color};")
+
+
+class LinkPill(QLabel):
+    """Den ket noi tren header: ● CAMERA 30 Hz"""
+
     def __init__(self, name):
         super().__init__()
-        self.setObjectName("nodeRow")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
+        self.name = name
+        self._state = None
+        self.set_state(False, "")
 
-        self.dot = QLabel("●")
-        self.dot.setObjectName("nodeDot")
-        self.dot.setFixedWidth(12)
-        self.name = QLabel(name)
-        self.name.setObjectName("nodeName")
-        self.rate = QLabel("--")
-        self.rate.setObjectName("nodeRate")
-        self.state = QLabel("WAITING")
-        self.state.setObjectName("nodeState")
-        self._connected = None
-
-        layout.addWidget(self.dot)
-        layout.addWidget(self.name)
-        layout.addStretch()
-        layout.addWidget(self.rate)
-        layout.addWidget(self.state)
-
-    def set_status(self, connected, rate, state):
-        if connected != self._connected:       # chỉ đổi style khi trạng thái đổi
-            self._connected = connected
-            color = C_GREEN if connected else C_RED
-            self.dot.setStyleSheet(f"#nodeDot {{ color: {color}; }}")
-            self.state.setStyleSheet(
-                f"#nodeState {{ color: {color}; font-weight: 700; }}")
-        if self.rate.text() != rate:
-            self.rate.setText(rate)
-        if self.state.text() != state:
-            self.state.setText(state)
+    def set_state(self, ok, extra):
+        state = (ok, extra)
+        if state == self._state:
+            return
+        self._state = state
+        color = "#4ADE80" if ok else "#F87171"
+        self.setText(f'<span style="color:{color}">●</span>&nbsp;{self.name}'
+                     f'<span style="color:#94A3B8">&nbsp;{extra}</span>')
 
 
-class SystemPanel(QFrame):
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("systemPanel")
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(PanelHeader("SYSTEM STATUS", "COMMUNICATION / TELEMETRY"))
+class RunButton(QPushButton):
+    """Nut CHAY/DUNG. NoFocus de phim SPACE khong 'bam' nut 2 lan."""
 
-        body = QWidget()
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(10, 9, 10, 10)
-        layout.setSpacing(7)
-
-        self.node_rows = {}
-        for name in NODES:
-            row = NodeRow(name)
-            self.node_rows[name] = row
-            layout.addWidget(row)
-
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setObjectName("separator")
-        layout.addWidget(separator)
-
-        section = QLabel("VEHICLE")
-        section.setObjectName("miniSection")
-        layout.addWidget(section)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(5)
-
-        self.speed = QLabel("--")
-        self.steer = QLabel("--")
-        self.proc = QLabel("--")
-
-        for title, value, r, c in (("SPEED", self.speed, 0, 0),
-                                   ("STEER", self.steer, 0, 1),
-                                   ("PROC", self.proc, 1, 0)):
-            box = QVBoxLayout()
-            box.setContentsMargins(0, 0, 0, 0)
-            box.setSpacing(0)
-            lab = QLabel(title)
-            lab.setObjectName("metricLabel")
-            value.setObjectName("metricBigValue")
-            box.addWidget(lab)
-            box.addWidget(value)
-            host = QWidget()
-            host.setLayout(box)
-            grid.addWidget(host, r, c)
-
-        layout.addLayout(grid)
-        root.addWidget(body, 1)
-
-
-# ============================================================================
-# LIDAR: GIỮ ĐÚNG THIẾT KẾ CODE RPLIDAR GỐC
-# ============================================================================
-
-class OldMatplotlibLidar(QFrame):
-    """Phần Matplotlib giống hệt code gốc: figsize 4x4, polar, c=[0], s=15,
-    ListedColormap + BoundaryNorm, rmax 12 m, nhãn 2m..12m, rlabel 22.5,
-    grid, subplots_adjust(top .92, bottom .08, left .08, right .92) và công
-    thức cỡ chữ max(6, fig_width * 1.3).
-
-    Khác code gốc ở cách cập nhật: dùng blit (chỉ vẽ lại các điểm) thay cho
-    vẽ lại cả hình, nên mỗi scan chỉ tốn vài ms."""
+    STYLES = {
+        "start": (C_GREEN, "#15803D", "▶   CHẠY XE      [ SPACE ]"),
+        "stop": (C_RED, "#B91C1C", "■   DỪNG XE      [ SPACE ]"),
+        "wait": (C_ORANGE, "#B45309", "…   ĐANG CHỜ XE  [ SPACE ]"),
+        "offline": ("#94A3B8", "#94A3B8", "MẤT KẾT NỐI FUSION NODE"),
+    }
 
     def __init__(self):
         super().__init__()
-        self.setObjectName("lidarPanel")
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        self.header = PanelHeader("LiDAR MAP", "ORIGINAL POLAR VIEW")
-        root.addWidget(self.header)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(48)
+        self._mode = None
+        self.set_mode("start")
 
-        # ---- giống create/run() của code gốc ----
+    def set_mode(self, mode):
+        if mode == self._mode:
+            return
+        self._mode = mode
+        bg, hover, text = self.STYLES[mode]
+        self.setText(text)
+        self.setStyleSheet(
+            f"QPushButton {{ background: {bg}; color: white; border: none;"
+            f" border-radius: 8px; font-family: {FONT_UI}; font-size: 11pt;"
+            f" font-weight: 800; letter-spacing: 1px; }}"
+            f"QPushButton:hover {{ background: {hover}; }}"
+            f"QPushButton:pressed {{ padding-top: 2px; }}")
+
+
+# ============================================================================
+# BAN DO LiDAR (giu thiet ke ban do RPLIDAR goc)
+# ============================================================================
+
+class LidarMap(Card):
+    """Polar matplotlib: figsize 4x4, scatter vien mong, 4 dai mau do/cam/vang/xanh
+    (BoundaryNorm theo nguong C++ 0.4/0.6/1.5 m), nhan khoang cach, luoi.
+    Vong xam o tam = vung mu 15 cm cua RPLIDAR A1 (vat trong do KHONG hien,
+    vi cam bien khong do duoc, khong phai do ve sai).
+
+    Quy luat ve: du lieu da o KHUNG XE (xem RosWorker.on_scan). 0 do = TRUOC
+    o phia tren, 90 do = TRAI ben trai, tang nguoc chieu kim dong ho.
+    Cap nhat bang blit (chi ve lai cac diem) nen moi scan chi ton vai ms.
+    Lan chuot tren ban do de doi tam nhin 1..12 m."""
+
+    def __init__(self):
+        super().__init__("LiDAR MAP", "VEHICLE FRAME · FRONT ↑", n_badges=1)
+        self.range_idx = LIDAR_RANGES_M.index(LIDAR_DEFAULT_RANGE_M)
+
         self.figure = Figure(figsize=(4, 4))
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.canvas.setMinimumSize(160, 160)   # khong de figsize ep be rong cot
         self.ax = self.figure.add_subplot(111, projection="polar")
+        self.ax.set_theta_zero_location("N")   # 0 do (truoc xe) o phia tren
+        self.ax.set_theta_direction(1)         # nguoc chieu kim dong ho (REP-103)
 
-        cmap = mcolors.ListedColormap(["red", "orange", "yellow", "green"])
-        norm = mcolors.BoundaryNorm([0, 2000, 4000, 8000, DMAX + 1], cmap.N)
+        cmap = mcolors.ListedColormap(list(LIDAR_COLORS))
+        norm = mcolors.BoundaryNorm(list(LIDAR_COLOR_BOUNDS_MM), cmap.N)
+        # Vien toi mong quanh moi diem: diem tach han khoi luoi va nen
+        self.scatter = self.ax.scatter([0], [0], c=[0], s=LIDAR_POINT_SIZE, cmap=cmap,
+                                       norm=norm, edgecolors="#1E293B", linewidths=0.35)
 
-        # Thêm c=[0] để "kích hoạt" engine tính màu theo mảng dữ liệu
-        self.scatter = self.ax.scatter([0], [0], c=[0], s=15, cmap=cmap, norm=norm, lw=0)
+        # Vung mu 15 cm (to xam) + xe o tam, mui ten nho chi huong truoc
+        th = np.linspace(0.0, 2.0 * math.pi, 73)
+        self.ax.fill(th, np.full_like(th, LIDAR_BLIND_MM), color="#CBD5E1",
+                     alpha=0.55, lw=0, zorder=1)
+        self.ax.scatter([0], [0], marker="^", s=28, c="#0F172A", zorder=2)
 
-        self.ax.set_rmax(DMAX)
-        self.ax.set_yticks([2000, 4000, 6000, 8000, 10000, 12000])
-        self.ax.set_yticklabels(["2m", "4m", "6m", "8m", "10m", "12m"], alpha=0.7)
         self.ax.set_rlabel_position(22.5)
         self.ax.grid(True)
-
         self.figure.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.92)
+        self._apply_range()
 
         self.canvas.mpl_connect("resize_event", self._on_resize)
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self._on_resize(None)
-        # -----------------------------------------
 
-        # Blit: nền (lưới, nhãn) lưu 1 lần, mỗi scan chỉ vẽ lại scatter
+        # Blit: nen (luoi, nhan) luu 1 lan, moi scan chi ve lai scatter
         self.scatter.set_animated(True)
         self._bg = None
         self.canvas.mpl_connect("draw_event", self._on_draw)
 
-        root.addWidget(self.canvas, 1)
+        self.root.addWidget(self.canvas, 1)
 
         footer = QFrame()
-        footer.setObjectName("lidarFooter")
+        footer.setObjectName("cardFooter")
         fl = QHBoxLayout(footer)
-        fl.setContentsMargins(10, 4, 10, 5)
-        fl.setSpacing(15)
-
-        self.nearest_label = QLabel("NEAREST  --")
-        self.points_label = QLabel("POINTS  --")
-        self.status_label = QLabel("STATUS  --")
+        fl.setContentsMargins(12, 4, 12, 5)
+        fl.setSpacing(14)
+        self.nearest_label = QLabel("NEAR --")
+        self.points_label = QLabel("PTS --")
+        self.status_label = QLabel("--")
         for lab in (self.nearest_label, self.points_label, self.status_label):
-            lab.setObjectName("lidarMetric")
+            lab.setObjectName("footMetric")
             fl.addWidget(lab)
         fl.addStretch()
-
-        legend = QLabel("0–2m  RED   2–4m  ORANGE   4–8m  YELLOW   >8m  GREEN")
-        legend.setObjectName("lidarLegend")
+        c = LIDAR_COLORS
+        legend = QLabel(f'<span style="color:{c[0]}">●</span>.4 '
+                        f'<span style="color:{c[1]}">●</span>.6 '
+                        f'<span style="color:{c[2]}">●</span>1.5 '
+                        f'<span style="color:{c[3]}">●</span>&gt; m')
+        legend.setToolTip("Mau theo khoang cach: do < 0.4 m, cam < 0.6 m, vang < 1.5 m, "
+                          "xanh xa hon. Vong xam o tam = vung mu 15 cm cua LiDAR.")
+        legend.setObjectName("footLegend")
         fl.addWidget(legend)
-        root.addWidget(footer)
-
+        self.legend = legend
+        self.root.addWidget(footer)
         self._status_kind = None
 
-    def _on_resize(self, event):
-        new_size = max(6, self.figure.get_figwidth() * 1.3)
-        self.ax.tick_params(axis="both", labelsize=new_size)
-        self._bg = None                    # nền cũ không còn đúng kích thước
+    def resizeEvent(self, event):
+        # Khung hep: bo chu thich mau de cac so lieu khong bi cat
+        self.legend.setVisible(self.width() >= 420)
+        super().resizeEvent(event)
 
-    def _on_draw(self, event):
+    # ---- tam nhin ----
+    def _apply_range(self):
+        r_m = LIDAR_RANGES_M[self.range_idx]
+        step = {0.5: 0.1, 1: 0.2, 2: 0.5, 3: 0.5, 4: 1, 6: 1, 8: 2, 12: 2}[r_m]
+        ticks = np.arange(step, r_m + 1e-6, step)
+        self.ax.set_rmax(r_m * 1000)
+        self.ax.set_rmin(0)
+        self.ax.set_yticks(ticks * 1000)
+        self.ax.set_yticklabels([f"{t:g}m" for t in ticks], alpha=0.7)
+        self.header.badges[0].set(f"RANGE {r_m:g} m", "muted")
+
+    def _on_scroll(self, event):
+        old = self.range_idx
+        if event.button == "up":
+            self.range_idx = max(0, self.range_idx - 1)
+        elif event.button == "down":
+            self.range_idx = min(len(LIDAR_RANGES_M) - 1, self.range_idx + 1)
+        if self.range_idx != old:
+            self._apply_range()
+            self._bg = None
+            self.canvas.draw_idle()
+
+    def _on_resize(self, _event):
+        size = max(6, self.figure.get_figwidth() * 1.3)
+        self.ax.tick_params(axis="both", labelsize=size)
+        self._bg = None
+
+    def _on_draw(self, _event):
         self._bg = self.canvas.copy_from_bbox(self.figure.bbox)
         self.figure.draw_artist(self.scatter)
 
-    def set_scan(self, scan):
-        if scan is None or len(scan) == 0:
-            return
-
-        # Cùng quy ước dữ liệu như update_line() gốc: theta = radian, r = mm
-        self.scatter.set_offsets(np.column_stack((np.radians(scan[:, 1]), scan[:, 2])))
-        self.scatter.set_array(scan[:, 2])
+    # ---- du lieu ----
+    def set_scan(self, theta, dist):
+        if theta.size:
+            self.scatter.set_offsets(np.column_stack((theta, dist)))
+            self.scatter.set_array(dist)
+        else:
+            self.scatter.set_offsets(np.empty((0, 2)))
+            self.scatter.set_array(np.empty(0))
 
         if self._bg is not None:
             self.canvas.restore_region(self._bg)
@@ -714,348 +734,416 @@ class OldMatplotlibLidar(QFrame):
         else:
             self.canvas.draw_idle()
 
-        dist = scan[:, 2]
-        i = int(np.argmin(dist))
-        nearest, angle = float(dist[i]), float(scan[i, 1])
-
-        self.nearest_label.setText(f"NEAREST  {nearest / 1000:.2f} m  @  {angle:.0f}°")
-        self.points_label.setText(f"POINTS  {len(scan):,}")
-
-        if nearest < 2000:
-            state, kind = "DANGER", "red"
-        elif nearest < 4000:
-            state, kind = "CAUTION", "orange"
+        if dist.size:
+            i = int(np.argmin(dist))
+            deg = (math.degrees(float(theta[i])) + 180.0) % 360.0 - 180.0
+            side = "L" if deg > 3 else "R" if deg < -3 else ""
+            self.nearest_label.setText(
+                f"NEAR {dist[i] / 1000:.2f} m @ {abs(deg):.0f}°{side}")
         else:
-            state, kind = "CLEAR", "green"
-        self.status_label.setText(f"STATUS  {state}")
+            self.nearest_label.setText("NEAR --")
+        self.points_label.setText(f"PTS {dist.size}")
 
+    def set_alert(self, alert):
+        """Muc canh bao lay tu C++ (LidarModule: <40 cm DANGER, <60 cm WARNING)."""
+        kind = {"DANGER": "red", "WARNING": "orange", "CLEAR": "green"}.get(alert, "muted")
+        text = alert or "--"
+        if self.status_label.text() != text:
+            self.status_label.setText(text)
         if kind != self._status_kind:
             self._status_kind = kind
-            self.status_label.setStyleSheet(
-                f'#lidarMetric {{ color: {KIND_COLOR[kind]}; font-family: "{FONT_MONO}";'
-                f" font-size: 7pt; font-weight: 700; }}")
+            self.status_label.setStyleSheet(f"color: {KIND_COLOR[kind]};")
 
 
 # ============================================================================
-# MAIN WINDOW
+# KHUNG DIEU KHIEN: trang thai + nut SPACE + so lieu
+# ============================================================================
+
+class ControlCard(Card):
+    def __init__(self, on_toggle):
+        super().__init__("VEHICLE CONTROL", "", n_badges=1)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.state = QLabel("WAITING")
+        self.state.setObjectName("stateBig")
+        self.state_detail = QLabel("")
+        self.state_detail.setObjectName("stateDetail")
+        top.addWidget(self.state)
+        top.addStretch()
+        top.addWidget(self.state_detail, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(top)
+
+        self.button = RunButton()
+        self.button.clicked.connect(on_toggle)
+        lay.addWidget(self.button)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        self.m = {
+            "speed": Metric("SPEED CMD", "km/h"),
+            "esc": Metric("ESC (ESP32)", "°"),
+            "servo": Metric("SERVO", "°"),
+            "dev": Metric("LANE DEV", "cm"),
+            "width": Metric("LANE WIDTH", "cm"),
+            "curv": Metric("CURVATURE", "1/m"),
+            "fps": Metric("CAMERA", "fps"),
+            "proc": Metric("DETECT", "ms"),
+            "front": Metric("FRONT", "cm"),
+        }
+        order = ("speed", "esc", "servo", "dev", "width", "curv", "fps", "proc", "front")
+        for k, key in enumerate(order):
+            grid.addWidget(self.m[key], k // 3, k % 3)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        lay.addLayout(grid)
+        self.root.addWidget(body, 1)
+        self._state_color = None
+
+    def set_state(self, text, color, detail=""):
+        if self.state.text() != text:
+            self.state.setText(text)
+        if color != self._state_color:
+            self._state_color = color
+            self.state.setStyleSheet(f"color: {color};")
+        if self.state_detail.text() != detail:
+            self.state_detail.setText(detail)
+
+
+# ============================================================================
+# CUA SO CHINH
 # ============================================================================
 
 class AutoCarMonitor(QMainWindow):
-    def __init__(self, hub, mode, fps=60, width=1440, height=900):
+    def __init__(self, hub, worker, fps=60, width=1280, height=760):
         super().__init__()
         self.hub = hub
-        self.mode = mode
-        self.target_fps = max(20, min(120, int(fps)))
-
+        self.worker = worker
         self.setWindowTitle(APP_TITLE)
         self.resize(width, height)
-        self.setMinimumSize(1150, 720)
+        self.setMinimumSize(1024, 640)
 
-        self.start_time = perf_now()
-        self.last_cam_seq = -1
-        self.last_scan_seq = -1
-
-        self.frames = 0
-        self.fps_value = 0.0
-        self.last_fps_time = perf_now()
-        self.upd_ms = 0.0
-        self.paint_ms = 0.0
-
-        self.prev_stats = None
-        self.prev_stats_t = None
-        self._ready_kind = None
+        self.t_start = now()
+        self.seen = {"vis": -1, "roi": -1, "bin": -1, "scan": -1, "status": -1}
+        self.t_status_ui = 0.0
+        self.gui_rate = RateMeter()
 
         self._apply_style()
         self._build_ui()
 
+        # Phim tat toan cua so: SPACE = chay/dung, ESC = dung ngay
+        ctx = Qt.ShortcutContext.ApplicationShortcut
+        self.sc_space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self.sc_space.setContext(ctx)
+        self.sc_space.activated.connect(self.toggle_run)
+        self.sc_esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.sc_esc.setContext(ctx)
+        self.sc_esc.activated.connect(lambda: self.hub.set_run(False))
+
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.timer.timeout.connect(self.update_gui)
-        self.timer.start(max(5, round(1000 / self.target_fps)))
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(max(5, round(1000 / max(20, min(120, int(fps))))))
 
     # ------------------------------------------------------------------ style
     def _apply_style(self):
         self.setStyleSheet(f"""
-            QMainWindow {{ background: {C_BG}; }}
-            QWidget {{ font-family: "{FONT_UI}"; color: {C_TEXT}; }}
+            QMainWindow, #central {{ background: {C_BG}; }}
+            QWidget {{ font-family: {FONT_UI}; color: {C_TEXT}; }}
 
-            #header {{ background: {C_HEAD}; border: none; }}
-            #appTitle {{ color: white; font-size: 15pt; font-weight: 800; }}
-            #appSubtitle {{ color: #A8B0BC; font-size: 8pt; }}
-            #headerInfo {{ color: #DCE2EA; font-family: "{FONT_MONO}"; font-size: 7.5pt; }}
+            #header {{ background: {C_HEAD}; }}
+            #appTitle {{ color: white; font-size: 13pt; font-weight: 800; letter-spacing: 1px; }}
+            #appSubtitle {{ color: #94A3B8; font-size: 8pt; }}
+            #headerInfo {{ color: #CBD5E1; font-family: {FONT_MONO}; font-size: 8.5pt; }}
+            LinkPill, #linkPill {{ color: #E2E8F0; font-size: 8.5pt; font-weight: 700;
+                background: {C_HEAD_2}; border-radius: 10px; padding: 3px 10px; }}
 
-            #modeStrip {{ background: {C_WHITE}; border-bottom: 1px solid {C_LINE}; }}
-            #modeBig {{ color: {C_HEAD}; font-family: "{FONT_MONO}"; font-size: 9pt; font-weight: 800; }}
-            #stateBig {{ color: {C_BLUE}; font-size: 10pt; font-weight: 800; }}
-            #stateMeta {{ color: {C_MUTED}; font-family: "{FONT_MONO}"; font-size: 7pt; }}
-            #readyBadge {{ border-radius: 9px; padding: 4px 10px; font-size: 7.5pt; font-weight: 800; }}
+            #card {{ background: {C_CARD}; border: 1px solid {C_LINE}; border-radius: 8px; }}
+            #panelHeader {{ background: transparent; border-bottom: 1px solid {C_LINE_2}; }}
+            #panelTitle {{ color: {C_TEXT}; font-size: 8.5pt; font-weight: 800; letter-spacing: 1px; }}
+            #panelSubtitle {{ color: {C_MUTED}; font-size: 7.5pt; font-weight: 600; }}
 
-            #imagePanel, #systemPanel, #lidarPanel {{
-                background: {C_WHITE}; border: 1px solid {C_LINE}; border-radius: 6px; }}
-            #panelHeader {{ background: #FBFCFD; border-bottom: 1px solid {C_LINE_2}; }}
-            #panelTitle {{ color: {C_TEXT_2}; font-size: 8pt; font-weight: 800; }}
-            #panelSubtitle {{ color: {C_MUTED}; font-size: 6.8pt; font-weight: 600; }}
-            #panelBadge {{ font-size: 7pt; font-weight: 700; }}
+            #stateBig {{ font-size: 15pt; font-weight: 800; letter-spacing: 1px; }}
+            #stateDetail {{ color: {C_MUTED}; font-family: {FONT_MONO}; font-size: 8.5pt; }}
 
-            #nodeRow {{ background: {C_PANEL_INNER}; border: 1px solid {C_LINE_2}; border-radius: 4px; }}
-            #nodeName {{ color: {C_TEXT}; font-size: 8.5pt; font-weight: 800; }}
-            #nodeRate {{ color: {C_TEXT_2}; font-family: "{FONT_MONO}"; font-size: 7.5pt; font-weight: 700; }}
-            #nodeState {{ font-size: 7pt; min-width: 68px; }}
-            #nodeDot {{ color: {C_MUTED}; font-size: 9pt; }}
+            #metric {{ background: {C_SOFT}; border: 1px solid {C_LINE_2}; border-radius: 6px; }}
+            #metricLabel {{ color: {C_MUTED}; font-size: 7pt; font-weight: 800; letter-spacing: 1px; }}
+            #metricValue {{ font-family: {FONT_MONO}; font-size: 12pt; font-weight: 700; }}
+            #metricUnit {{ color: {C_MUTED}; font-family: {FONT_MONO}; font-size: 7.5pt; padding-bottom: 2px; }}
 
-            #miniSection {{ color: {C_MUTED}; font-size: 7pt; font-weight: 800; padding-top: 1px; }}
-            #metricLabel {{ color: {C_MUTED}; font-family: "{FONT_MONO}"; font-size: 6.5pt; font-weight: 700; }}
-            #metricBigValue {{ color: {C_TEXT}; font-family: "{FONT_MONO}"; font-size: 10pt; font-weight: 800; }}
+            #cardFooter {{ border-top: 1px solid {C_LINE_2}; }}
+            #footMetric {{ color: {C_TEXT_2}; font-family: {FONT_MONO}; font-size: 8pt; font-weight: 700; }}
+            #footLegend {{ color: {C_MUTED}; font-family: {FONT_MONO}; font-size: 7.5pt; }}
 
-            #separator {{ color: {C_LINE}; background: {C_LINE}; max-height: 1px; }}
-            #vseparator {{ color: {C_LINE}; background: {C_LINE}; max-width: 1px; }}
-
-            #lidarPanel {{ background: white; }}
-            #lidarFooter {{ background: #FBFCFD; border-top: 1px solid {C_LINE_2}; }}
-            #lidarMetric {{ color: {C_MUTED}; font-family: "{FONT_MONO}"; font-size: 7pt; font-weight: 700; }}
-            #lidarLegend {{ color: {C_MUTED}; font-family: "{FONT_MONO}"; font-size: 6.5pt; }}
-
-            #bottomBar {{ background: {C_HEAD_2}; border: none; }}
-            #bottomText {{ color: #AEB7C4; font-family: "{FONT_MONO}"; font-size: 6.8pt; }}
+            #bottomBar {{ background: {C_HEAD}; }}
+            #bottomText {{ color: #94A3B8; font-family: {FONT_MONO}; font-size: 8pt; }}
+            #keyHint {{ color: #E2E8F0; font-size: 8pt; font-weight: 700; }}
         """)
 
     # --------------------------------------------------------------------- UI
     def _build_ui(self):
         central = QWidget()
+        central.setObjectName("central")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._build_header())
-        root.addWidget(self._build_state_strip())
-        root.addWidget(self._build_main_area(), 1)
-        root.addWidget(self._build_bottom_bar())
+        root.addWidget(self._build_body(), 1)
+        root.addWidget(self._build_footer())
 
     def _build_header(self):
         header = QFrame()
         header.setObjectName("header")
-        header.setFixedHeight(55)
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(15, 0, 15, 0)
-        layout.setSpacing(10)
+        header.setFixedHeight(46)
+        lay = QHBoxLayout(header)
+        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setSpacing(10)
 
         title = QLabel("AUTOCAR MONITOR")
         title.setObjectName("appTitle")
-        subtitle = QLabel("AUTONOMOUS VEHICLE ENGINEERING DASHBOARD")
+        subtitle = QLabel("Autonomous vehicle · lane following")
         subtitle.setObjectName("appSubtitle")
+        self.app_subtitle = subtitle
+        lay.addWidget(title)
+        lay.addWidget(subtitle)
+        lay.addStretch()
+
+        self.pills = {}
+        for name in LINKS:
+            pill = LinkPill(name)
+            pill.setObjectName("linkPill")
+            self.pills[name] = pill
+            lay.addWidget(pill)
+
+        lay.addSpacing(10)
         self.header_info = QLabel("")
         self.header_info.setObjectName("headerInfo")
-        self.header_info.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addStretch()
-        layout.addWidget(self.header_info)
+        lay.addWidget(self.header_info)
         return header
 
-    def _build_state_strip(self):
-        frame = QFrame()
-        frame.setObjectName("modeStrip")
-        frame.setFixedHeight(43)
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(15, 0, 15, 0)
-        layout.setSpacing(13)
+    def _build_body(self):
+        body = QWidget()
+        grid = QGridLayout(body)
+        grid.setContentsMargins(12, 12, 12, 12)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
 
-        self.mode_big = QLabel("AUTONOMOUS")
-        self.mode_big.setObjectName("modeBig")
+        # Trai: anh camera + overlay C++ (lon), duoi la ROI | mask
+        self.cam_card = ImageCard("LANE DETECTION", "C++ overlay", n_badges=2,
+                                  placeholder="WAITING FOR CAMERA")
+        self.roi_card = ImageCard("ROI", "camera crop", n_badges=0)
+        self.bin_card = ImageCard("BINARY MASK", "trừ nền + hysteresis", n_badges=0)
 
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.VLine)
-        divider.setObjectName("vseparator")
-
-        self.state_big = QLabel("FOLLOW LANE")
-        self.state_big.setObjectName("stateBig")
-        self.state_meta = QLabel("PERCEPTION → DECISION → CONTROL")
-        self.state_meta.setObjectName("stateMeta")
-        self.ready_badge = QLabel("● SYSTEM READY")
-        self.ready_badge.setObjectName("readyBadge")
-        self.set_ready_badge("ready")
-
-        layout.addWidget(self.mode_big)
-        layout.addWidget(divider)
-        layout.addWidget(self.state_big)
-        layout.addWidget(self.state_meta)
-        layout.addStretch()
-        layout.addWidget(self.ready_badge)
-        return frame
-
-    def _build_main_area(self):
-        outer = QWidget()
-        grid = QGridLayout(outer)
-        grid.setContentsMargins(13, 11, 13, 9)
-        grid.setHorizontalSpacing(11)
-        grid.setVerticalSpacing(11)
-        grid.setColumnStretch(0, 62)
-        grid.setColumnStretch(1, 38)
-
-        # Trái: raw camera + (ROI | kết quả)
         left = QWidget()
-        ll = QVBoxLayout(left)
+        ll = QGridLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(10)
+        ll.setHorizontalSpacing(12)
+        ll.setVerticalSpacing(12)
+        ll.addWidget(self.cam_card, 0, 0, 1, 2)
+        ll.addWidget(self.roi_card, 1, 0)
+        ll.addWidget(self.bin_card, 1, 1)
+        ll.setRowStretch(0, 3)
+        ll.setRowStretch(1, 1)
+        ll.setColumnStretch(0, 1)
+        ll.setColumnStretch(1, 1)
 
-        self.raw_panel = ImagePanel("RAW CAMERA", raw=True)
-
-        bottom = QWidget()
-        bp = QGridLayout(bottom)
-        bp.setContentsMargins(0, 0, 0, 0)
-        bp.setHorizontalSpacing(10)
-        self.roi_panel = ImagePanel("ROI")
-        self.result_panel = ImagePanel("PROCESSED RESULT", processed=True)
-        bp.addWidget(self.roi_panel, 0, 0)
-        bp.addWidget(self.result_panel, 0, 1)
-        bp.setColumnStretch(0, 1)
-        bp.setColumnStretch(1, 1)
-
-        ll.addWidget(self.raw_panel, 4)
-        ll.addWidget(bottom, 2)
-
-        # Phải: trạng thái hệ thống + LiDAR
+        # Phai: dieu khien + LiDAR
+        self.control = ControlCard(self.toggle_run)
+        self.lidar = LidarMap()
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(10)
-        self.system_panel = SystemPanel()
-        self.lidar_panel = OldMatplotlibLidar()
-        rl.addWidget(self.system_panel, 1)
-        rl.addWidget(self.lidar_panel, 2)
+        rl.setSpacing(12)
+        rl.addWidget(self.control, 0)
+        rl.addWidget(self.lidar, 1)
 
+        # Ignored: be rong 2 cot chi theo ti le stretch, khong bi noi dung ep
+        for w, min_w in ((left, 520), (right, 360)):
+            w.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            w.setMinimumWidth(min_w)
         grid.addWidget(left, 0, 0)
         grid.addWidget(right, 0, 1)
-        return outer
+        # 66/34: o 1280x760 khung camera 16:9 vua khit, khong thua dai den
+        grid.setColumnStretch(0, 66)
+        grid.setColumnStretch(1, 34)
+        return body
 
-    def _build_bottom_bar(self):
+    def _build_footer(self):
         footer = QFrame()
         footer.setObjectName("bottomBar")
-        footer.setFixedHeight(27)
-        layout = QHBoxLayout(footer)
-        layout.setContentsMargins(12, 0, 12, 0)
-
-        self.bottom_left = QLabel("STATE  --")
-        self.bottom_left.setObjectName("bottomText")
-        self.bottom_right = QLabel("")
-        self.bottom_right.setObjectName("bottomText")
-        self.bottom_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        layout.addWidget(self.bottom_left)
-        layout.addStretch()
-        layout.addWidget(self.bottom_right)
+        footer.setFixedHeight(26)
+        lay = QHBoxLayout(footer)
+        lay.setContentsMargins(16, 0, 16, 0)
+        hint = QLabel("SPACE  chạy / dừng      ESC  dừng ngay      Lăn chuột trên LiDAR  đổi tầm nhìn")
+        hint.setObjectName("keyHint")
+        self.footer_info = QLabel("")
+        self.footer_info.setObjectName("bottomText")
+        lay.addWidget(hint)
+        lay.addStretch()
+        lay.addWidget(self.footer_info)
         return footer
 
-    def set_ready_badge(self, kind):
-        if kind == self._ready_kind:
+    # ----------------------------------------------------------------- hanh dong
+    def toggle_run(self):
+        # Chi cho bat chay khi fusion_node dang song
+        if not self.hub.want_run and not self.hub.rates["FUSION"].alive():
             return
-        self._ready_kind = kind
-        text, fg, bg, border = {
-            "ready": ("● SYSTEM READY", C_GREEN, C_GREEN_SOFT, "#CDE9D7"),
-            "partial": ("● PARTIAL LINK", C_ORANGE, C_ORANGE_SOFT, "#F0D9A6"),
-        }.get(kind, ("● OFFLINE", C_RED, C_RED_SOFT, "#F0CACA"))
-        self.ready_badge.setText(text)
-        self.ready_badge.setStyleSheet(
-            f"#readyBadge {{ color: {fg}; background: {bg}; border: 1px solid {border}; }}")
+        self.hub.set_run(not self.hub.want_run)
+        self._update_status_ui(force=True)
 
     # --------------------------------------------------------------- realtime
-    def update_gui(self):
-        t0 = perf_now()
-        scan, scan_seq, cam, cam_seq, stats, info = self.hub.snapshot()
+    def tick(self):
+        hub = self.hub
+        with hub.lock:
+            images = dict(hub.images)
+            seq = dict(hub.image_seq)
+            t_img = dict(hub.image_t)
+            scan, scan_seq = hub.scan, hub.scan_seq
 
-        # Ảnh chỉ cập nhật khi có khung MỚI
-        if cam is not None and cam_seq != self.last_cam_seq:
-            frame, roi, binary, lane_center = cam
-            self.raw_panel.view.set_frame(frame, lane_center)
-            self.roi_panel.view.set_frame(roi)
-            self.result_panel.view.set_frame(binary, lane_center)
+        # Anh: chi ve lai khi co khung MOI
+        t = now()
+        for key, card in (("vis", self.cam_card), ("roi", self.roi_card), ("bin", self.bin_card)):
+            if images[key] is not None and seq[key] != self.seen[key]:
+                self.seen[key] = seq[key]
+                card.view.set_frame(images[key])
+                if key == "vis":
+                    self.gui_rate.tick()
+            card.view.set_stale(t_img[key] == 0 or t - t_img[key] > NO_SIGNAL_S)
 
-            proc = info.get("proc_ms")
-            if proc is not None:
-                self.raw_panel.header.set_badge(f"{proc:.1f} ms", "blue")
+        # LiDAR: chi khi co scan moi
+        if scan is not None and scan_seq != self.seen["scan"]:
+            self.seen["scan"] = scan_seq
+            self.lidar.set_scan(*scan)
 
-            self.last_cam_seq = cam_seq
-            self.frames += 1                       # FPS = số khung camera đã hiển thị
-            self.paint_ms += 0.1 * (PERF["paint"] - self.paint_ms)
-            PERF["paint"] = 0.0
+        if t - self.t_status_ui >= STATUS_UI_PERIOD_S:
+            self._update_status_ui()
 
-        # LiDAR: chỉ khi có scan mới
-        if scan is not None and scan_seq != self.last_scan_seq:
-            self.lidar_panel.set_scan(scan)
-            self.last_scan_seq = scan_seq
+    def _update_status_ui(self, force=False):
+        self.t_status_ui = now()
+        hub = self.hub
+        with hub.lock:
+            st = dict(hub.status)
+            want_run = hub.want_run
+        for r in hub.rates.values():
+            r.update()
+        self.gui_rate.update()
 
-        self.upd_ms += 0.1 * ((perf_now() - t0) * 1000 - self.upd_ms)
+        fusion_ok = hub.rates["FUSION"].alive()
+        num = lambda k: parse_num(st.get(k)) if fusion_ok else None  # noqa: E731
 
-        t = perf_now()
-        if t - self.last_fps_time >= STATUS_PERIOD_S:
-            elapsed = t - self.last_fps_time
-            self.fps_value = self.frames / elapsed if elapsed > 0 else 0.0
-            self.frames = 0
-            self.last_fps_time = t
-            self._update_status(stats, info, cam, scan)
-
-    def _update_status(self, stats, info, cam, scan):
-        now = time.time()
-        have_prev = self.prev_stats is not None and self.prev_stats_t is not None
-        dt = max(1e-6, now - self.prev_stats_t) if have_prev else 0
-
-        online = 0
-        for name in NODES:
-            msgs, rx, tx, err, t_last = stats[name]
-            connected = t_last > 0 and (now - t_last) < LINK_TIMEOUT_S
-            online += connected
-            rate = (msgs - self.prev_stats[name][0]) / dt if have_prev and dt > 0 else 0
-            state = ("CONNECTED" if connected
-                     else "WAITING" if t_last == 0 else "DISCONNECTED")
-            self.system_panel.node_rows[name].set_status(
-                connected, f"{rate:.1f} Hz" if connected else "--", state)
-
-        speed, steer = info.get("speed"), info.get("steer")
-        proc = info.get("proc_ms")
-        sp = self.system_panel
-        sp.speed.setText(f"{float(speed):.2f} km/h" if speed is not None else "--")
-        sp.steer.setText(f"{float(steer):.1f}°" if steer is not None else "--")
-        sp.proc.setText(f"{float(proc):.1f} ms" if proc is not None else "--")
-
-        mode = str(info.get("mode", "AUTONOMOUS"))
-        state = str(info.get("state", "FOLLOW LANE"))
-        self.mode_big.setText(mode.upper())
-        self.state_big.setText(state.upper())
-
-        n = len(NODES)
-        self.set_ready_badge("ready" if online == n else "partial" if online > 0 else "offline")
-
-        up = perf_now() - self.start_time
-        self.header_info.setText(
-            f"{self.mode}   |   GUI {self.fps_value:4.1f} FPS"
-            f"   |   UPD {self.upd_ms:.1f} ms   PAINT {self.paint_ms:.1f} ms"
-            f"   |   UP {format_uptime(up)}   |   {time.strftime('%H:%M:%S')}")
-
-        lane_dev = (float(cam[3]) - CAM_W / 2) if cam is not None and cam[3] is not None else None
-        if lane_dev is None:
-            lane_state = "NO LANE"
-        elif lane_dev > LANE_THR_PX:
-            lane_state = "RIGHT"
-        elif lane_dev < -LANE_THR_PX:
-            lane_state = "LEFT"
+        # ---- den ket noi ----
+        fbage = num("fbage")
+        esp_ok = fusion_ok and st.get("serial") == "open" and fbage is not None and 0 <= fbage <= 300
+        cam_hz = num("fps")
+        self.pills["FUSION"].set_state(fusion_ok, f"{hub.rates['FUSION'].hz:.0f} Hz" if fusion_ok else "")
+        age = num("age")
+        cam_ok = age is not None and 0 <= age < 300
+        if not fusion_ok:
+            cam_msg = "WAITING FOR FUSION NODE"
+        elif age is not None and age < 0:
+            cam_msg = "CAMERA CHƯA KẾT NỐI · đang tự thử lại mỗi 2 s"
+        elif not cam_ok:
+            cam_msg = "CAMERA MẤT TÍN HIỆU · đang tự kết nối lại"
         else:
-            lane_state = "STRAIGHT"
+            cam_msg = "WAITING FOR IMAGE"
+        self.cam_card.view.set_placeholder(cam_msg)
+        self.pills["CAMERA"].set_state(cam_ok, f"{cam_hz:.0f} fps" if cam_ok and cam_hz else "")
+        lidar_rate = hub.rates["LIDAR"]
+        self.pills["LIDAR"].set_state(lidar_rate.alive(), f"{lidar_rate.hz:.1f} Hz" if lidar_rate.alive() else "")
+        self.pills["ESP32"].set_state(esp_ok, "UART" if esp_ok else "")
 
-        nearest = float(np.min(scan[:, 2])) if scan is not None and len(scan) else None
-        nearest_text = f"{nearest / 1000:.2f} m" if nearest is not None else "--"
-        dev_text = f"{lane_dev:+.0f}px" if lane_dev is not None else "--"
-        proc_text = f"PROC {proc:.1f} ms" if proc is not None else "PROC --"
+        # ---- trang thai xe ----
+        run = num("run") == 1
+        emg = num("emg") == 1
+        track = st.get("track")
+        c = self.control
+        if not fusion_ok:
+            c.set_state("OFFLINE", C_MUTED, "no /lane/status")
+            c.button.set_mode("offline" if not want_run else "stop")
+        else:
+            if not run:
+                c.set_state("STOPPED", C_TEXT_2, "bấm SPACE để chạy")
+            elif emg:
+                c.set_state("EMERGENCY", C_RED, "mất camera" if not cam_ok else "mất làn")
+            elif esc is not None and esc <= 90 and (spd or 0) > 0:
+                # Mini PC gui lenh chay nhung ESP32 van phat neutral
+                why = ("ESP32 mất lệnh (watchdog)" if num("fwwd") == 1 else
+                       "ESP32 chưa nhận gói lệnh" if num("fwcmd") == 0 else
+                       "ESP32 đang EMG" if num("fwemg") == 1 else "ESP32 chưa ra ga")
+                c.set_state("NO THROTTLE", C_RED, why)
+            elif track == "two":
+                c.set_state("FOLLOW LANE", C_GREEN, "2 vạch")
+            elif track == "one":
+                c.set_state("ONE LINE", C_ORANGE, "1 vạch · chạy chậm")
+            else:
+                c.set_state("LANE LOST", C_ORANGE, "giữ hướng")
+            if want_run and run:
+                c.button.set_mode("stop")
+            elif want_run:
+                c.button.set_mode("wait")
+            else:
+                c.button.set_mode("start")
+        c.header.badges[0].set("RUNNING" if (fusion_ok and run) else "SAFE STOP",
+                               "green" if (fusion_ok and run) else "muted")
 
-        self.bottom_left.setText(
-            f"STATE  {state.upper()}   |   LANE {lane_state}   |   DEV {dev_text}")
-        self.bottom_right.setText(
-            f"{proc_text}   |   NEAREST {nearest_text}   |   {online}/{n} LINKS")
+        # ---- so lieu ----
+        def show(key, value, fmt, color=None):
+            c.m[key].set(fmt.format(value) if value is not None else "--", color)
 
-        self.prev_stats = stats
-        self.prev_stats_t = now
+        spd = num("spd")
+        show("speed", spd, "{:.1f}")
+        # Muc xung ESP32 THAT SU dang phat cho ESC (telemetry v2): 90 = dung,
+        # > 90 = tien. -1 = firmware cu chua bao (can nap firmware moi).
+        esc = num("esc")
+        esc = esc if esc is not None and esc >= 0 else None
+        show("esc", esc, "{:.0f}",
+             None if esc is None else (C_GREEN if esc > 90 else C_TEXT_2))
+        show("servo", num("servo"), "{:.1f}")
+        dev = num("devm") if track in ("one", "two") else None
+        show("dev", dev, "{:+.1f}",
+             None if dev is None else (C_GREEN if abs(dev) < 3 else C_ORANGE if abs(dev) < 8 else C_RED))
+        w = num("w")
+        show("width", w if w is not None and w > 0 else None, "{:.0f}")
+        show("curv", num("curv"), "{:+.2f}")
+        show("fps", cam_hz, "{:.1f}")
+        proc = num("proc")
+        show("proc", proc, "{:.1f}")
+        front = num("front")
+        front = front if front is not None and front >= 0 else None
+        show("front", front, "{:.0f}",
+             None if front is None else (C_RED if front < 40 else C_ORANGE if front < 60 else C_GREEN))
+
+        self.lidar.set_alert(st.get("alert") if fusion_ok else None)
+
+        # ---- badge camera ----
+        cam_size = st.get("cam", "")
+        self.cam_card.header.set_subtitle(f"C++ overlay · {cam_size.replace('x', '×')}" if cam_size else "C++ overlay")
+        badges = self.cam_card.header.badges
+        badges[0].set(f"{cam_hz:.0f} FPS" if cam_hz else "", "blue")
+        gate = num("gate") == 1
+        badges[1].set(f"{proc:.1f} ms" + (" · GATED" if gate else "") if proc is not None else "",
+                      "orange" if gate else "green")
+
+        # ---- header / footer ----
+        self.header_info.setText(f"{time.strftime('%H:%M:%S')}  ·  UP {fmt_uptime(now() - self.t_start)}")
+        self.footer_info.setText(
+            f"{QT_BINDING}  ·  GUI {self.gui_rate.hz:4.1f} fps  ·  "
+            f"dev {st.get('dev', '--')} px  ·  age {st.get('age', '--')}"
+            + (f"  ·  {self.worker.error}" if self.worker.error else ""))
+
+    def resizeEvent(self, event):
+        # Cua so hep: an phu de de tieu de va den ket noi khong de len nhau
+        self.app_subtitle.setVisible(self.width() >= 1200)
+        super().resizeEvent(event)
 
     def closeEvent(self, event):
+        self.hub.set_run(False)
         self.timer.stop()
         event.accept()
 
@@ -1066,24 +1154,34 @@ class AutoCarMonitor(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description=APP_TITLE)
-    parser.add_argument("--fps", type=int, default=60, help="Nhịp vẽ GUI")
-    parser.add_argument("--width", type=int, default=1440)
-    parser.add_argument("--height", type=int, default=900)
+    parser.add_argument("--fps", type=int, default=60, help="Nhip kiem tra/ve GUI (Hz)")
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=760)
+    parser.add_argument("--lidar-offset", type=float, default=DEFAULT_LIDAR_OFFSET_DEG,
+                        help="Goc lap LiDAR (do) khi chua nhan duoc lofs tu fusion_node")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
 
-    hub = Hub()
-    feeder, mode = RosFeeder(hub), "ROS 2 LIVE"
-    feeder.start()
+    # Ctrl+C / kill: dong cua so dang hoang (gui lenh dung xe roi moi thoat).
+    # Timer GUI chay 60 Hz nen Python kip xu ly tin hieu.
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    app.setFont(QFont(FONT_UI_FAMILY, 9))
 
-    window = AutoCarMonitor(hub, mode, fps=args.fps, width=args.width, height=args.height)
+    hub = Hub(args.lidar_offset)
+    worker = RosWorker(hub)
+    worker.start()
+
+    window = AutoCarMonitor(hub, worker, fps=args.fps, width=args.width, height=args.height)
     window.show()
 
-    code = app.exec()
-    feeder.stop()
-    feeder.join(timeout=0.5)
+    code = app.exec() if hasattr(app, "exec") else app.exec_()
+    hub.set_run(False)
+    worker.stop()
+    worker.join(timeout=1.0)
     sys.exit(code)
 
 

@@ -1,6 +1,17 @@
 // ============================================================================
-// BỘ ĐIỀU KHIỂN XE TỰ HÀNH ESP32-S3 (AUTONOMOUS VEHICLE)
+// BỘ ĐIỀU KHIỂN XE TỰ HÀNH - ESP32 (bản thường, ESP32-WROOM / DevKit V1)
 // Phân hệ: Low-level Controller (Xử lý tín hiệu & Chấp hành)
+// ----------------------------------------------------------------------------
+// (Thư mục vẫn tên esp32s3/ cho khớp lịch sử repo; chip thật là ESP32 thường.)
+//
+// Giao tiếp với Mini PC: `Serial` = UART0 (GPIO1 TX / GPIO3 RX) qua chip
+// USB-UART CP2102 trên board -> Mini PC thấy /dev/ttyUSB0, 230400 baud 8N1.
+// ESP32 thường không có USB-OTG nên đây là đường serial duy nhất.
+//
+// Arduino IDE: Board "ESP32 Dev Module" (fqbn esp32:esp32:esp32),
+//              Tools -> "Core Debug Level" = None (log ESP-IDF in ra UART0
+//              sẽ chen vào khung nhị phân).
+// Chân dùng (25, 26, 27, 32, 33, 4) đều là GPIO hợp lệ của ESP32 thường.
 // ============================================================================
 
 #include <Arduino.h>
@@ -10,6 +21,11 @@
 // ============================================================================
 // [1] CẤU HÌNH CHÂN PHẦN CỨNG (PINS)
 // ============================================================================
+// !!! KIEM TRA DAY THAT: 2 sketch thu (motor_test, servo_test) dung ESC = GPIO 14,
+// servo = GPIO 16, con firmware nay dung ESC = 33, servo = 32. Neu day tin hieu
+// ESC dang cam o chan 14 thi doi PIN_ESC = 14 (va PIN_STEER = 16 neu servo o
+// chan 16): ESP32 phat xung ra chan khong noi gi -> ESC dung yen du Mini PC da
+// gui lenh chay. Telemetry v2 bao ve muc xung ESC dang phat de doi chieu.
 constexpr uint8_t PIN_STEER = 32;
 constexpr uint8_t PIN_ESC = 33;
 constexpr uint8_t PIN_TURN_L = 25; 
@@ -31,6 +47,20 @@ constexpr float BLINK_THRESH = 10.0f;
 constexpr int ESC_NEUTRAL = 90;
 constexpr int ESC_MIN_FWD = 95;
 constexpr int ESC_MAX_FWD = 180;
+
+// ---- Vung chet cua ESC ----
+// Servo.write(goc) phat xung 1000 + goc*1000/180 us: 90 -> 1500 us (dung),
+// 95 -> 1527 us, 97 -> 1538 us, 100 -> 1555 us. ESC xe RC co VUNG CHET quanh
+// 1500 us (thuong +-30..50 us): xung 95-97 nam trong/sat vung chet -> ESC coi
+// la dung, banh KHONG quay du Mini PC da gui lenh chay.
+// ESC_START_FWD: muc ga nho nhat khi xe chay. Cach do: dat xe xuong san, chay
+// sketch motor_test tang dan tu 1% (=95) cho toi khi banh vua quay, doi % ra
+// goc (95 + (pct-1)*85/99) roi ghi vao day.
+constexpr int ESC_START_FWD = 100;
+// "De-pa": tu dung yen sang chay, ghi ESC_KICK_FWD trong ESC_KICK_MS de thang
+// ma sat tinh, sau do moi ve muc ga cua toc do dat.
+constexpr int ESC_KICK_FWD = 106;
+constexpr uint32_t ESC_KICK_MS = 300;
 constexpr int ESC_BRAKE = 20;
 
 constexpr float MAX_SPEED_KMH = 15.0f;
@@ -43,15 +73,38 @@ constexpr uint32_t FRAME_TIMEOUT_US = 8000;
 constexpr uint32_t BRAKE_HOLD_MS = 200; // Đã bổ sung
 constexpr float STOPPED_KMH = 0.3f;
 
-// Lọc nhiễu siêu mượt cho camera
-constexpr float ALPHA_STEER = 0.1f; 
+// ---- Lái ----
+// Mini PC đã lọc dev (chặn nhảy + EMA) nên ở đây chỉ lọc nhẹ để mượt servo.
+constexpr float ALPHA_STEER = 0.25f;
+
+// Góc lái = STEER_KP * map(dev) + D. map(): deadzone CAM_DEADZONE px, bão hoà
+// ở CAM_MAX_DEV px -> 0..30°. Xe lắc qua lại thì giảm STEER_KP; vào cua
+// không đủ gắt thì tăng (tối đa 1.0).
+constexpr float STEER_KP = 0.8f;
+
+// Khâu D tính trên tốc độ thay đổi của góc đã lọc (độ/giây), lọc thông thấp
+// thêm 1 lần và giới hạn ±STEER_D_MAX độ để KHÔNG bị giật mỗi khi có frame mới.
+constexpr float STEER_KD = 0.03f;       // giây
+constexpr float STEER_D_ALPHA = 0.2f;   // lọc đạo hàm
+constexpr float STEER_D_MAX = 6.0f;     // độ
+
+// Tốc độ quay tối đa của lệnh servo (độ/giây): chặn giật cơ khí
+constexpr float STEER_RATE_DEG_S = 300.0f;
 
 constexpr uint32_t UART_BAUD = 230400; 
 constexpr size_t RX_BUF_SIZE = 4096;
 constexpr size_t TX_BUF_SIZE = 512;
 
 constexpr uint8_t HDR_RX1 = 0xAB, HDR_RX2 = 0xCD; 
-constexpr uint8_t HDR_TX1 = 0xDC, HDR_TX2 = 0xBA; 
+constexpr uint8_t HDR_TX1 = 0xDC, HDR_TX2 = 0xBA; // telemetry cu, 7 byte (khong con gui)
+// Telemetry v2, 10 byte, ~50 Hz:
+//   DC BB | float32 cur_spd | ESC_DEG | STEER_DEG | FLAGS | XOR(byte 2..8)
+//   ESC_DEG  : goc Servo dang ghi cho ESC (90 = neutral, 95..180 = tien)
+//   STEER_DEG: goc servo lai dang ghi
+//   FLAGS    : bit0 = dang EMG, bit1 = watchdog (mat lenh > 500 ms),
+//              bit2 = dang phanh, bit3 = da nhan it nhat 1 goi hop le
+constexpr uint8_t HDR_TX2_V2 = 0xBB;
+constexpr uint8_t TX_LEN_V2 = 10;
 constexpr uint8_t RX_LEN = 11;
 constexpr uint8_t TX_LEN = 7;
 
@@ -76,10 +129,10 @@ struct CarState {
   bool braking = false;
 };
 
-struct PidState {
-  float kp = 0.0f, ki = 0.0f, kd = 0.0f;
-  float integral = 0.0f;
-  float prev_err = 0.0f;
+struct SteerState {
+  float prev_angle = 0.0f;   // góc mục tiêu (lệch khỏi tâm) chu kỳ trước
+  float d_filt = 0.0f;       // đạo hàm đã lọc (độ/giây)
+  float out = STEER_CENTER;  // lệnh servo sau giới hạn tốc độ quay
 };
 
 enum class RxState : uint8_t { WAIT_H1, WAIT_H2, READ_PAYLOAD };
@@ -90,13 +143,14 @@ enum class RxState : uint8_t { WAIT_H1, WAIT_H2, READ_PAYLOAD };
 Servo servo_steer, motor_esc;
 
 CarState car;
-PidState pid_steer;
+SteerState steer;
 
 RxState rx_state = RxState::WAIT_H1;
 uint8_t rx_buf[RX_LEN] = {};
 uint8_t rx_idx = 0;
 uint32_t last_rx_us = 0;
 uint32_t last_packet_ms = 0;
+bool got_packet = false;   // da nhan it nhat 1 goi hop le tu Mini PC
 
 uint32_t next_pid_us = 0;
 bool pid_timer_init = false;
@@ -169,6 +223,7 @@ void readUART() {
           car.target_spd = constrain(rx_buf[IDX_SPEED] * 0.1f, 0.0f, MAX_SPEED_KMH);
           car.emg_stop = (rx_buf[IDX_EMG] != 0);
           last_packet_ms = millis();
+          got_packet = true;
         }
         rx_state = RxState::WAIT_H1;
         rx_idx = 0;
@@ -193,36 +248,36 @@ int getBasePWM(float spd) {
   return ESC_LUT[LUT_SIZE - 1].pwm;
 }
 
-void calcSteerPID(float dt) {
+// Tính góc servo từ dev (px ảnh tham chiếu 640, dev < 0 = tâm làn lệch trái).
+//   1. Lọc EMA dev.
+//   2. map(|dev|): deadzone CAM_DEADZONE -> 0°, CAM_MAX_DEV -> 30°.
+//   3. P = STEER_KP * góc; D = STEER_KD * d(góc)/dt (đã lọc, có giới hạn).
+//   4. Giới hạn tốc độ quay servo STEER_RATE_DEG_S.
+// Bản cũ lấy D = 1.5 * Δgóc / 0.01 s: mỗi frame camera mới làm D vọt lên
+// hàng chục độ -> servo giật hết lái rồi mới về, xe lắc.
+void calcSteer(float dt) {
   car.smooth_dev = ALPHA_STEER * car.raw_dev + (1.0f - ALPHA_STEER) * car.smooth_dev;
 
-  if (car.cur_spd < 10.0f) {
-    pid_steer.kp = 0.3f; pid_steer.ki = 0.0f; pid_steer.kd = 1.5f;
-  } else if (car.cur_spd < 25.0f) {
-    pid_steer.kp = 0.25f; pid_steer.ki = 0.0f; pid_steer.kd = 1.8f;
-  } else {
-    pid_steer.kp = 0.2f; pid_steer.ki = 0.0f; pid_steer.kd = 2.0f;
-  }
-
-  float target_angle = STEER_CENTER;
-  float abs_dev = fabsf(car.smooth_dev);
-
+  float angle = 0.0f;  // độ lệch khỏi tâm, + = lái trái (servo > 90)
+  const float abs_dev = fabsf(car.smooth_dev);
   if (abs_dev > CAM_DEADZONE) {
-    float norm_dev = constrain(abs_dev - CAM_DEADZONE, 0.0f, CAM_MAX_DEV - CAM_DEADZONE);
-    float offset = mapF(norm_dev, 0.0f, CAM_MAX_DEV - CAM_DEADZONE, 0.0f, STEER_MAX - STEER_CENTER);
-    target_angle = (car.smooth_dev < 0.0f) ? (STEER_CENTER + offset) : (STEER_CENTER - offset);
+    const float span = CAM_MAX_DEV - CAM_DEADZONE;
+    const float off = mapF(constrain(abs_dev - CAM_DEADZONE, 0.0f, span), 0.0f, span,
+                           0.0f, (float)(STEER_MAX - STEER_CENTER));
+    angle = (car.smooth_dev < 0.0f) ? off : -off;
   }
 
-  float err = target_angle - STEER_CENTER;
-  float P = pid_steer.kp * err;
+  const float d_raw = (angle - steer.prev_angle) / dt;
+  steer.prev_angle = angle;
+  steer.d_filt += STEER_D_ALPHA * (d_raw - steer.d_filt);
+  const float D = constrain(STEER_KD * steer.d_filt, -STEER_D_MAX, STEER_D_MAX);
 
-  pid_steer.integral = 0; 
-  float I = 0.0f;
-  
-  float D = pid_steer.kd * (err - pid_steer.prev_err) / dt;
-  pid_steer.prev_err = err;
+  const float target = constrain(STEER_CENTER + STEER_KP * angle + D,
+                                 (float)STEER_MIN, (float)STEER_MAX);
 
-  car.steer_cmd = (int)roundf(constrain(STEER_CENTER + P + I + D, (float)STEER_MIN, (float)STEER_MAX));
+  const float max_step = STEER_RATE_DEG_S * dt;
+  steer.out += constrain(target - steer.out, -max_step, max_step);
+  car.steer_cmd = (int)roundf(steer.out);
 }
 
 void runPID(uint32_t now) {
@@ -240,16 +295,29 @@ void runPID(uint32_t now) {
   constexpr float DT_SEC = PID_DT_US * 1e-6f;
 
   if (!car.emg_stop) {
+    static uint32_t kick_until_ms = 0;
+    const uint32_t now_ms = millis();
+
     int target_pwm = getBasePWM(car.target_spd);
-    car.esc_cmd = constrain(target_pwm, ESC_MIN_FWD, ESC_MAX_FWD);
-    
+    if (target_pwm > ESC_NEUTRAL) {
+      // Dang chay: khong de ga roi vao vung chet cua ESC
+      target_pwm = max(target_pwm, ESC_START_FWD);
+      // Vua tu dung yen (ESC dang neutral) chuyen sang chay -> de-pa
+      if (last_esc <= ESC_NEUTRAL) kick_until_ms = now_ms + ESC_KICK_MS;
+      if ((int32_t)(kick_until_ms - now_ms) > 0) target_pwm = max(target_pwm, ESC_KICK_FWD);
+      car.esc_cmd = constrain(target_pwm, ESC_MIN_FWD, ESC_MAX_FWD);
+    } else {
+      // Lenh toc do ~0 nhung khong EMG: dung (truoc day bi kep len 95 -> bo)
+      car.esc_cmd = ESC_NEUTRAL;
+    }
+
     if (car.esc_cmd != last_esc) {
       motor_esc.write(car.esc_cmd);
       last_esc = car.esc_cmd;
     }
   }
 
-  calcSteerPID(DT_SEC);
+  calcSteer(DT_SEC);
   if (car.steer_cmd != last_steer) {
     servo_steer.write(car.steer_cmd);
     last_steer = car.steer_cmd;
@@ -298,11 +366,21 @@ void checkSafety() {
   car.esc_cmd = ESC_NEUTRAL;
 }
 
+// Gui trang thai len Mini PC: van toc + muc xung ESC/servo THAT SU dang phat +
+// co trang thai. Nho vay GUI biet lenh chay co toi duoc ESC hay khong.
 void sendTelemetry() {
-  uint8_t tx_buf[TX_LEN] = {HDR_TX1, HDR_TX2, 0, 0, 0, 0, 0};
+  uint8_t tx_buf[TX_LEN_V2] = {HDR_TX1, HDR_TX2_V2};
   memcpy(&tx_buf[2], &car.cur_spd, sizeof(float));
-  tx_buf[6] = calcXor(tx_buf, 2, 5);
-  if (Serial.availableForWrite() >= TX_LEN) Serial.write(tx_buf, TX_LEN);
+  tx_buf[6] = (uint8_t)constrain(last_esc, 0, 180);
+  tx_buf[7] = (uint8_t)constrain(last_steer, 0, 180);
+  uint8_t flags = 0;
+  if (car.emg_stop) flags |= 0x01;
+  if (millis() - last_packet_ms > WDOG_TIMEOUT_MS) flags |= 0x02;
+  if (car.braking) flags |= 0x04;
+  if (got_packet) flags |= 0x08;
+  tx_buf[8] = flags;
+  tx_buf[9] = calcXor(tx_buf, 2, 8);
+  if (Serial.availableForWrite() >= TX_LEN_V2) Serial.write(tx_buf, TX_LEN_V2);
 }
 
 // ============================================================================

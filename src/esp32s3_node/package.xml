@@ -3,7 +3,7 @@
 <package format="3">
   <name>esp32s3_node</name>
   <version>1.0.0</version>
-  <description>Driver serial MiniPC -&gt; ESP32-S3 (USB-OTG), khong phu thuoc rclcpp.</description>
+  <description>Driver UART MiniPC -&gt; ESP32 (CP2102, /dev/ttyUSB0, 230400 baud), khong phu thuoc rclcpp.</description>
   <maintainer email="pmd0793724602@gmail.com">Pham Minh Duc</maintainer>
   <license>MIT</license>
 

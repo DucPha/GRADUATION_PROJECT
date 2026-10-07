@@ -14,18 +14,43 @@ fusion.launch.py <tên>=<giá trị>`).
 - **Đường vàng dọc** = tâm 2 làn, chỉ vẽ khi `two_lanes = true`
 - Chữ lớn: `2 LANES OK` / `NO 2 LANES`
 
-## 1. Cửa sổ trượt
+## 1. Cửa sổ trượt và ổn định hoá
 
 | Hằng số | Mặc định | Khi nào chỉnh |
 |---|---|---|
-| `N_WINDOWS` | 5 | ảnh nhiễu nặng thì giảm còn 4 |
-| `WINDOW_MARGIN` | 30 | làn cong mạnh, seed lạc mất đỉnh thì tăng lên 40 |
-| `WINDOW_MIN_POINTS` | 8 | ảnh tối, vạch mờ thì giảm xuống 5 |
-| `MAX_RUN_WIDTH` | 25 | bóng đổ bị nhận nhầm thành làn thì giảm xuống 18 |
-| `MIN_LANE_GAP` | 30 | một khối bị tách 2 đỉnh thì tăng lên 40 |
-| `MIN_MATCHED_WINDOWS` | 3 | detector rớt thì hạ xuống 2 |
+| `N_WINDOWS` | 6 | ảnh nhiễu nặng thì giảm còn 5 |
+| `WINDOW_MARGIN` | 30 | làn cong mạnh, mất vạch khi tìm mới thì tăng lên 40 |
+| `TAPE_MAX_M` | 0.12 | bề rộng tối đa 1 vạch (m); vạch bản rộng bị loại thì tăng |
+| `BG_KERNEL_W` × `BG_KERNEL_H` | 61 × 5 | cửa sổ ước lượng nền (trừ nền chống lóa); phải rộng hơn bề ngang vạch lớn nhất. Vạch sát xe bị mất ở mask thì tăng |
+| `BG_MIN_DIFF` / `BG_WEAK_DIFF` | 12 / 8 | ngưỡng mạnh tối thiểu / ngưỡng yếu của hysteresis. Vân sàn bị nhận là vạch thì tăng; đoạn vạch trong lóa vẫn đứt thì giảm `BG_WEAK_DIFF` |
+| `PRIOR_MARGIN` | 18 | biên tìm quanh vạch của frame trước; xe nhanh / cua gắt mà mất vạch thì tăng |
+| `PRIOR_MAX_AGE_MS` | 250 | vị trí vạch cũ quá tuổi này thì bỏ, tìm lại từ đầu |
+| `WINDOW_MIN_POINTS` | 2 | ảnh nhiễu nhiều thì tăng lên 3 |
+| `MIN_MATCHED_WINDOWS` | 3 | detector hay rớt `2 LANES` thì hạ xuống 2 |
+| `CENTRE_OUTLIER_PX` | 7.0 | điểm tâm lệch đường fit quá mức này bị loại (px khung 320) |
+| `JUMP_GATE_REF_PX` | 60 | `dev` nhảy quá mức này (px ảnh 640) thì giữ giá trị cũ 1 frame |
+| `EMA_ALPHA` | 0.40 | lái càng mềm càng giảm (0.25); càng nhạy càng tăng (0.55) |
+
+Overlay hiện dấu `*` sau trạng thái khi frame bị chặn nhảy; `/lane/status` có `gate=1`.
+Nếu thấy `*` liên tục khi vào cua thì tăng `JUMP_GATE_REF_PX`.
+
+## 1b. Chân trời — chỉnh ĐẦU TIÊN
+
+`horizon_frac` (launch, mặc định `0.20`) là hàng chân trời theo tỉ lệ chiều cao ảnh. Mọi
+phép đổi pixel ↔ mét (bề rộng làn, bề rộng vạch) dựa vào nó; sai ⇒ detector ghép nhầm
+cặp vạch (thường thấy: `1 LANE` dù nhìn rõ 2 vạch, `dev` rất lớn, `w=-1`).
+
+Cách chỉnh: đặt xe giữa 2 vạch **thẳng**, nhìn ảnh overlay, kéo dài 2 vạch lên trên — chỗ
+chúng gặp nhau là chân trời; vạch tím phải nằm ngang qua đúng chỗ đó. Vạch tím thấp hơn
+điểm gặp ⇒ giảm `horizon_frac`, cao hơn ⇒ tăng. Ví dụ: `./run.sh horizon_frac:=0.18`.
+
+Sau đó kiểm tra ô LANE WIDTH trên dashboard ra gần bề rộng làn thật; lệch nhiều thì chỉnh
+`camera_height_m` (cm đo được tỉ lệ thuận với nó).
 
 ## 2. Vùng làm việc
+
+> Camera 16:9 (1920x1080) ⇒ khung làm việc 320x180, chân trời tự tính ở ~hàng 90 (không
+> phải 120 như khung 320x240 cũ). Log khởi động in `geometry: ... horizon_y=..., ROI rows ...`.
 
 | Hằng số | Mặc định | Ý nghĩa |
 |---|---|---|
@@ -95,7 +120,6 @@ Công thức: `W_cm = w_px · CAMERA_HEIGHT_M · 100 / (y − HORIZON_Y)`
 
 | Tham số | Mặc định | Ý nghĩa |
 |---|---|---|
-| `EMA_ALPHA` | 0.35 | lái càng mềm càng giảm (0.2); càng nhạy càng tăng (0.5) |
 | `STALE_AGE_MS` | 200 | quá tuổi thì coi như mất camera |
 | `lane_lost_stop_ms` (launch) | 400 | mất 2 làn bao lâu thì dừng |
 | `BRIDGE_MAX_BANDS` (camera_node.hpp) | 3 | vạch đứt đoạn do đèn trần: nội suy vẽ lại tối đa bao nhiêu cửa sổ |
@@ -104,21 +128,25 @@ Công thức: `W_cm = w_px · CAMERA_HEIGHT_M · 100 / (y − HORIZON_Y)`
 | `speed_corner_x10` (launch) | 15 | tốc độ khi chỉ thấy 1 vạch / khúc cua (km/h × 10) |
 | `speed_ramp_x10` (launch) | 8 | mức tăng tốc, x10 mỗi giây (8 = 0.8 km/h/s) |
 
-## 5. Ngưỡng ảnh
+## 5. Ngưỡng ảnh (trừ nền + hysteresis)
 
-Đang dùng Otsu nên tự thích sáng phòng, không cần chỉnh tay. Nếu ảnh quá tối hoặc quá
-chói, Otsu bị lệch thì chuyển `cv::threshold(gray, bin, 0, 255, ...)` trong
-`camera_node.cpp` sang ngưỡng cố định:
+Không còn ngưỡng trên ảnh xám. Detector ước lượng ảnh nền (phép đóng 61×5), lấy
+`diff = nền − ảnh` rồi Otsu trên `diff`, sau đó giữ thêm pixel yếu nối liền với pixel mạnh.
+Nhìn panel **BINARY MASK** trên dashboard:
 
-```cpp
-cv::threshold(gray, bin, 70, 255, cv::THRESH_BINARY_INV);
-```
+| Triệu chứng | Chỉnh |
+|---|---|
+| Vạch sát xe (bản rộng) bị khoét rỗng giữa | tăng `BG_KERNEL_W` (81) |
+| Vạch trong vùng lóa vẫn đứt | giảm `BG_WEAK_DIFF` (6) |
+| Vân sàn / mép bàn hiện thành vạch | tăng `BG_MIN_DIFF` (16) hoặc `BG_WEAK_DIFF` (10) |
+| Mask trống dù thấy vạch | giảm `MIN_CONTRAST` (10) |
 
-Nhớ đổi cả phép `|` thành `cv::THRESH_BINARY_INV | cv::THRESH_OTSU` → bỏ `| cv::THRESH_OTSU`.
+## 6. Hướng lái (firmware)
 
-## 6. Hướng lái
-
-- Firmware giữ `dev` trong khoảng **-50..50 px** (ảnh gốc) và có vùng chết ±10 px.
-- Lệch quá 50 px là bão hoà lái hết cỡ.
-- Nếu xe đẩy sang phải mà bánh xe càng lái càng xa, chạy lại với `dev_sign:=-1`.
-- Lệch ảnh nhỏ lắm (vài px) mà xe vẫn không hồi được về giữa: xem `EMA_ALPHA`.
+- `dev` luôn tính theo ảnh **tham chiếu 640 px** (bất kể camera 1920x1080 hay 640x480).
+- Firmware: deadzone `CAM_DEADZONE = 10` px, bão hoà `CAM_MAX_DEV = 50` px → 30°.
+- `STEER_KP = 0.8`: xe lắc qua lại ⇒ giảm (0.6); vào cua không đủ gắt ⇒ tăng (tối đa 1.0).
+- `STEER_KD = 0.03` s, giới hạn ±`STEER_D_MAX` = 6°: thêm giảm chấn, không gây giật.
+- `STEER_RATE_DEG_S = 300`: tốc độ quay tối đa của lệnh servo.
+- `ALPHA_STEER = 0.25`: lọc nhẹ `dev` trên ESP32 (Mini PC đã lọc chính).
+- Xe đẩy sang phải mà bánh càng lái càng xa ⇒ chạy lại với `dev_sign:=-1`.

@@ -12,7 +12,7 @@
         {
             "label": "colcon build (xe only)",
             "type": "shell",
-            "command": "colcon build --symlink-install --packages-select camera_node esp32s3_node sllidar_ros2_node fusion_node gui_matplotlib",
+            "command": "colcon build --symlink-install --packages-select camera_node esp32s3_node sllidar_ros2_node fusion_node",
             "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": [],
             "group": { "kind": "build", "isDefault": false }

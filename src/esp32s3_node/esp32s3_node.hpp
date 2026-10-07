@@ -8,55 +8,67 @@
 #include <string>
 #include <thread>
 
-#include <termios.h>
+// ============================================================================
+// GIAO TIEP MINI PC <-> ESP32 QUA UART (SERIAL)
+// ----------------------------------------------------------------------------
+// ESP32 noi voi Mini PC qua chip USB-UART CP2102 tren board -> Linux thay
+// /dev/ttyUSB* (KHONG dung USB-OTG / CDC nen khong co /dev/ttyACM*).
+// Mac dinh tren xe: ESP32 = /dev/ttyUSB0, LiDAR = /dev/ttyUSB1.
+//
+// LiDAR RPLIDAR A1 cung dung CP2102 va cung so serial "0001" nen ten trong
+// /dev/serial/by-id KHONG phan biet duoc 2 thiet bi. Vi vay khi phai tu do,
+// driver mo tung cong va nghe goi telemetry 0xDC 0xBA cua ESP32: cong nao
+// gui dung goi la ESP32 (LiDAR im lang cho toi khi duoc ra lenh quet).
+//
+// Khung truyen 230400 baud, 8N1, khong flow control.
+// ============================================================================
 
 // ============================================================================
-// MINI PC -> ESP32
-// 11 bytes
-//
-// AB CD | DEV_H DEV_L | SPEED | EMG | 00 00 00 00 | XOR
+// MINI PC -> ESP32 : 11 byte
+//   AB CD | DEV_H DEV_L | SPEED | EMG | 00 00 00 00 | XOR(byte 2..9)
 // ============================================================================
 
 struct SerialCommand {
+    // Do lech tam lan, px anh tham chieu 640 (xem camera_node.hpp)
     int16_t dev_final_px = 0;
 
-    // Desired speed = km/h × 10
-    // Example:
-    // 5.5 km/h -> 55
+    // Toc do dat = km/h x 10 (vd 5.5 km/h -> 55)
     uint8_t speed_control = 0;
 
+    // 1 = dung xe (firmware ghi ESC neutral). KHONG dung speed = 0 de dung.
     bool emergency_stop = false;
 };
 
 // ============================================================================
-// ESP32 -> MINI PC
-// 7 bytes
-//
-// DC BA | FLOAT0 FLOAT1 FLOAT2 FLOAT3 | XOR
+// ESP32 -> MINI PC, ~50 Hz. Nhan ca 2 dang:
+//   v1, 7 byte : DC BA | float32 velocity_kmh | XOR(byte 2..5)
+//   v2, 10 byte: DC BB | float32 velocity_kmh | ESC_DEG | STEER_DEG | FLAGS |
+//                XOR(byte 2..8)
+// v2 cho biet muc xung ESC/servo ESP32 THAT SU dang phat -> biet lenh chay co
+// toi ESC khong.
 // ============================================================================
 
 struct ESP32Feedback {
     float velocity_kmh = 0.0f;
-
     bool valid = false;
+
+    // Chi co khi firmware gui v2 (has_v2 = true)
+    bool has_v2 = false;
+    int esc_deg = -1;      // goc Servo ghi cho ESC: 90 neutral, 95..180 tien
+    int steer_deg = -1;    // goc servo lai
+    bool fw_emg = false;   // ESP32 dang o che do dung
+    bool fw_watchdog = false;  // ESP32 mat lenh > 500 ms
+    bool fw_got_cmd = false;   // ESP32 da nhan it nhat 1 goi lenh hop le
 };
 
-// ============================================================================
-// TU DONG DO CONG SERIAL
-// ----------------------------------------------------------------------------
-// ESP32-S3 dung USB-OTG (CDC) nen ra /dev/ttyACM*, con LiDAR van la
-// /dev/ttyUSB*. Thu tu uu tien:
-//   1. /dev/serial/by-id/ co chua hint (ten thiet bi on dinh theo USB)
-//   2. /dev/ttyACM*   (USB-OTG)
-//   3. /dev/ttyUSB*   (USB-UART)
-// Tra ve chuoi rong neu khong tim thay. Tham so exclude bo qua mot cong da
-// bi thiet bi khac chiem.
-// ============================================================================
+// Mo cong `path`, nghe toi da timeout_ms xem co goi telemetry hop le cua
+// ESP32 khong. Khong gui gi xuong ESP32.
+bool probe_esp32(const std::string& path, int timeout_ms = 700);
 
-std::string autodetect_port(
-    const std::string& hint = "",
-    const std::string& exclude = ""
-);
+// Tim cong ESP32 trong /dev/ttyUSB* va /dev/ttyACM* bang probe_esp32().
+// exclude: bo qua cong da biet la cua thiet bi khac (vd LiDAR).
+// Tra ve chuoi rong neu khong tim thay.
+std::string autodetect_port(const std::string& exclude = "");
 
 // ============================================================================
 // SERIAL ESP32
@@ -68,127 +80,73 @@ public:
 
     static constexpr int BAUDRATE = 230400;
 
-    // MiniPC -> ESP32
-    static constexpr uint8_t TX_HEADER_1 = 0xAB;
+    static constexpr uint8_t TX_HEADER_1 = 0xAB;   // MiniPC -> ESP32
     static constexpr uint8_t TX_HEADER_2 = 0xCD;
-
-    // ESP32 -> MiniPC
-    static constexpr uint8_t RX_HEADER_1 = 0xDC;
+    static constexpr uint8_t RX_HEADER_1 = 0xDC;   // ESP32 -> MiniPC
     static constexpr uint8_t RX_HEADER_2 = 0xBA;
 
     static constexpr size_t TX_PACKET_LEN = 11;
+    static constexpr uint8_t RX_HEADER_2_V2 = 0xBB;
     static constexpr size_t RX_PACKET_LEN = 7;
+    static constexpr size_t RX_PACKET_LEN_V2 = 10;
 
-    // port rong -> tu dong do cong (xem autodetect_port)
-    explicit SerialESP32(
-        const std::string& port = ""
-    );
+    // port: duong dan cong. Rong hoac cong khong ton tai -> tu do.
+    // exclude: cong khong duoc chon khi tu do (cong LiDAR).
+    explicit SerialESP32(const std::string& port = "",
+                         const std::string& exclude = "");
 
     ~SerialESP32();
 
     bool open();
-
     void close();
-
     bool is_open() const;
 
-    // ------------------------------------------------------------------------
-    // MiniPC -> ESP32
-    // ------------------------------------------------------------------------
+    // Cong da bi loi I/O (rut cap, mat nguon) -> nen close() + open() lai
+    bool is_broken() const { return broken_.load(); }
 
-    bool send_command(
-        const SerialCommand& cmd
-    );
+    const std::string& port() const { return port_; }
 
-    // ------------------------------------------------------------------------
-    // Latest valid telemetry
-    // ------------------------------------------------------------------------
+    // Gui 1 lenh. Khong bao gio chan (fd o che do non-blocking).
+    bool send_command(const SerialCommand& cmd);
 
-ESP32Feedback
-        get_latest_feedback() const;
+    ESP32Feedback get_latest_feedback() const;
 
-    // Tuổi của telemetry gần nhất (ms). ESP32 gửi ở ~50 Hz nên giá trị > 200
-    // nghĩa là đã mất liên lạc -> node điều khiển phải dừng xe.
+    // Tuoi telemetry gan nhat (ms), -1 (unsigned) neu chua co. ESP32 gui
+    // ~50 Hz nen > 200 ms nghia la mat lien lac.
     unsigned long feedback_age_ms() const;
 
 private:
 
-    // ------------------------------------------------------------------------
-    // Serial resource
-    // ------------------------------------------------------------------------
-
     std::string port_;
+    std::string requested_port_;
+    std::string exclude_;
 
     int fd_ = -1;
 
-    // Protect:
-    // - fd_
-    // - send_command()
-    // - open()/close()
-    //
-    // RX thread does NOT hold this while waiting for data.
+    // So lan open() that bai lien tiep: chi in loi o lan dau, tranh ngap log
+    // khi node thu mo lai moi giay trong luc cap dang rut
+    int fail_streak_ = 0;
+
+    // Bao ve fd_, send_command(), open()/close(). Luong RX KHONG giu mutex
+    // nay trong luc cho du lieu.
     mutable std::mutex mtx_;
 
-    // ------------------------------------------------------------------------
-    // Background RX thread
-    // ------------------------------------------------------------------------
-
     std::thread feedback_thread_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> broken_{false};
 
-    std::atomic<bool>
-        running_{false};
+    mutable std::mutex feedback_mtx_;
+    ESP32Feedback latest_feedback_{};
+    std::chrono::steady_clock::time_point last_feedback_time_{};
 
-    // ------------------------------------------------------------------------
-    // Latest feedback
-    // ------------------------------------------------------------------------
+    // ---- Bo phan tich goi RX ----
+    enum class RxState : uint8_t { WAIT_H1, WAIT_H2, READ_PAYLOAD };
 
-    mutable std::mutex
-        feedback_mtx_;
-
-    ESP32Feedback
-        latest_feedback_{};
-
-    // std::chrono::steady_clock::time_point của gói telemetry hợp lệ cuối
-    std::chrono::steady_clock::time_point
-        last_feedback_time_{};
-
-    // Nguồn thời gian cho feedback_age_ms()
-    static std::chrono::steady_clock::time_point steady_now();
-
-    // ------------------------------------------------------------------------
-    // RX parser
-    // ------------------------------------------------------------------------
-
-    enum class RxState : uint8_t {
-        WAIT_H1,
-        WAIT_H2,
-        READ_PAYLOAD
-    };
-
-    RxState
-        rx_state_ =
-            RxState::WAIT_H1;
-
-    uint8_t
-        rx_packet_[RX_PACKET_LEN] = {};
-
-    uint8_t
-        rx_idx_ = 0;
-
-    // ------------------------------------------------------------------------
-    // Internal functions
-    // ------------------------------------------------------------------------
-
-    uint8_t calculate_checksum(
-        const uint8_t* data,
-        size_t len
-    ) const;
-
-    bool configure_port();
+    RxState rx_state_ = RxState::WAIT_H1;
+    uint8_t rx_packet_[RX_PACKET_LEN_V2] = {};
+    uint8_t rx_idx_ = 0;
+    uint8_t rx_len_ = RX_PACKET_LEN;   // do dai goi dang doc (7 hoac 10)
 
     void feedback_loop();
-
-    void process_rx_byte(
-        uint8_t b
-    );
+    void process_rx_byte(uint8_t b);
 };

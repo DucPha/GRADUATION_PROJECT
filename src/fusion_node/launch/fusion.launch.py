@@ -1,178 +1,222 @@
 #!/usr/bin/env python3
 """Launch duy nhat cua he thong phase 1.
 
-Tu do cong serial cho ESP32 (USB-OTG, /dev/ttyACM*) va cho LiDAR
-(/dev/ttyUSB* qua USB-UART), nen khong can truyen cong tay. Van co the ghi
-de: serial_port:= / lidar_port:= ...
+Phan cung tren xe (giao tiep UART qua chip CP2102, KHONG dung USB-OTG):
+    ESP32  -> /dev/ttyUSB0  (230400 baud, protocol nhi phan 11/7 byte)
+    LiDAR  -> /dev/ttyUSB1  (RPLIDAR A1, 115200 baud)
+    Camera -> /dev/video*   (MJPG 1920x1080 @ 30 fps)
+
+Ca 2 cong deu la CP2102 cung so serial nen ten /dev/serial/by-id khong phan
+biet duoc. Neu cong mac dinh khong ton tai (doi thu tu cam USB), launch tu do:
+cong nao gui goi telemetry 0xDC 0xBA cua ESP32 la ESP32, cong con lai la LiDAR.
+Van ghi de duoc: serial_port:=/dev/ttyUSB1 lidar_port:=/dev/ttyUSB0
 """
 
 import glob
 import os
+import time
 
 from launch import LaunchDescription
-from launch.actions import (
-    DeclareLaunchArgument,
-    ExecuteProcess,
-    LogInfo,
-    OpaqueFunction,
-)
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-ESP_HINTS = ('esp32', 'espressif', 'silabs', 'esp_')
-LIDAR_HINTS = ('rplidar', 'sls', 'ch340', 'usb-serial', 'cp210', 'ft232', 'ftdi')
+DEFAULT_ESP_PORT = '/dev/ttyUSB0'
+DEFAULT_LIDAR_PORT = '/dev/ttyUSB1'
+ESP_BAUD = 230400
 
 
-def _all_devices():
-    devices = []
-    for pattern in ('/dev/serial/by-id/*', '/dev/ttyUSB*', '/dev/ttyACM*'):
-        devices.extend(sorted(glob.glob(pattern)))
-    return devices
+def _serial_ports():
+    return sorted(glob.glob('/dev/ttyUSB*')) + sorted(glob.glob('/dev/ttyACM*'))
 
 
-def detect_esp_port():
-    """ESP32-S3 qua USB-OTG: uu tien ten by-id, sau do ttyACM*, cuoi cung ttyUSB*."""
-    devices = _all_devices()
-
-    for dev in devices:
-        name = os.path.basename(dev).lower()
-        if '/dev/serial/by-id/' in dev and any(h in name for h in ESP_HINTS):
-            return dev
-
-    for dev in devices:
-        if dev.startswith('/dev/ttyACM'):
-            return dev
-
-    for dev in devices:
-        if dev.startswith('/dev/ttyUSB'):
-            return dev
-
-    return ''
+def _same(a, b):
+    return bool(a) and bool(b) and os.path.realpath(a) == os.path.realpath(b)
 
 
-def detect_lidar_port(esp_port):
-    """LiDAR la USB-UART nen la ttyUSB*, va phai khac cong cua ESP32."""
-    esp_real = os.path.realpath(esp_port) if esp_port else ''
-    devices = [
-        d for d in _all_devices()
-        if not esp_real or os.path.realpath(d) != esp_real
-    ]
+def _probe_esp32(port, timeout_s=0.7):
+    """Nghe cong `port` xem co goi telemetry cua ESP32 khong (DC BA 7 byte hoac
+    DC BB 10 byte, XOR cac byte giua).
 
-    for dev in devices:
-        name = os.path.basename(dev).lower()
-        if '/dev/serial/by-id/' in dev and any(h in name for h in LIDAR_HINTS):
-            return dev
+    Chi doc, khong gui gi. DTR/RTS ha xuong de ESP32 khong bi reset.
+    """
+    try:
+        import serial  # python3-serial
+    except ImportError:
+        return False
+    try:
+        s = serial.Serial()
+        s.port, s.baudrate, s.timeout = port, ESP_BAUD, 0.05
+        s.dtr = False
+        s.rts = False
+        s.open()
+    except Exception:
+        return False
+    buf = b''
+    t_end = time.time() + timeout_s
+    try:
+        while time.time() < t_end:
+            buf += s.read(256)
+            for hdr, n in ((b'\xdc\xba', 7), (b'\xdc\xbb', 10)):
+                i = buf.find(hdr)
+                while 0 <= i <= len(buf) - n:
+                    p = buf[i:i + n]
+                    x = 0
+                    for c in p[2:n - 1]:
+                        x ^= c
+                    if x == p[n - 1]:
+                        return True
+                    i = buf.find(hdr, i + 1)
+    finally:
+        s.close()
+    return False
 
-    for dev in devices:
-        if dev.startswith('/dev/ttyUSB'):
-            return dev
 
-    for dev in devices:
-        if dev.startswith('/dev/ttyACM'):
-            return dev
+def resolve_ports(esp_req, lidar_req):
+    """Tra ve (esp_port, lidar_port, ghi_chu). Uu tien cong nguoi dung chon."""
+    note = []
+    esp = esp_req if os.path.exists(esp_req) else ''
+    lidar = lidar_req if os.path.exists(lidar_req) else ''
 
-    return ''
+    if not esp:
+        note.append('%s khong ton tai, dang do ESP32...' % esp_req)
+        for p in _serial_ports():
+            if not _same(p, lidar) and _probe_esp32(p):
+                esp = p
+                break
+    if not lidar:
+        note.append('%s khong ton tai, lay cong USB con lai cho LiDAR' % lidar_req)
+        for p in _serial_ports():
+            if not _same(p, esp):
+                lidar = p
+                break
+    if _same(esp, lidar):
+        note.append('ESP32 va LiDAR trung cong %s -> tat LiDAR' % esp)
+        lidar = ''
+    return esp, lidar, note
 
 
 def is_true(value):
     return str(value).strip().lower() in ('true', '1', 'yes', 'on')
 
 
-def spawn_lidar(context, *args, **kwargs):
-    """Driver LiDAR. Cong lay tu tham so tai launch, mac dinh la cong tu do."""
-    if not is_true(LaunchConfiguration('enable_lidar').perform(context)):
-        return [LogInfo(msg=['[fusion] enable_lidar:=false, bo qua driver LiDAR'])]
+def setup(context, *args, **kwargs):
+    esp, lidar, note = resolve_ports(
+        LaunchConfiguration('serial_port').perform(context),
+        LaunchConfiguration('lidar_port').perform(context))
 
-    port = LaunchConfiguration('lidar_port').perform(context)
+    actions = [LogInfo(msg='[fusion] ' + n) for n in note]
+    actions.append(LogInfo(msg='[fusion] ESP32 (UART): %s' % (esp or 'KHONG TIM THAY')))
+    actions.append(LogInfo(msg='[fusion] LiDAR       : %s' % (lidar or 'KHONG TIM THAY')))
 
-    if not port:
-        return [LogInfo(msg=[
-            '[fusion] Khong tim thay cong USB thu hai cho LiDAR. '
-            'Xe van chay, chi khong co /scan.'
-        ])]
+    enable_lidar = is_true(LaunchConfiguration('enable_lidar').perform(context))
+    if enable_lidar and lidar:
+        actions.append(ExecuteProcess(
+            cmd=[
+                'ros2', 'run', 'rplidar_ros', 'rplidar_composition',
+                '--ros-args',
+                '-p', 'serial_port:=%s' % lidar,
+                '-p', 'serial_baudrate:=115200',
+                '-p', 'frame_id:=laser',
+                '-p', 'inverted:=false',
+                '-p', 'angle_compensate:=true',
+            ],
+            output='screen',
+        ))
+    elif enable_lidar:
+        actions.append(LogInfo(msg='[fusion] Khong co cong LiDAR: xe van chay, chi khong co /scan.'))
 
-    return [ExecuteProcess(
-        cmd=[
-            'ros2', 'run', 'rplidar_ros', 'rplidar_composition',
-            '--ros-args',
-            '-p', 'serial_port:=%s' % port,
-            '-p', 'serial_baudrate:=115200',
-            '-p', 'frame_id:=laser',
-            '-p', 'inverted:=false',
-            '-p', 'angle_compensate:=true',
-        ],
-        output='screen',
-    )]
+    def arg(name):
+        return LaunchConfiguration(name)
 
-
-ESP_PORT = detect_esp_port()
-LIDAR_PORT = detect_lidar_port(ESP_PORT)
-
-
-def generate_launch_description():
-
-    node_args = {
-        'serial_port': LaunchConfiguration('serial_port'),
-        'camera_index': LaunchConfiguration('camera_index'),
-        'camera_fps': LaunchConfiguration('camera_fps'),
-        'roi_top_frac': LaunchConfiguration('roi_top_frac'),
-        'speed_x10': LaunchConfiguration('speed_x10'),
-        'speed_hold_x10': LaunchConfiguration('speed_hold_x10'),
-        'speed_corner_x10': LaunchConfiguration('speed_corner_x10'),
-        'speed_ramp_x10': LaunchConfiguration('speed_ramp_x10'),
-        'dev_sign': LaunchConfiguration('dev_sign'),
-        'lane_lost_stop_ms': LaunchConfiguration('lane_lost_stop_ms'),
-        'control_hz': LaunchConfiguration('control_hz'),
-        'viz_hz': LaunchConfiguration('viz_hz'),
-        'enable_viz': LaunchConfiguration('enable_viz'),
-        'enable_lidar': LaunchConfiguration('enable_lidar'),
-        'lidar_mount_offset_deg': LaunchConfiguration('lidar_mount_offset_deg'),
-        'log_level': LaunchConfiguration('log_level'),
+    params = {
+        'serial_port': esp or LaunchConfiguration('serial_port').perform(context),
+        'lidar_port': lidar,
+        'camera_index': arg('camera_index'),
+        'camera_fps': arg('camera_fps'),
+        'camera_width': arg('camera_width'),
+        'camera_height': arg('camera_height'),
+        'camera_exposure': arg('camera_exposure'),
+        'horizon_frac': arg('horizon_frac'),
+        'camera_height_m': arg('camera_height_m'),
+        'speed_min_x10': arg('speed_min_x10'),
+        'roi_top_frac': arg('roi_top_frac'),
+        'speed_x10': arg('speed_x10'),
+        'speed_hold_x10': arg('speed_hold_x10'),
+        'speed_corner_x10': arg('speed_corner_x10'),
+        'speed_ramp_x10': arg('speed_ramp_x10'),
+        'dev_sign': arg('dev_sign'),
+        'lane_lost_stop_ms': arg('lane_lost_stop_ms'),
+        'control_hz': arg('control_hz'),
+        'viz_hz': arg('viz_hz'),
+        'status_hz': arg('status_hz'),
+        'enable_viz': arg('enable_viz'),
+        'enable_lidar': arg('enable_lidar'),
+        'lidar_mount_offset_deg': arg('lidar_mount_offset_deg'),
+        'require_start': arg('require_start'),
+        'start_timeout_ms': arg('start_timeout_ms'),
+        'log_level': arg('log_level'),
     }
 
-    declare = [
-        DeclareLaunchArgument('serial_port', default_value='',
-                              description='Cong ESP32. De trong = tu do.'),
-        DeclareLaunchArgument('lidar_port', default_value=LIDAR_PORT,
-                              description='Cong LiDAR. Mac dinh = tu do.'),
-        DeclareLaunchArgument('camera_index', default_value='-1',
-                              description='Chi so camera, -1 = tu do 0..3'),
-        DeclareLaunchArgument('camera_fps', default_value='30'),
-        DeclareLaunchArgument('roi_top_frac', default_value='0.52',
-                              description='0.0-1.0, dinh ROI tinh tu tren; nho hon = thay xa hon'),
-        DeclareLaunchArgument('speed_x10', default_value='30',
-                              description='Toc do duong thang (2 vanh), km/h x 10'),
-        DeclareLaunchArgument('speed_hold_x10', default_value='15',
-                              description='Toc do giu huong khi mat ca 2 vanh, km/h x 10'),
-        DeclareLaunchArgument('speed_corner_x10', default_value='15',
-                              description='Toc do khi chi thay 1 vach (khuc cua), km/h x 10'),
-        DeclareLaunchArgument('speed_ramp_x10', default_value='8',
-                              description='Muc tang toc (x10 moi giay), tang dan khi len du 2 vanh'),
-        DeclareLaunchArgument('dev_sign', default_value='1',
-                              description='-1 neu servo lap nguoc'),
-        DeclareLaunchArgument('lane_lost_stop_ms', default_value='400'),
-        DeclareLaunchArgument('control_hz', default_value='100'),
-        DeclareLaunchArgument('viz_hz', default_value='10'),
-        DeclareLaunchArgument('enable_viz', default_value='true'),
-        DeclareLaunchArgument('enable_lidar', default_value='true'),
-        DeclareLaunchArgument('lidar_mount_offset_deg', default_value='-90.0',
-                              description='Goc lech lap LiDAR, 0=truoc 90=trai (REP-103)'),
-        DeclareLaunchArgument('log_level', default_value='info'),
-    ]
-
-    log = [
-        LogInfo(msg=['[fusion] ESP32 port (auto): %s' % (ESP_PORT or 'KHONG TIM THAY')]),
-        LogInfo(msg=['[fusion] LiDAR port (auto): %s' % (LIDAR_PORT or 'KHONG TIM THAY')]),
-    ]
-
-    fusion = Node(
+    actions.append(Node(
         package='fusion_node',
         executable='fusion_node',
         name='fusion_node',
         output='screen',
-        parameters=[node_args],
-    )
+        parameters=[params],
+        # Camera nay thinh thoang khong tra frame dau tien sau khi mo; OpenCV mac
+        # dinh doi 10 s moi bao loi. Ha xuong 2 s de CameraLane thu mo lai som.
+        additional_env={'OPENCV_VIDEOIO_V4L_SELECT_TIMEOUT': '2'},
+    ))
+    return actions
 
-    return LaunchDescription(
-        declare + log + [OpaqueFunction(function=spawn_lidar), fusion]
-    )
+
+def generate_launch_description():
+    declare = [
+        DeclareLaunchArgument('serial_port', default_value=DEFAULT_ESP_PORT,
+                              description='Cong UART cua ESP32'),
+        DeclareLaunchArgument('lidar_port', default_value=DEFAULT_LIDAR_PORT,
+                              description='Cong UART cua LiDAR'),
+        DeclareLaunchArgument('camera_index', default_value='-1',
+                              description='Chi so camera, -1 = tu do 0..3'),
+        DeclareLaunchArgument('camera_fps', default_value='30'),
+        DeclareLaunchArgument('camera_width', default_value='1920'),
+        DeclareLaunchArgument('camera_height', default_value='1080'),
+        DeclareLaunchArgument('camera_exposure', default_value='-1',
+                              description='-1 = tu dong; >0 = phoi sang tay (100 us), vd 250 giu 30 fps'),
+        DeclareLaunchArgument('horizon_frac', default_value='0.20',
+                              description='Chan troi (ti le chieu cao anh): duong tim tren overlay '
+                                          'phai di qua diem 2 vach thang keo dai gap nhau'),
+        DeclareLaunchArgument('camera_height_m', default_value='0.30',
+                              description='Do cao camera so voi mat duong (m)'),
+        DeclareLaunchArgument('speed_min_x10', default_value='25',
+                              description='Toc do nho nhat khi chay (km/h x10); banh khong quay thi tang'),
+        DeclareLaunchArgument('roi_top_frac', default_value='0.52',
+                              description='0.0-1.0, dinh ROI tinh tu tren; nho hon = thay xa hon'),
+        DeclareLaunchArgument('speed_x10', default_value='30',
+                              description='Toc do duong thang (2 vach), km/h x 10'),
+        DeclareLaunchArgument('speed_hold_x10', default_value='15',
+                              description='Toc do giu huong khi mat ca 2 vach, km/h x 10'),
+        DeclareLaunchArgument('speed_corner_x10', default_value='15',
+                              description='Toc do khi chi thay 1 vach (khuc cua), km/h x 10'),
+        DeclareLaunchArgument('speed_ramp_x10', default_value='8',
+                              description='Muc tang toc, x10 moi giay'),
+        DeclareLaunchArgument('dev_sign', default_value='1',
+                              description='-1 neu servo lap nguoc'),
+        DeclareLaunchArgument('lane_lost_stop_ms', default_value='400'),
+        DeclareLaunchArgument('control_hz', default_value='100'),
+        DeclareLaunchArgument('viz_hz', default_value='30',
+                              description='Tan so gui anh cho GUI (chi gui khi co nguoi xem)'),
+        DeclareLaunchArgument('status_hz', default_value='10'),
+        DeclareLaunchArgument('enable_viz', default_value='true'),
+        DeclareLaunchArgument('enable_lidar', default_value='true'),
+        DeclareLaunchArgument('lidar_mount_offset_deg', default_value='-90.0',
+                              description='Goc lech lap LiDAR, 0=truoc 90=trai (REP-103)'),
+        DeclareLaunchArgument('require_start', default_value='true',
+                              description='true = xe chi chay khi bam SPACE tren GUI'),
+        DeclareLaunchArgument('start_timeout_ms', default_value='600',
+                              description='Mat heartbeat /autocar/run qua muc nay -> dung xe'),
+        DeclareLaunchArgument('log_level', default_value='info'),
+    ]
+
+    return LaunchDescription(declare + [OpaqueFunction(function=setup)])
