@@ -34,7 +34,7 @@
 
 struct VehicleParams {
   double wheelbase_m = 0.26;       // truc truoc - truc sau
-  double cam_to_rear_m = 0.30;     // chan camera nam truoc truc sau bay nhieu
+  double cam_to_rear_m = 0.18;     // chan camera nam truoc truc sau (do lai tren xe 2026-10-08)
   double max_steer_deg = 30.0;     // goc banh lon nhat
   double lookahead_min_m = 0.35;   // Ld = clamp(min + gain * v, min, max)
   double lookahead_max_m = 0.80;
@@ -44,6 +44,18 @@ struct VehicleParams {
   double car_half_width_m = 0.10;   // nua be ngang xe (tinh tu tam banh)
   double line_margin_m = 0.04;      // khoang trong toi thieu con lai toi vach
   double guard_gain_deg_per_m = 150.0;
+  // Phan hoi LECH NGANG (kieu Stanley): cong them
+  // atan(xte_gain * e / (v + xte_soft_mps)), e = khoang cach tu chan camera
+  // toi duong tam. Pure pursuit thuan chi "nhin" lech ngang qua diem ngam xa
+  // nen rat mem (lech 5 cm ~ 3 do banh); ty so lai / vi tri camera khai bao
+  // lech thuc te (chua do tren xe) la xe chay lech han 1 ben, de len vach.
+  double xte_gain = 2.0;     // 1/s, 0 = tat
+  double xte_soft_mps = 0.5; // m/s, tranh chia 0 khi xe cham
+  // Khau TICH PHAN lech ngang (STEER_KI cua Python): bu lech trim servo,
+  // camera lap lech / xoay vai do, ty so lai sai -> het lech 1 ben tren duong
+  // thang va trong cua dai. Don vi: do banh / (m * s); gioi han +-xte_i_max_deg.
+  double xte_ki = 50.0;
+  double xte_i_max_deg = 6.0;
 };
 
 class PathTracker {
@@ -56,6 +68,9 @@ public:
     double curv_ahead = 0.0;  // do cong duong phia truoc (1/m), > 0 = re phai
     int turn = 0;             // du doan cua: -1 trai, 0 thang, +1 phai
     double guard_deg = 0.0;   // phan goc do rao chan vach cong them
+    double xte_m = 0.0;       // lech ngang chan camera -> duong tam (> 0: tam ben phai)
+    double xte_deg = 0.0;     // phan goc do phan hoi lech ngang cong them (P + I)
+    double xte_i_deg = 0.0;   // rieng phan tich phan
     bool virt_left = false;   // vach trai dang la vach ao (khong con thay)
     bool virt_right = false;
     // Toa do xe, de ve ban do nho tren GUI
@@ -80,8 +95,8 @@ public:
                        const std::vector<cv::Point2f> &right_cam,
                        std::chrono::steady_clock::time_point stamp);
 
-  // Tinh goc lai cho vi tri hien tai
-  Output compute(double v);
+  // Tinh goc lai cho vi tri hien tai. bias_m: doi duong tam sang PHAI (m)
+  Output compute(double v, double bias_m = 0.0);
 
   const VehicleParams &params() const { return p_; }
 
@@ -120,4 +135,6 @@ private:
   Memory left_;
   Memory right_;
   int turn_ = 0;
+  double xte_i_deg_ = 0.0;
+  std::chrono::steady_clock::time_point last_compute_{};
 };

@@ -18,6 +18,12 @@ constexpr float BEHIND_KEEP_M = 0.30f;
 constexpr float MATCH_TOL_M = 0.25f;
 // Khong khop lien tiep bay nhieu frame moi tin frame moi (bo bo nho cu)
 constexpr int REJECT_RESET = 3;
+// Doan moi chong len duong da nho ma lech NGANG (trung vi) qua muc nay = frame
+// nhan sai (vet loa den de len bang keo lam vach lech / dut) -> bo qua frame
+// do; lech nhu vay REJECT_RESET frame lien tiep moi tin. Truoc day chi so dau
+// doan voi MATCH_TOL_M 0.25 m -> vach lech 10-20 cm vi loa van duoc nhan, xe
+// dang di thang bong danh lai ra de len vach.
+constexpr float JUMP_TOL_M = 0.07f;
 // Vach khong duoc thay lai qua lau thi coi la vach ao
 constexpr double VIRTUAL_AFTER_S = 0.15;
 // Rao chan: goc cong them toi da (do)
@@ -88,6 +94,8 @@ void PathTracker::reset() {
   right_ = Memory{};
   started_ = false;
   turn_ = 0;
+  xte_i_deg_ = 0.0;
+  last_compute_ = {};
 }
 
 // ============================================================================
@@ -216,6 +224,31 @@ void PathTracker::merge(Memory &mem, const std::vector<cv::Point2f> &cam,
     accept_new();
     return;
   }
+  {
+    // Do lech ngang tren phan chong len nhau (diem moi chieu vao duong cu,
+    // khong tinh diem vuot qua 2 dau duong cu)
+    std::vector<float> dev;
+    for (const auto &q : neu) {
+      float d = 0.0f;
+      size_t sg = 0;
+      const cv::Point2f c = closest_on(q, mem.pts, d, &sg);
+      const bool end = (sg == 0 && norm2(c - mem.pts.front()) < 1e-4f) ||
+                       (sg + 2 == mem.pts.size() && norm2(c - mem.pts.back()) < 1e-4f);
+      if (!end) {
+        dev.push_back(d);
+      }
+    }
+    if (dev.size() >= 4) {
+      std::nth_element(dev.begin(), dev.begin() + dev.size() / 2, dev.end());
+      if (dev[dev.size() / 2] > JUMP_TOL_M) {
+        if (++mem.reject < REJECT_RESET) {
+          return;
+        }
+        accept_new();
+        return;
+      }
+    }
+  }
 
   // Can cung tai moi noi: q -> p0 + R(rot) * (q - q_near). rot = lech huong
   // giua duong cu va doan moi, chi sua 1 nua moi frame (loc nhieu detector).
@@ -322,11 +355,15 @@ double PathTracker::line_clearance(const std::vector<cv::Point2f> &line_v,
   return best;
 }
 
-PathTracker::Output PathTracker::compute(double v) {
+PathTracker::Output PathTracker::compute(double v, double bias_m) {
   Output o;
   prune(centre_);
   prune(left_);
   prune(right_);
+  const double dt_c = last_compute_ == Clock::time_point{}
+                          ? 0.0
+                          : std::clamp(seconds(now_ - last_compute_), 0.0, 0.1);
+  last_compute_ = now_;
 
   // Du doan vi tri xe khi lenh lai nay toi duoc servo
   Pose pp = pose_;
@@ -335,6 +372,16 @@ PathTracker::Output PathTracker::compute(double v) {
   }
 
   o.centre_v = in_vehicle(centre_, pp);
+  // Doi duong tam sang PHAI bias_m (theo phap tuyen): chi thay 1 vach thi
+  // lai lech ve phia vach bi mat de tim lai no (SINGLE_LINE_SEARCH Python)
+  if (std::fabs(bias_m) > 1e-4 && o.centre_v.size() >= 2) {
+    std::vector<cv::Point2f> sh(o.centre_v.size());
+    for (size_t i = 0; i < o.centre_v.size(); ++i) {
+      const cv::Point2f t = dir_at(o.centre_v, std::min(i, o.centre_v.size() - 2));
+      sh[i] = o.centre_v[i] + cv::Point2f(t.y, -t.x) * static_cast<float>(bias_m);
+    }
+    o.centre_v.swap(sh);
+  }
   o.left_v = in_vehicle(left_, pp);
   o.right_v = in_vehicle(right_, pp);
   o.virt_left = !left_.pts.empty() && seconds(now_ - left_.seen) > VIRTUAL_AFTER_S;
@@ -342,6 +389,8 @@ PathTracker::Output PathTracker::compute(double v) {
 
   const std::vector<cv::Point2f> &c = o.centre_v;
   if (c.size() < 2) {
+    // Khong con duong: xa dan khau I (khong giu sai lech cu qua lau)
+    xte_i_deg_ *= std::exp(-dt_c / 2.0);
     return o;
   }
   const double L = p_.wheelbase_m;
@@ -390,6 +439,34 @@ PathTracker::Output PathTracker::compute(double v) {
   const double Le = std::max(0.20, static_cast<double>(norm2(o.target_v)));
   const double kappa = 2.0 * o.target_v.x / (Le * Le);
   double steer = std::atan(L * kappa) / kDeg;
+
+  // ---- Phan hoi lech ngang tai CHAN CAMERA ----
+  // Do o chan camera chu khong o banh truoc: lech ngang + huong duong tam
+  // tai day la so do TRUC TIEP cua camera (chi ngoai suy ~0.13 m), khong phu
+  // thuoc cam_to_rear_m / steer_ratio khai bao. Thu vong kin: khai bao 2 so
+  // nay lech thuc te thi do o banh truoc (qua bo nho odometry) kem hon.
+  if (p_.xte_gain > 0.0 || p_.xte_ki > 0.0) {
+    float d = 0.0f;
+    size_t seg = 0;
+    const cv::Point2f fa(0.0f, static_cast<float>(p_.cam_to_rear_m));
+    const cv::Point2f q = closest_on(fa, c, d, &seg);
+    // Chi khi duong tam phu toi banh truoc (khong ngoai suy qua dau duong)
+    const bool covered = c.front().y <= fa.y + 0.05;
+    if (covered && d < 0.30f) {
+      const cv::Point2f t = dir_at(c, seg);
+      // > 0: duong tam nam ben PHAI banh truoc
+      o.xte_m = (fa.x - q.x) * t.y - (fa.y - q.y) * t.x < 0.0f ? d : -d;
+      o.xte_deg = std::atan(p_.xte_gain * o.xte_m / (std::max(0.0, v) + p_.xte_soft_mps)) / kDeg;
+      // Tich phan chi khi xe dang chay (dung yen thi lech khong doi duoc)
+      if (p_.xte_ki > 0.0 && v > 0.2) {
+        xte_i_deg_ = std::clamp(xte_i_deg_ + p_.xte_ki * o.xte_m * dt_c,
+                                -p_.xte_i_max_deg, p_.xte_i_max_deg);
+      }
+      o.xte_i_deg = xte_i_deg_;
+      o.xte_deg += xte_i_deg_;
+      steer += o.xte_deg;
+    }
+  }
 
   // ---- Rao chan vach (ke ca vach ao) tai banh truoc va 0.25 m truoc do ----
   double guard = 0.0;

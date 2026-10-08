@@ -106,11 +106,12 @@ Khi khởi động, xe **luôn đứng yên** (gửi EMG) cho tới khi người
 1. Đã bấm SPACE và dashboard còn gửi heartbeat (`run=1` trong `/lane/status`).
 2. Camera có frame mới (< 200 ms, `age=`).
 3. Detector thấy ít nhất 1 vạch (`track=two` hoặc `one`), hoặc mất vạch chưa quá
-   `lane_lost_stop_ms` (400 ms).
+   `lane_lost_stop_ms` (2500 ms). Đã dừng vì mất vạch thì thấy lại làn (2 vạch hoặc 1
+   vạch bám ổn định) `lane_start_frames` frame là **tự chạy lại**.
 4. Cổng ESP32 mở (`serial=open`) và ESP32 nhận gói đều (watchdog 500 ms).
 
-Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (7.5 km/h, đường thẳng) về
-`speed_corner_x10` (5.5 km/h, cua gắt) theo `speed_scale`; 1 vạch thì `speed_corner_x10`;
+Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (7.0 km/h ≈ ESC 103, đường thẳng) về
+`speed_corner_x10` (5.0 km/h ≈ ESC 101, cua gắt) theo `speed_scale`; 1 vạch thì `speed_corner_x10`;
 **không thấp hơn `speed_min_x10`** (mặc định 5.0 km/h ≈ ESC 101). Lý do: động cơ BLDC chạy
 chậm (ESC 100, ~3.6 km/h) kêu cọt kẹt và dễ không đủ lực thắng ma sát.
 
@@ -165,7 +166,8 @@ Giống hệt `LidarModule` (C++):
 > không trả về tia nào (đã kiểm 20 vòng quét: 0 giá trị < 0.15 m). Áp tay sát LiDAR thì tay
 > **không** hiện và còn che mất vật phía sau; đưa tay ra xa hơn 15 cm thì điểm hiện ngay.
 
-`lidar_mount_offset_deg` (mặc định −90) được `fusion_node` gửi trong `/lane/status`
+`lidar_mount_offset_deg` (mặc định +90: góc 0° thô của RPLIDAR chĩa sang **bên phải** xe;
+driver đổi `a_ROS = 180° − a_thô`) được `fusion_node` gửi trong `/lane/status`
 (`lofs=`), nên GUI và C++ luôn dùng cùng một góc lắp.
 
 ### Topic
@@ -193,15 +195,23 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_width` / `camera_height` | `1920` / `1080` | độ phân giải xin camera (MJPG) |
 | `camera_fps` | `30` | FPS yêu cầu |
 | `camera_exposure` | `-1` | -1 = phơi sáng tự động; > 0 = phơi sáng tay (100 µs), vd `250` để giữ 30 fps |
-| `horizon_frac` | `0.20` | **Chân trời** (tỉ lệ chiều cao ảnh). Vạch tím trên overlay phải đi qua điểm 2 vạch thẳng kéo dài gặp nhau. Sai giá trị này ⇒ ghép nhầm cặp vạch |
-| `camera_height_m` | `0.30` | Độ cao camera so với mặt đường (m), dùng đổi pixel → cm |
-| `roi_top_frac` | `0.48` | Đầu ROI tính từ trên xuống; nhỏ hơn = thấy xa hơn (ROI luôn phủ hết bề ngang) |
-| `speed_x10` | `75` | Tốc độ khi đủ 2 làn & đi thẳng (km/h × 10) |
+| `camera_pitch_deg` | `42.0` | **Góc cúi camera** (đo trên ảnh thật). `camera_auto_pitch:=true` để tự hiệu chỉnh (mặc định tắt: ước lượng nhảy 1–2°) |
+| `camera_height_m` | `0.30` | Độ cao camera so với mặt sàn (m) |
+| `camera_vfov_deg` | `51.0` | Góc nhìn dọc của camera (giống nhau ở 1080p và 640×480) |
+| `lane_width_m` | `0.42` | Bề rộng làn tâm vạch – tâm vạch (tự học lại) |
+| `roi_top_frac` | `0.0` | Bỏ qua phần trên cùng ảnh (mặc định dùng hết) |
+| `speed_x10` | `70` | Tốc độ khi đủ 2 làn & đi thẳng (km/h × 10), ≈ ESC 103; cua nhẹ ESC 102, cua gắt ESC 101 |
 | `speed_hold_x10` | `50` | Tốc độ giữ hướng khi mất cả 2 vạch |
-| `speed_corner_x10` | `55` | Tốc độ vào cua: 1 vạch, hoặc 2 vạch cong gắt nhất |
+| `speed_corner_x10` | `50` | Tốc độ vào cua: 1 vạch, hoặc 2 vạch cong gắt nhất (≈ ESC 101) |
 | `speed_ramp_x10` | `30` | Mức tăng tốc, x10 mỗi giây (`30` = 3 km/h/s); giảm tốc luôn tức thì |
 | `speed_min_x10` | `50` | Tốc độ nhỏ nhất khi đang chạy; BLDC kêu ở tốc độ thấp thì tăng |
-| `lane_lost_stop_ms` | `400` | Mất 2 làn quá lâu thì dừng |
+| `lane_lost_stop_ms` | `2500` | Mất 2 làn quá lâu thì dừng (thấy lại làn thì tự chạy) |
+| `lane_start_frames` | `3` | Bấm chạy / mất làn đã dừng: chạy khi thấy làn (2 vạch hoặc 1 vạch ổn định) bấy nhiêu frame liên tiếp (`LANE_START_FRAMES` bản Python) |
+| `cam_to_rear_axle_m` | `0.18` | **Đo trên xe** (~18 cm): trục sau → điểm ngay dưới camera. Sai 0.15 m là xe chạy đè vạch (xem `docs/TUNING.md` §7) |
+| `steer_ratio` | `0.6` | Góc bánh / góc servo. Xe bắt về phía ngoài cua ⇒ giảm; xe cắt vào trong cua / lắc ⇒ tăng |
+| `single_search_m` | `0.08` | Chỉ thấy 1 vạch: dời tâm bám về phía vạch bị mất tối đa 8 cm ⇒ xe lái vào trong tìm lại vạch kia |
+| `xte_gain` / `xte_ki` | `2.0` / `50` | Phản hồi lệch ngang P / I tại chân camera (bù trim servo, camera lắp lệch) |
+| `steer_filter_s` | `0.08` | Lọc góc bánh (s) ở chế độ `track`, `0` = tắt (`STEER_FILTER_SEC` bản Python) |
 | `dev_sign` | `1` | `-1` nếu servo lắp ngược |
 | `require_start` | `true` | `true` = chỉ chạy khi bấm SPACE trên dashboard |
 | `start_timeout_ms` | `600` | Mất heartbeat `/autocar/run` quá mức này ⇒ dừng |
@@ -210,7 +220,7 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `status_hz` | `10` | Tần suất `/lane/status` |
 | `enable_viz` | `true` | Tắt để nhẹ máy |
 | `enable_lidar` | `true` | Bật driver LiDAR + subscribe `/scan` |
-| `lidar_mount_offset_deg` | `-90.0` | Góc lệch lắp LiDAR, `0` = trước, `90` = trái (REP-103) |
+| `lidar_mount_offset_deg` | `90.0` | Góc lệch lắp LiDAR, `0` = trước, `90` = trái (REP-103); +90 = 0° thô chĩa sang phải xe |
 | `log_level` | `info` | `debug` để in nhiều hơn |
 
 ## Detector làn (bám vạch mọi hướng trên mặt đất)
@@ -248,7 +258,7 @@ camera 0.70 m, cộng `0.4 × lệch ngang` gần xe, chặn nhảy 90 px, EMA 0
 
 ## Lái theo đường đã nhớ (`PathTracker`, mặc định `steer_mode:=track`)
 
-**Vấn đề:** camera chỉ thấy mặt đất từ ~0.47 m trước chân camera, chân camera lại nằm
+**Vấn đề:** camera chỉ thấy mặt đất từ ~0.13 m trước chân camera, chân camera lại nằm
 trước trục sau ~0.30 m. Ngắm theo điểm camera nhìn thấy ⇒ tầm nhìn thật ~1 m tính từ trục
 sau ⇒ xe bẻ lái khi còn cách cua ~0.4–0.5 m, cắt cua, đè vạch trong. Đẩy điểm ngắm xa hơn
 thì tới cua vạch đã ra khỏi khung hình.
@@ -296,9 +306,10 @@ Tốc độ thật lệch ±25 % so với lệnh: vẫn không đè vạch. Tỉ
 hơn khai báo): chạm vạch ~2 cm ở cua R ≤ 0.8 m ⇒ **đo `steer_ratio` trước khi chạy** (xem
 `docs/TUNING.md` §7).
 
-**Hình học camera (quan trọng):** camera trên xe cúi xuống ~13° nên chân trời nằm ở ~20%
-chiều cao ảnh, không phải giữa ảnh. Sai `horizon_frac` ⇒ đổi pixel → mét sai ⇒ bề rộng làn
-sai ⇒ ghép nhầm cặp vạch.
+**Hình học camera (quan trọng):** camera trên xe cúi xuống ~42° (đo trên ảnh thật), chân
+trời nằm TRÊN mép ảnh. Detector chiếu ảnh xuống mặt sàn (BEV) bằng `camera_pitch_deg` /
+`camera_height_m` / `camera_vfov_deg`; sai góc cúi ⇒ bề rộng làn sai ⇒ ghép nhầm cặp vạch
+(góc cúi tự hiệu chỉnh khi chạy thẳng thấy 2 vạch).
 
 **Chống lóa đèn trần:**
 
@@ -358,8 +369,8 @@ DTR/RTS cùng lúc để ESP32 không bị reset, và **tự mở lại cổng m
 | chưa bấm SPACE / mất heartbeat dashboard | 0 | 0 | **1** |
 | camera OK + đủ 2 làn | `dev_px × dev_sign` | `corner + (speed_x10 − corner) × speed_scale` (ramp) | 0 |
 | camera OK, chỉ 1 vạch | `dev_px × dev_sign` | `speed_corner_x10` | 0 |
-| mất cả 2 vạch < `lane_lost_stop_ms` | giữ hướng lái cuối | `speed_hold_x10` | 0 |
-| mất cả 2 vạch ≥ `lane_lost_stop_ms` | 0 | 0 | **1** |
+| mất cả 2 vạch < `lane_lost_stop_ms` | theo đường đã nhớ, rồi giữ hướng lái cuối | `speed_hold_x10` | 0 |
+| mất cả 2 vạch ≥ `lane_lost_stop_ms` | 0 | 0 | **1** (thấy lại làn `lane_start_frames` frame ⇒ tự chạy) |
 | camera mất frame (> 200 ms) | 0 | 0 | **1** |
 
 Tốc độ **giảm ngay** khi cần, chỉ **tăng dần** theo `speed_ramp_x10`. Node tắt ⇒ gửi EMG

@@ -209,10 +209,11 @@ void LidarModule::update(
         // ---- Bản đồ cục bộ ----
         if (distance_cm <= map_radius_cm) {
             const float distance_px = distance_cm * px_per_cm;
+            // Xe quay mặt lên trên: trước = lên, trái = sang trái ảnh
             const int x = static_cast<int>(std::lround(
-                static_cast<float>(O.x) + cos_table[i] * distance_px));
+                static_cast<float>(O.x) - sin_table[i] * distance_px));
             const int y = static_cast<int>(std::lround(
-                static_cast<float>(O.y) - sin_table[i] * distance_px));
+                static_cast<float>(O.y) - cos_table[i] * distance_px));
 
             if (x >= 0 && x < MAP_W && y >= 0 && y < MAP_H) {
                 out.points_px.emplace_back(x, y);

@@ -19,7 +19,7 @@ Phim tat:  SPACE = chay / dung    ESC = dung ngay
 Xe chi chay khi GUI dang mo va gui heartbeat; dong GUI -> xe dung.
 
 Chay: python3 src/gui/gui.py [--fps 60] [--width 1280 --height 760]
-Can: PySide6 (hoac PySide2), matplotlib, numpy, opencv (python3-opencv), rclpy.
+Can: PySide6 (hoac PySide2), numpy, opencv (python3-opencv), rclpy.
 """
 
 import argparse
@@ -48,10 +48,6 @@ except ImportError:  # pragma: no cover - chi dung khi may chua co PySide6
     )
     QT_BINDING = "PySide2"
 
-# Matplotlib chi dung cho ban do LiDAR (import SAU Qt de chon dung binding)
-import matplotlib.colors as mcolors
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 
 # ============================================================================
@@ -87,8 +83,7 @@ LIDAR_BLIND_MM = 150
 # Mau diem: van bo do/cam/vang/xanh nhung DAM hon de noi ro tren nen trang
 # (vang "yellow" cua matplotlib gan nhu bien mat tren nen trang).
 LIDAR_COLORS = ("#DC2626", "#EA580C", "#CA8A04", "#15803D")
-LIDAR_POINT_SIZE = 22
-DEFAULT_LIDAR_OFFSET_DEG = -90.0          # = lidar_mount_offset_deg cua launch
+DEFAULT_LIDAR_OFFSET_DEG = 90.0           # = lidar_mount_offset_deg cua launch
 
 LINKS = ("FUSION", "CAMERA", "LIDAR", "ESP32")
 
@@ -603,59 +598,175 @@ class RunButton(QPushButton):
 
 
 # ============================================================================
-# BAN DO LiDAR (giu thiet ke ban do RPLIDAR goc)
+# BAN DO LiDAR (ve bang QPainter, du 360 do)
 # ============================================================================
 
-class LidarMap(Card):
-    """Polar matplotlib: figsize 4x4, scatter vien mong, 4 dai mau do/cam/vang/xanh
-    (BoundaryNorm theo nguong C++ 0.4/0.6/1.5 m), nhan khoang cach, luoi.
-    Vong xam o tam = vung mu 15 cm cua RPLIDAR A1 (vat trong do KHONG hien,
-    vi cam bien khong do duoc, khong phai do ve sai).
+class LidarView(QWidget):
+    """Ban do quet 360 do cua RPLIDAR A1M8 quanh xe, ve truc tiep bang QPainter.
 
-    Quy luat ve: du lieu da o KHUNG XE (xem RosWorker.on_scan). 0 do = TRUOC
-    o phia tren, 90 do = TRAI ben trai, tang nguoc chieu kim dong ho.
-    Cap nhat bang blit (chi ve lai cac diem) nen moi scan chi ton vai ms.
-    Lan chuot tren ban do de doi tam nhin 1..12 m."""
+    Quy luat ve: du lieu da o KHUNG XE (xem RosWorker.on_scan, goc REP-103
+    nguoc chieu kim dong ho). Xe o tam, mui xe huong LEN. Vach chia do ghi
+    0..330 do THEO CHIEU KIM DONG HO tu mui xe (giong cach A1M8 / RoboStudio
+    danh so goc), kem nhan TRUOC / PHAI / SAU / TRAI.
+
+    Chong che chu: so do nam NGOAI vong tron (le danh rieng), nhan khoang
+    cach co nen trang ve SAU cung (diem do khong de len chu), co chu tu nho
+    lai theo kich thuoc khung. Vat xa hon tam nhin van hien la vach nho o
+    mep vong -> luon thay du 360 do quanh xe."""
 
     def __init__(self):
-        super().__init__("LiDAR MAP", "VEHICLE FRAME · FRONT ↑", n_badges=1)
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(200, 200)
         self.range_idx = LIDAR_RANGES_M.index(LIDAR_DEFAULT_RANGE_M)
+        self.theta = np.empty(0, np.float32)
+        self.dist = np.empty(0, np.float32)
+        self.on_range = None
+        self._colors = [QColor(c) for c in LIDAR_COLORS]
+        self._pens = [QPen(QColor("#1E293B"), 0.6) for _ in LIDAR_COLORS]
 
-        self.figure = Figure(figsize=(4, 4))
-        self.canvas = FigureCanvas(self.figure)
-        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.canvas.setMinimumSize(160, 160)   # khong de figsize ep be rong cot
-        self.ax = self.figure.add_subplot(111, projection="polar")
-        self.ax.set_theta_zero_location("N")   # 0 do (truoc xe) o phia tren
-        self.ax.set_theta_direction(1)         # nguoc chieu kim dong ho (REP-103)
+    def range_m(self):
+        return LIDAR_RANGES_M[self.range_idx]
 
-        cmap = mcolors.ListedColormap(list(LIDAR_COLORS))
-        norm = mcolors.BoundaryNorm(list(LIDAR_COLOR_BOUNDS_MM), cmap.N)
-        # Vien toi mong quanh moi diem: diem tach han khoi luoi va nen
-        self.scatter = self.ax.scatter([0], [0], c=[0], s=LIDAR_POINT_SIZE, cmap=cmap,
-                                       norm=norm, edgecolors="#1E293B", linewidths=0.35)
+    def set_scan(self, theta, dist):
+        self.theta, self.dist = theta, dist
+        self.update()
 
-        # Vung mu 15 cm (to xam) + xe o tam, mui ten nho chi huong truoc
-        th = np.linspace(0.0, 2.0 * math.pi, 73)
-        self.ax.fill(th, np.full_like(th, LIDAR_BLIND_MM), color="#CBD5E1",
-                     alpha=0.55, lw=0, zorder=1)
-        self.ax.scatter([0], [0], marker="^", s=28, c="#0F172A", zorder=2)
+    def wheelEvent(self, event):
+        d = event.angleDelta().y()
+        old = self.range_idx
+        if d > 0:
+            self.range_idx = max(0, self.range_idx - 1)
+        elif d < 0:
+            self.range_idx = min(len(LIDAR_RANGES_M) - 1, self.range_idx + 1)
+        if self.range_idx != old:
+            if self.on_range:
+                self.on_range(self.range_m())
+            self.update()
 
-        self.ax.set_rlabel_position(22.5)
-        self.ax.grid(True)
-        self.figure.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.92)
-        self._apply_range()
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.fillRect(self.rect(), QColor(C_CARD))
+        w, h = self.width(), self.height()
+        side = min(w, h)
+        fs = max(6.5, min(9.0, side / 48.0))          # co chu theo khung
+        font = QFont(FONT_UI_FAMILY)
+        font.setPointSizeF(fs)
+        p.setFont(font)
+        fm = p.fontMetrics()
+        margin = fm.horizontalAdvance("330°") + 8      # le cho so do ngoai vong
+        R = max(40.0, side / 2.0 - margin)
+        cx, cy = w / 2.0, h / 2.0
+        r_mm = self.range_m() * 1000.0
+        k = R / r_mm                                    # px / mm
 
-        self.canvas.mpl_connect("resize_event", self._on_resize)
-        self.canvas.mpl_connect("scroll_event", self._on_scroll)
-        self._on_resize(None)
+        # ---- Luoi: vong khoang cach + tia 30 do ----
+        step = {0.5: 0.1, 1: 0.2, 2: 0.5, 3: 0.5, 4: 1, 6: 1, 8: 2, 12: 2}[self.range_m()]
+        rings = np.arange(step, self.range_m() + 1e-6, step)
+        grid = QPen(QColor("#E2E8F0"), 1)
+        p.setPen(grid)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for rr in rings:
+            r = rr * 1000.0 * k
+            p.drawEllipse(QPointF(cx, cy), r, r)
+        for a in range(0, 360, 30):
+            t = math.radians(a)
+            p.drawLine(QPointF(cx, cy), QPointF(cx + R * math.sin(t), cy - R * math.cos(t)))
+        p.setPen(QPen(QColor("#94A3B8"), 1.2))
+        p.drawEllipse(QPointF(cx, cy), R, R)
 
-        # Blit: nen (luoi, nhan) luu 1 lan, moi scan chi ve lai scatter
-        self.scatter.set_animated(True)
-        self._bg = None
-        self.canvas.mpl_connect("draw_event", self._on_draw)
+        # Vung mu 15 cm cua A1M8
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(203, 213, 225, 140))
+        rb = LIDAR_BLIND_MM * k
+        p.drawEllipse(QPointF(cx, cy), rb, rb)
 
-        self.root.addWidget(self.canvas, 1)
+        # ---- Diem do ----
+        if self.dist.size:
+            th = self.theta.astype(np.float64)
+            d = self.dist.astype(np.float64)
+            inside = d <= r_mm
+            x = cx - np.sin(th) * np.minimum(d, r_mm) * k   # 90 do (trai) -> sang trai
+            y = cy - np.cos(th) * np.minimum(d, r_mm) * k   # 0 do (truoc) -> len tren
+            band = np.searchsorted(np.asarray(LIDAR_COLOR_BOUNDS_MM[1:-1]), d, side="right")
+            pr = max(1.8, side / 170.0)
+            for b in range(len(LIDAR_COLORS)):
+                sel = inside & (band == b)
+                if not sel.any():
+                    continue
+                p.setPen(self._pens[b])
+                p.setBrush(self._colors[b])
+                for xi, yi in zip(x[sel].tolist(), y[sel].tolist()):
+                    p.drawEllipse(QPointF(xi, yi), pr, pr)
+            # Xa hon tam nhin: vach nho o mep vong (biet huong co vat)
+            out = ~inside
+            if out.any():
+                p.setPen(QPen(QColor(21, 128, 61, 70), 1.2))
+                for t in th[out].tolist():
+                    s, c = math.sin(t), math.cos(t)
+                    p.drawLine(QPointF(cx - s * (R - 4), cy - c * (R - 4)),
+                               QPointF(cx - s * R, cy - c * R))
+
+        # ---- Xe o tam, mui huong len ----
+        car = max(6.0, side / 40.0)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(C_TEXT))
+        p.drawPolygon([QPointF(cx, cy - car), QPointF(cx - 0.7 * car, cy + 0.7 * car),
+                       QPointF(cx + 0.7 * car, cy + 0.7 * car)])
+
+        # ---- Chu (ve sau cung -> khong bi diem de len) ----
+        # So do NGOAI vong, chieu kim dong ho tu mui xe
+        p.setPen(QColor(C_TEXT_2))
+        rl = R + 4 + fm.horizontalAdvance("330°") / 2.0
+        for a in range(0, 360, 30):
+            t = math.radians(a)
+            tx, ty = cx + rl * math.sin(t), cy - rl * math.cos(t)
+            txt = f"{a}°"
+            tw = fm.horizontalAdvance(txt)
+            p.drawText(QRectF(tx - tw / 2 - 2, ty - fm.height() / 2, tw + 4, fm.height()),
+                       Qt.AlignmentFlag.AlignCenter, txt)
+        # Huong xe ngay trong vong
+        bold = QFont(font)
+        bold.setBold(True)
+        p.setFont(bold)
+        bfm = p.fontMetrics()
+        p.setPen(QColor(C_BLUE))
+        for a, txt in ((0, "TRƯỚC"), (90, "PHẢI"), (180, "SAU"), (270, "TRÁI")):
+            t = math.radians(a)
+            rr = R - bfm.height() * (0.9 if a in (0, 180) else 1.0) - \
+                (bfm.horizontalAdvance(txt) / 2.0 if a in (90, 270) else 0.0)
+            tx, ty = cx + rr * math.sin(t), cy - rr * math.cos(t)
+            self._label(p, bfm, tx, ty, txt, QColor(C_BLUE))
+        # Nhan khoang cach tren tia 135 do (sau-phai), nen trang
+        p.setFont(font)
+        t = math.radians(135)
+        for rr in rings[1::2] if len(rings) > 4 else rings:
+            r = rr * 1000.0 * k
+            self._label(p, fm, cx + r * math.sin(t), cy - r * math.cos(t), f"{rr:g}m",
+                        QColor(C_MUTED))
+        p.end()
+
+    @staticmethod
+    def _label(p, fm, x, y, txt, color):
+        tw, th = fm.horizontalAdvance(txt), fm.height()
+        box = QRectF(x - tw / 2 - 3, y - th / 2, tw + 6, th)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 215))
+        p.drawRoundedRect(box, 3, 3)
+        p.setPen(color)
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, txt)
+
+
+class LidarMap(Card):
+    """The ban do LiDAR: LidarView + chan the (vat gan nhat, so diem, canh bao,
+    chu thich mau). Lan chuot tren ban do de doi tam nhin 0.5..12 m."""
+
+    def __init__(self):
+        super().__init__("LiDAR MAP", "A1M8 · 360° · FRONT ↑", n_badges=1)
+        self.view = LidarView()
+        self.view.on_range = self._show_range
+        self.root.addWidget(self.view, 1)
 
         footer = QFrame()
         footer.setObjectName("cardFooter")
@@ -675,71 +786,30 @@ class LidarMap(Card):
                         f'<span style="color:{c[2]}">●</span>1.5 '
                         f'<span style="color:{c[3]}">●</span>&gt; m')
         legend.setToolTip("Mau theo khoang cach: do < 0.4 m, cam < 0.6 m, vang < 1.5 m, "
-                          "xanh xa hon. Vong xam o tam = vung mu 15 cm cua LiDAR.")
+                          "xanh xa hon. Vong xam o tam = vung mu 15 cm cua LiDAR. "
+                          "Vach o mep vong = vat xa hon tam nhin.")
         legend.setObjectName("footLegend")
         fl.addWidget(legend)
         self.legend = legend
         self.root.addWidget(footer)
         self._status_kind = None
+        self._show_range(self.view.range_m())
+
+    def _show_range(self, r_m):
+        self.header.badges[0].set(f"RANGE {r_m:g} m", "muted")
 
     def resizeEvent(self, event):
         # Khung hep: bo chu thich mau de cac so lieu khong bi cat
         self.legend.setVisible(self.width() >= 420)
         super().resizeEvent(event)
 
-    # ---- tam nhin ----
-    def _apply_range(self):
-        r_m = LIDAR_RANGES_M[self.range_idx]
-        step = {0.5: 0.1, 1: 0.2, 2: 0.5, 3: 0.5, 4: 1, 6: 1, 8: 2, 12: 2}[r_m]
-        ticks = np.arange(step, r_m + 1e-6, step)
-        self.ax.set_rmax(r_m * 1000)
-        self.ax.set_rmin(0)
-        self.ax.set_yticks(ticks * 1000)
-        self.ax.set_yticklabels([f"{t:g}m" for t in ticks], alpha=0.7)
-        self.header.badges[0].set(f"RANGE {r_m:g} m", "muted")
-
-    def _on_scroll(self, event):
-        old = self.range_idx
-        if event.button == "up":
-            self.range_idx = max(0, self.range_idx - 1)
-        elif event.button == "down":
-            self.range_idx = min(len(LIDAR_RANGES_M) - 1, self.range_idx + 1)
-        if self.range_idx != old:
-            self._apply_range()
-            self._bg = None
-            self.canvas.draw_idle()
-
-    def _on_resize(self, _event):
-        size = max(6, self.figure.get_figwidth() * 1.3)
-        self.ax.tick_params(axis="both", labelsize=size)
-        self._bg = None
-
-    def _on_draw(self, _event):
-        self._bg = self.canvas.copy_from_bbox(self.figure.bbox)
-        self.figure.draw_artist(self.scatter)
-
-    # ---- du lieu ----
     def set_scan(self, theta, dist):
-        if theta.size:
-            self.scatter.set_offsets(np.column_stack((theta, dist)))
-            self.scatter.set_array(dist)
-        else:
-            self.scatter.set_offsets(np.empty((0, 2)))
-            self.scatter.set_array(np.empty(0))
-
-        if self._bg is not None:
-            self.canvas.restore_region(self._bg)
-            self.figure.draw_artist(self.scatter)
-            self.canvas.blit(self.figure.bbox)
-        else:
-            self.canvas.draw_idle()
-
+        self.view.set_scan(theta, dist)
         if dist.size:
             i = int(np.argmin(dist))
-            deg = (math.degrees(float(theta[i])) + 180.0) % 360.0 - 180.0
-            side = "L" if deg > 3 else "R" if deg < -3 else ""
-            self.nearest_label.setText(
-                f"NEAR {dist[i] / 1000:.2f} m @ {abs(deg):.0f}°{side}")
+            # Goc theo chieu kim dong ho tu mui xe, 0..360 (nhu tren ban do)
+            deg = (360.0 - math.degrees(float(theta[i]))) % 360.0
+            self.nearest_label.setText(f"NEAR {dist[i] / 1000:.2f} m @ {deg:.0f}°")
         else:
             self.nearest_label.setText("NEAR --")
         self.points_label.setText(f"PTS {dist.size}")
@@ -938,7 +1008,7 @@ class AutoCarMonitor(QMainWindow):
         self.cam_card = ImageCard("LANE DETECTION", "C++ overlay", n_badges=2,
                                   placeholder="WAITING FOR CAMERA")
         self.roi_card = ImageCard("ROI", "camera crop", n_badges=0)
-        self.bin_card = ImageCard("BINARY MASK", "trừ nền + hysteresis", n_badges=0)
+        self.bin_card = ImageCard("BINARY MASK", "chỉ 2 vạch làn đang bám", n_badges=0)
 
         left = QWidget()
         ll = QGridLayout(left)

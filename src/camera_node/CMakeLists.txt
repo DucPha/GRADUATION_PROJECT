@@ -18,6 +18,7 @@ find_package(JPEG REQUIRED)
 # Thu vien detector, khong phu thuoc rclcpp
 add_library(camera_lane STATIC
   camera_node.cpp
+  lane_bev.cpp
   path_tracker.cpp
 )
 

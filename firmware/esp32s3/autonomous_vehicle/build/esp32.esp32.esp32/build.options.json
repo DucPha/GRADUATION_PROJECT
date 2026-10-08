@@ -1,0 +1,10 @@
+{
+  "additionalFiles": "",
+  "builtInLibrariesFolders": "/home/giang/.arduino15/libraries",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:esp32:DebugLevel=none",
+  "hardwareFolders": "/home/giang/.arduino15/packages/esp32/hardware/esp32/3.3.12,/home/giang/.arduino15/packages/esp32/hardware/esp32/3.3.12",
+  "otherLibrariesFolders": "/home/giang/Arduino/libraries",
+  "sketchLocation": "/home/giang/Documents/PhamMinhDuc/GRADUATION_PROJECT/firmware/esp32s3/autonomous_vehicle"
+}

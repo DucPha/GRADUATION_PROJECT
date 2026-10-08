@@ -16,18 +16,27 @@
 // QUY ƯỚC GÓC
 // ----------------------------------------------------------------------------
 // Theo chuẩn REP-103 của ROS: LaserScan.angle_min + i*angle_increment là góc
-// đo NGƯỢC chiều kim đồng hồ tính từ trục +X của xe (trục +X = PHÍA TRƯỚC).
-// Bản vẽ bản đồ trong fusion_viz_node.cpp dùng đúng quy ước đó:
-//     x = origin.x + cos(a)*d      (0° -> bên phải ảnh)
-//     y = origin.y - sin(a)*d      (90° -> phía trên ảnh)
-// nên 0° = TRƯỚC, 90° = TRÁI, 180° = SAU, 270° = PHẢI.
+// đo NGƯỢC chiều kim đồng hồ tính từ trục +X của khung LiDAR. Sau khi cộng
+// `lidar_mount_offset_deg` thì góc nằm trong KHUNG XE:
+//     0° = TRƯỚC, 90° = TRÁI, 180° = SAU, 270° = PHẢI.
+// Bản đồ cục bộ (points_px) vẽ xe QUAY MẶT LÊN TRÊN:
+//     x = origin.x - sin(a)*d      (90° = trái -> bên trái ảnh)
+//     y = origin.y - cos(a)*d      (0° = trước -> phía trên ảnh)
+//
+// DRIVER rplidar_ros đổi góc thô của cảm biến sang ROS: a_ROS = 180° - a_thô
+// (góc thô quay THUẬN chiều kim đồng hồ, 0° = vạch mốc trên vỏ RPLIDAR A1).
+// Trên xe này góc thô 0° chĩa sang BÊN PHẢI xe -> a_ROS = 180° là bên phải
+// (270° khung xe) -> offset = 270 - 180 = +90°. Bản Python (car_config.py)
+// dùng -270°, cùng một góc. Bản C++ cũ dùng -90° (coi 0° thô chĩa sang trái)
+// nên bản đồ bị QUAY NGƯỢC 180°: trước <-> sau, trái <-> phải.
 //
 // Vòng tròn vòng trước đây đảo 90°: "front" lấy 60..120 (thực chất là BÊN TRÁI)
 // và "right" lấy 300..360 u 0..60 (thực chất là PHÍA TRƯỚC). Hậu quả:
 // ob_front_cm không bao giờ thấy vật cản phía trước -> xe không giảm tốc.
 //
-// Nếu LiDAR được lắp xoay vật lý, dùng tham số ROS `lidar_mount_offset_deg`
-// (độ) để bù. Ví dụ LiDAR đặt đầu dòng chĩa sang bên trái -> offset = -90.
+// Nếu LiDAR được lắp xoay khác, dùng tham số ROS `lidar_mount_offset_deg`
+// (độ): offset = (góc khung xe của hướng 0° thô) - 180. Ví dụ 0° thô chĩa
+// ra trước -> -180, sang trái -> -90, ra sau -> 0, sang phải -> +90.
 // ============================================================================
 
 // ============================================================================
@@ -101,12 +110,11 @@ public:
     static constexpr float SECTOR_HALF = 22.5f;   // nửa góc vuông 45°
     static constexpr float QUAD_HALF = 45.0f;      // nửa góc vuông 90°
 
-    // Góc lệch lắp đặt mặc định: -90° nghĩa là đầu dòng LiDAR chĩa sang bên
-    // trái của xe, tức góc thô 90° ứng với phía trước. Đây đúng bằng giả định
-    // của bản cũ ("front" lấy 60..120°) nên hành vi không đổi, nhưng giờ đã
-    // nằm đúng khung xe. Nếu LiDAR lắp khác, đổi tham số ROS
-    // `lidar_mount_offset_deg`.
-    static constexpr float DEFAULT_MOUNT_OFFSET_DEG = -90.0f;
+    // Góc lệch lắp đặt mặc định: +90° = góc thô 0° của RPLIDAR chĩa sang
+    // BÊN PHẢI xe (xem đầu file). Kiểm tra trên scan thật: vật phía trước-phải
+    // mà camera thấy nằm ở a_ROS ~ -120°, khớp +90°. Nếu LiDAR lắp khác, đổi
+    // tham số ROS `lidar_mount_offset_deg`.
+    static constexpr float DEFAULT_MOUNT_OFFSET_DEG = 90.0f;
 
     static inline cv::Point origin() {
         return { MAP_W / 2, MAP_H / 2 };
@@ -178,7 +186,7 @@ private:
     float cached_angle_increment_ = 0.0f;
     bool geometry_cache_valid_ = false;
 
-    // Góc lệch lắp đặt (độ). Mặc định -90 để raw 90° = phía trước xe.
+    // Góc lệch lắp đặt (độ). Mặc định +90: a_ROS -90° = phía trước xe.
     float mount_offset_deg_ = DEFAULT_MOUNT_OFFSET_DEG;
     float cached_mount_offset_ = 1e9f;   // giá trị vô nghĩa => cache chưa dùng
 };
