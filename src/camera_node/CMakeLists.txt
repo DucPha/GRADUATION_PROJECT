@@ -18,6 +18,7 @@ find_package(JPEG REQUIRED)
 # Thu vien detector, khong phu thuoc rclcpp
 add_library(camera_lane STATIC
   camera_node.cpp
+  path_tracker.cpp
 )
 
 # OpenCV_INCLUDE_DIRS bat buoc: OpenCV 4.6 tren Ubuntu khong export include tu ${OpenCV_LIBS}
@@ -35,7 +36,7 @@ ament_export_include_directories(include)
 ament_export_libraries(camera_lane)
 ament_export_dependencies(OpenCV JPEG)
 
-install(FILES camera_node.hpp
+install(FILES camera_node.hpp path_tracker.hpp
   DESTINATION include
 )
 

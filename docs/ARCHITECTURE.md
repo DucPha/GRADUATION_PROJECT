@@ -4,7 +4,7 @@
 
 | Package | Loại | Vai trò |
 |---|---|---|
-| `camera_node` | thư viện C++ (OpenCV + libjpeg) | `CameraLane`: đọc + giải mã MJPG, nhận 2 làn bằng cửa sổ trượt, vẽ overlay. Không phụ thuộc rclcpp |
+| `camera_node` | thư viện C++ (OpenCV + libjpeg) | `CameraLane`: đọc + giải mã MJPG, nhận làn bằng bám vạch mọi hướng trên mặt đất, vẽ overlay; `PathTracker`: nhớ đường + odometry + pure pursuit từ trục sau. Không phụ thuộc rclcpp |
 | `esp32s3_node` | thư viện C++ | `SerialESP32`: UART 11/7 byte, tự dò cổng bằng telemetry, tự kết nối lại |
 | `sllidar_ros2_node` | thư viện C++ | `LidarModule` + `ObstacleAvoidance` (chưa nối vào phase 1) |
 | `fusion_node` | node ROS 2 | node điều khiển duy nhất: nối 3 thư viện trên + timer + publisher |

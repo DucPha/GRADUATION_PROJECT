@@ -109,11 +109,10 @@ Khi khởi động, xe **luôn đứng yên** (gửi EMG) cho tới khi người
    `lane_lost_stop_ms` (400 ms).
 4. Cổng ESP32 mở (`serial=open`) và ESP32 nhận gói đều (watchdog 500 ms).
 
-Khi đủ, lệnh tốc độ = `speed_x10 × speed_scale` (giảm khi vào cua / ít cửa sổ thấy vạch),
-**không thấp hơn `speed_min_x10`** (mặc định 2.5 km/h). Lý do: ESC kẹp mọi tốc độ < 1.55
-km/h về PWM 95 — mức thấp nhất; xe đặt dưới đất ở mức đó thường không đủ lực thắng ma sát
-nên bánh đứng yên dù Mini PC đã gửi lệnh chạy. Đặt xe xuống mà bánh vẫn không quay thì
-tăng `speed_min_x10:=30` (hoặc 35).
+Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (7.5 km/h, đường thẳng) về
+`speed_corner_x10` (5.5 km/h, cua gắt) theo `speed_scale`; 1 vạch thì `speed_corner_x10`;
+**không thấp hơn `speed_min_x10`** (mặc định 5.0 km/h ≈ ESC 101). Lý do: động cơ BLDC chạy
+chậm (ESC 100, ~3.6 km/h) kêu cọt kẹt và dễ không đủ lực thắng ma sát.
 
 Dashboard gửi `std_msgs/Bool` lên `/autocar/run` 10 lần/giây. Không có dashboard vẫn cho
 chạy được bằng tay:
@@ -196,12 +195,12 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_exposure` | `-1` | -1 = phơi sáng tự động; > 0 = phơi sáng tay (100 µs), vd `250` để giữ 30 fps |
 | `horizon_frac` | `0.20` | **Chân trời** (tỉ lệ chiều cao ảnh). Vạch tím trên overlay phải đi qua điểm 2 vạch thẳng kéo dài gặp nhau. Sai giá trị này ⇒ ghép nhầm cặp vạch |
 | `camera_height_m` | `0.30` | Độ cao camera so với mặt đường (m), dùng đổi pixel → cm |
-| `roi_top_frac` | `0.52` | Đầu ROI tính từ trên xuống; nhỏ hơn = thấy xa hơn |
-| `speed_x10` | `30` | Tốc độ khi đủ 2 làn & đi thẳng; cua tự giảm theo độ cong (km/h × 10) |
-| `speed_hold_x10` | `15` | Tốc độ giữ hướng khi mất cả 2 vạch |
-| `speed_corner_x10` | `15` | Tốc độ khi chỉ thấy 1 vạch |
-| `speed_ramp_x10` | `8` | Mức tăng tốc, x10 mỗi giây (`8` = 0.8 km/h/s) |
-| `speed_min_x10` | `25` | Tốc độ nhỏ nhất khi đang chạy; bánh không quay thì tăng |
+| `roi_top_frac` | `0.48` | Đầu ROI tính từ trên xuống; nhỏ hơn = thấy xa hơn (ROI luôn phủ hết bề ngang) |
+| `speed_x10` | `75` | Tốc độ khi đủ 2 làn & đi thẳng (km/h × 10) |
+| `speed_hold_x10` | `50` | Tốc độ giữ hướng khi mất cả 2 vạch |
+| `speed_corner_x10` | `55` | Tốc độ vào cua: 1 vạch, hoặc 2 vạch cong gắt nhất |
+| `speed_ramp_x10` | `30` | Mức tăng tốc, x10 mỗi giây (`30` = 3 km/h/s); giảm tốc luôn tức thì |
+| `speed_min_x10` | `50` | Tốc độ nhỏ nhất khi đang chạy; BLDC kêu ở tốc độ thấp thì tăng |
 | `lane_lost_stop_ms` | `400` | Mất 2 làn quá lâu thì dừng |
 | `dev_sign` | `1` | `-1` nếu servo lắp ngược |
 | `require_start` | `true` | `true` = chỉ chạy khi bấm SPACE trên dashboard |
@@ -214,69 +213,112 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `lidar_mount_offset_deg` | `-90.0` | Góc lệch lắp LiDAR, `0` = trước, `90` = trái (REP-103) |
 | `log_level` | `info` | `debug` để in nhiều hơn |
 
-## Detector 2 làn (cửa sổ trượt)
+## Detector làn (bám vạch mọi hướng trên mặt đất)
 
 **Camera 1920x1080 MJPG** → tự giải mã bằng libjpeg-turbo ở **1/2 kích thước** (960x540,
 ~7 ms thay vì ~15 ms, và tắt cảnh báo `Corrupt JPEG data` mà camera này gây ra mỗi frame)
-→ cắt ROI → xám → thu về **320 cột, giữ đúng tỉ lệ 16:9 (320x180)** → Gaussian blur(5,5)
-→ **trừ nền** → Otsu + **ngưỡng trễ** trong hình thang → `CLOSE(5,15)` + `OPEN(3,3)` → sửa
-đứt đoạn.
+→ cắt ROI **hình chữ nhật phủ hết bề ngang ảnh** (không còn hình thang) → xám → thu về
+**320 cột, giữ đúng tỉ lệ 16:9 (320x180)** → Gaussian blur(5,5) → **trừ nền + bù lóa** →
+Otsu + **ngưỡng trễ** → bám vạch.
 
 Khung làm việc giữ đúng tỉ lệ ảnh gốc (1920x1080 → 320x180, 640x480 → 320x240), nên
 tiêu cự dọc = tiêu cự ngang và công thức pinhole đúng với mọi độ phân giải.
 
-**Cửa sổ trượt** — 6 cửa sổ, 3 cách quét, lấy cách có điểm cao nhất:
+**Bám vạch trên mặt đất, thay cho cửa sổ trượt theo hàng.** Cửa sổ trượt cũ chia ROI thành
+6 dải ngang và tìm 1 đỉnh cột trong mỗi dải, nên vạch nằm ngang / chéo màn hình ở cua gắt
+(1 vạch trải hết bề ngang dải) bị loại. Bản mới quét **toàn bộ ROI**:
 
-| Cách quét | Khi nào thắng |
-|---|---|
-| **PRIOR** — tìm quanh vị trí vạch của frame trước, biên ±18 px | xe đang bám làn tốt (ưu tiên khi hoà điểm ⇒ không giật) |
-| **XA → GẦN** — tìm cặp vạch ở cửa sổ xa, đoán vị trí theo phối cảnh | mới khởi động, vừa bắt lại làn |
-| **GẦN → XA** | vào cua gắt, vạch xa đã ra khỏi khung |
+1. Thành phần liên thông trên mask → đổi **từng pixel** sang toạ độ mặt đất (X sang phải,
+   Z về phía trước, mét) bằng pinhole.
+2. PCA tìm trục chính → chia đoạn 3 cm dọc trục → điểm tâm vạch từng đoạn + bề dày vạch.
+   Bề dày trung vị > 12 cm (bóng, vật cản) ⇒ loại. Không giả định vạch chạy dọc ảnh: vạch
+   dọc, chéo, nằm ngang đều bám như nhau. Overlay vẽ các ô vuông dọc theo vạch.
+3. **Nối đoạn đứt** (lóa, băng keo mòn): đoạn sau nằm trên đường kéo dài của đoạn trước
+   (khoảng hở ≤ 35 cm, lệch hướng ≤ 40°) thì nối.
+4. **Nhãn trái/phải:** ưu tiên khớp vạch của frame trước (≤ 12 cm); không khớp thì xét xe
+   nằm bên nào của vạch (hướng vạch = gần xe → xa xe). Ở cua phải gắt, vạch trái chạy từ
+   trái-gần sang phải-xa nhưng xe vẫn ở bên phải nó ⇒ vẫn là vạch trái.
+5. Chọn vạch trái/phải gần xe nhất, đo **bề rộng làn bằng khoảng cách vuông góc trên mặt
+   đất** (35–85 cm) ⇒ `2 LANES`; chỉ 1 vạch dùng được ⇒ `1 LANE`.
+6. **Đường tâm** = vạch dời vào trong nửa bề rộng làn theo **pháp tuyến** (phía có xe), nên
+   vẫn đúng khi chỉ còn 1 vạch nằm ngang trước mũi xe.
 
-Chọn cặp vạch theo bề rộng làn đã học (và cân đối quanh giữa ảnh), loại vạch rộng hơn
-bề rộng băng keo theo phối cảnh, loại cửa sổ 2 vạch chéo nhau hoặc quá sát.
+**`dev_px` của camera** (dùng khi `steer_mode:=camera`): pure pursuit tới điểm cách chân
+camera 0.70 m, cộng `0.4 × lệch ngang` gần xe, chặn nhảy 90 px, EMA 0.70 / 0.50.
+
+## Lái theo đường đã nhớ (`PathTracker`, mặc định `steer_mode:=track`)
+
+**Vấn đề:** camera chỉ thấy mặt đất từ ~0.47 m trước chân camera, chân camera lại nằm
+trước trục sau ~0.30 m. Ngắm theo điểm camera nhìn thấy ⇒ tầm nhìn thật ~1 m tính từ trục
+sau ⇒ xe bẻ lái khi còn cách cua ~0.4–0.5 m, cắt cua, đè vạch trong. Đẩy điểm ngắm xa hơn
+thì tới cua vạch đã ra khỏi khung hình.
+
+**Cách giải:**
+
+1. **Nhớ đường + odometry.** Đường tâm và 2 vạch được ghi vào bản đồ cục bộ (toạ độ thế
+   giới). Vị trí xe cập nhật 100 Hz bằng mô hình xe đạp (tốc độ lệnh + góc servo thật từ
+   telemetry). Mỗi frame được đặt đúng vị trí xe **lúc chụp** (bù trễ camera) rồi nối vào
+   đoạn đã nhớ ⇒ vùng mù giữa xe và ROI vẫn có đường.
+2. **Căn chỉnh tại mối nối:** đoạn nhớ được xoay + tịnh tiến cho khớp vị trí và hướng của
+   frame mới ⇒ sai số odometry (tốc độ, tỉ số lái) được camera sửa mỗi frame, không tích
+   luỹ. Frame lệch hẳn đường đã nhớ (nhận nhầm) bị bỏ, lệch 3 frame liền mới tin.
+3. **Pure pursuit từ trục sau**, tầm nhìn `0.35 + 0.20·v` m (kẹp 0.35–0.80), có dự đoán trước
+   trễ servo 80 ms ⇒ xe bẻ lái đúng lúc tới cua.
+4. **Vạch ảo + rào chắn:** vạch ra khỏi khung (vạch trong của cua gắt) vẫn được nhớ. Mép
+   thân xe cách vạch (thật hoặc ảo) < 4 cm tại bánh trước hoặc 25 cm trước đó ⇒ cộng góc đẩy
+   ra (tối đa 15°) ⇒ chạy 1 vạch mà không đè vạch còn lại.
+5. **Phân biệt vạch trái / phải** theo đoạn 25 cm gần xe nhất của vạch (xe nằm bên nào, xét
+   từ chân camera), ưu tiên khớp vạch frame trước. Vạch ngoài của cua gắt chạy ngang trước
+   mũi xe vẫn được nhận đúng; đường tâm luôn dời về phía có xe.
+6. **Dự đoán cua** (`turn=L/S/R` trên `/lane/status`, chữ trên bản đồ nhỏ) từ độ cong
+   đường tâm đoạn [bánh trước, +1.2 m], có trễ (vào > 0.6 1/m, ra < 0.3 1/m). Độ cong này
+   cũng giảm tốc trước khi camera thấy hết khúc cua.
+7. **Mất vạch:** chạy tiếp theo đường đã nhớ (tốc độ `speed_hold_x10`) tới khi còn < 25 cm
+   đường phía trước hoặc quá `lost_memory_ms`.
+
+Góc bánh mong muốn được đổi ngược ra `dev` theo đúng công thức firmware (deadzone, bão hoà,
+`STEER_KP`) nên **firmware không cần sửa thêm**. Ảnh overlay có **bản đồ nhỏ nhìn từ trên**
+ở góc phải: khung xe, đường tâm đã nhớ (vàng), vạch thật (xanh) / vạch ảo (tím), điểm ngắm
+(đỏ), vạch xám = mép gần nhất camera thấy được.
+
+**Mô phỏng vòng kín** (xe động học + render camera + detector + firmware servo, trễ camera
+40 ms, servo 500°/s), khoảng hở nhỏ nhất từ thân xe (rộng 20 cm) tới vạch, làn 55 cm:
+
+| Cua | `steer_mode:=camera` (cũ) | `steer_mode:=track` |
+|---|---|---|
+| R 0.6 m, 90°, phải / trái | đè vạch, văng 1.1–1.4 m | **+5 cm**, không đè |
+| R 0.5 m, 90° | đè vạch, văng 0.9–1.4 m | **+3 cm** |
+| R 0.8 m, 120° | đè vạch 0.7 m | **+4–6 cm** |
+| R 1.5 m, 60° | đè vạch 0.26 m | **+9 cm** |
+| Bánh trước bắt đầu bẻ lái (cua bắt đầu ở 1.50 m) | 1.05–1.18 m (sớm) | 1.48–1.56 m |
+
+Tốc độ thật lệch ±25 % so với lệnh: vẫn không đè vạch. Tỉ số lái sai 20 % (bánh quay ít
+hơn khai báo): chạm vạch ~2 cm ở cua R ≤ 0.8 m ⇒ **đo `steer_ratio` trước khi chạy** (xem
+`docs/TUNING.md` §7).
 
 **Hình học camera (quan trọng):** camera trên xe cúi xuống ~13° nên chân trời nằm ở ~20%
-chiều cao ảnh, không phải giữa ảnh. Bản trước giả định camera nhìn ngang (50%) ⇒ đổi
-pixel → mét sai ⇒ cặp 2 băng keo thật bị coi là "làn quá rộng" và bị loại, detector ghép
-vạch sàn bên ngoài với 1 băng keo ⇒ báo `1 LANE`, `dev` −147 px, servo đánh hết lái. Với
-`horizon_frac = 0.20` và giới hạn bề rộng 1 vạch nới lên 12 cm (băng keo bản rộng), cả 3
-ảnh chụp thật đều nhận đúng 2 băng keo.
+chiều cao ảnh, không phải giữa ảnh. Sai `horizon_frac` ⇒ đổi pixel → mét sai ⇒ bề rộng làn
+sai ⇒ ghép nhầm cặp vạch.
 
-**Chống lóa đèn trần — trừ nền (background subtraction):**
+**Chống lóa đèn trần:**
 
-1. **Ảnh nền** = phép đóng hình thái học (giãn rồi co) cửa sổ 61×5 px: mọi vật tối hẹp hơn
-   cửa sổ (vạch) bị "lấp" bằng màu sàn ngay cạnh, còn vệt lóa và độ sáng chung giữ nguyên.
-2. `diff = nền − ảnh`: vạch (kể cả đoạn bị lóa tráng sáng) ⇒ diff dương; sàn, lóa, vùng
-   sáng/tối dần ⇒ ~0; vật tối **rộng** hơn cửa sổ (bóng ghế) ⇒ nền tối theo ⇒ ~0, tự loại.
-3. **Ngưỡng trễ (hysteresis):** đoạn vạch trong vùng lóa chỉ còn diff 15–35 trong khi đoạn
-   ngoài lóa ~100, một ngưỡng Otsu sẽ cắt mất. Giữ pixel yếu (diff > 8) nếu nó **nối liền**
-   với pixel mạnh (diff > ngưỡng Otsu) ⇒ đoạn vạch bị lóa được nối lại với phần vạch còn rõ;
-   vân gỗ, vết bẩn rời rạc vẫn bị bỏ.
+1. **Ảnh nền** = phép đóng hình thái học (giãn rồi co) kernel **45×25** px: lấp vạch dọc
+   (rộng tới ~44 px) **và vạch nằm ngang** (dày tới ~24 hàng). Kernel cũ 61×5 chỉ lấp được
+   vạch dọc: vạch nằm ngang dày hơn 5 hàng bị coi là nền ⇒ mất sạch ở mask đúng lúc vào cua
+   gắt. Ước lượng nền trên ROI có thêm lề 13 hàng trên/dưới để mép ROI không sinh vệt giả.
+2. `diff = nền − ảnh`, rồi **bù lóa**: nhân `(255 − nền_trung_vị) / (255 − nền)` (kẹp 1..2.5).
+   Camera nén tương phản ở vùng sáng nên vạch trong vùng lóa chỉ còn tối hơn sàn vài mức xám;
+   hệ số này kéo nó lên ngang vạch ngoài vùng lóa.
+3. **Ngưỡng trễ:** giữ pixel yếu (diff > 7) nếu nó **nối liền** với pixel mạnh (diff >
+   ngưỡng Otsu) ⇒ đoạn vạch bị lóa được nối lại với phần vạch còn rõ.
 
-Thử trên ảnh tổng hợp có lóa phản xạ gương (độ tương phản còn 15%): bản cũ làm đứt vạch và
-sinh vệt giả hình cung ở rìa vùng lóa; bản mới cho mask liền mạch, không vệt giả, 10/10
-frame `2 LANES`. Đoạn vạch bị lóa trắng hoàn toàn (diff ≈ 0) vẫn được bước "sửa đứt đoạn"
-nội suy lại.
-
-**Ổn định hoá:**
-
-1. **Fit loại điểm lệch** — fit đường tâm bậc 2, bỏ tối đa 2 điểm lệch > 7 px rồi fit lại
-   (bóng đổ, vật lạ không kéo cả đường tâm).
-2. **Chặn nhảy** — `dev` mới lệch giá trị đang lọc > 60 px (ảnh 640) thì giữ giá trị cũ;
-   lệch như vậy 2 frame liền mới tin (vào cua thật). Overlay hiện dấu `*`.
-3. **EMA 0.40** trên `dev`.
-4. **Sửa đứt đoạn** (đèn trần rửa sáng vạch): nội suy vẽ lại tối đa 3 cửa sổ.
-
-**Quy ước `dev_px`:** luôn tính theo ảnh **tham chiếu rộng 640 px**, bất kể camera chạy
-độ phân giải nào. Firmware (deadzone 10 px, bão hoà 50 px) được chỉnh theo 640 px; bản
-cũ nhân theo ảnh gốc nên ở 1920x1080 `dev` lớn gấp 3 ⇒ đánh lái quá tay, xe lắc.
-
-Đo bề rộng làn ra cm bằng pinhole `W = w_px · h / (cos(pitch) · (y − horizon))`, không IPM.
+**Quy ước `dev_px`:** luôn tính theo ảnh **tham chiếu rộng 640 px** tại 0.65 m (~1.5 mm/px),
+bất kể camera chạy độ phân giải nào. `> 0` = lái phải.
 
 Kiểm thử ngoại tuyến: `CameraLane::process(bgr, out)` xử lý 1 ảnh có sẵn không cần camera.
-Trên chuỗi 40 ảnh tổng hợp 1920x1080 (nhiễu, vạch đứt, vật tối giữa làn) detector giữ
-`2 LANES` mọi frame, bề rộng đo 54.2–54.6 cm (thật 55 cm), xử lý ~0.9 ms/frame.
+Trên ảnh tổng hợp đúng mô hình camera (thẳng, lệch 12/22 cm, xoay 15°, cua R 0.55–2 m, cua
+gắt chỉ còn 1 vạch nằm ngang, lóa trên vạch) detector cho đúng trạng thái và đúng dấu
+`dev`, xử lý ~1 ms/frame.
 
 ## Giao thức UART (230400 8N1)
 
@@ -301,7 +343,7 @@ lệnh chạy mà ESP32 vẫn phát 90 ⇒ trạng thái `NO THROTTLE` kèm lý 
 **Vùng chết ESC.** `Servo.write(góc)` phát xung `1000 + góc·1000/180` µs: 90 → 1500 µs
 (dừng), 95 → 1527, 97 → 1538, 100 → 1555 µs. ESC xe RC có vùng chết quanh 1500 µs (thường
 ±30–50 µs) nên xung 95–97 bị coi là dừng: **giao tiếp đúng nhưng bánh không quay**. Firmware
-giờ không bao giờ ra ga dưới `ESC_START_FWD = 100` khi đang chạy, và "đề-pa" `ESC_KICK_FWD =
+giờ không bao giờ ra ga dưới `ESC_START_FWD = 101` khi đang chạy, và "đề-pa" `ESC_KICK_FWD =
 106` trong 300 ms khi bắt đầu lăn. Đo lại cho xe của bạn: đặt xe dưới sàn, chạy sketch
 `motor_test`, tăng dần từ 1% cho tới khi bánh vừa quay, đổi ra góc `95 + (pct−1)·85/99` rồi
 ghi vào `ESC_START_FWD`.
@@ -314,8 +356,8 @@ DTR/RTS cùng lúc để ESP32 không bị reset, và **tự mở lại cổng m
 | Trạng thái | `dev` | `speed` | `emg` |
 |---|---|---|---|
 | chưa bấm SPACE / mất heartbeat dashboard | 0 | 0 | **1** |
-| camera OK + đủ 2 làn | `dev_px × dev_sign` | `speed_x10 × speed_scale` (ramp) | 0 |
-| camera OK, chỉ 1 vạch | `dev_px × dev_sign` | `min(speed_corner_x10, speed_x10 × speed_scale)` | 0 |
+| camera OK + đủ 2 làn | `dev_px × dev_sign` | `corner + (speed_x10 − corner) × speed_scale` (ramp) | 0 |
+| camera OK, chỉ 1 vạch | `dev_px × dev_sign` | `speed_corner_x10` | 0 |
 | mất cả 2 vạch < `lane_lost_stop_ms` | giữ hướng lái cuối | `speed_hold_x10` | 0 |
 | mất cả 2 vạch ≥ `lane_lost_stop_ms` | 0 | 0 | **1** |
 | camera mất frame (> 200 ms) | 0 | 0 | **1** |
@@ -341,9 +383,9 @@ arduino-cli compile --fqbn esp32:esp32:esp32 --build-path /tmp/esp32build \
 arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 --input-dir /tmp/esp32build
 ```
 
-**Lái** (`calcSteer`): `góc = 90 ± STEER_KP · map(dev) + D`, với `map`: deadzone 10 px →
-0°, 50 px → 30°; `STEER_KP = 0.8`; khâu D tính trên tốc độ đổi góc đã lọc, giới hạn ±6°;
-servo quay tối đa 300°/s. Bản cũ tính `D = 1.5·Δgóc/0.01 s` nên mỗi frame camera mới làm
+**Lái** (`calcSteer`): `góc = 90 ± STEER_KP · map(dev) + D`, với `map`: deadzone 4 px →
+0°, 45 px → 30°; `STEER_KP = 1.0`; lọc `dev` `ALPHA_STEER = 0.5`; khâu D tính trên tốc độ
+đổi góc đã lọc, giới hạn ±6°; servo quay tối đa 500°/s. Bản cũ tính `D = 1.5·Δgóc/0.01 s` nên mỗi frame camera mới làm
 D vọt lên hàng chục độ ⇒ servo giật hết lái rồi mới về. Xe lắc qua lại thì giảm
 `STEER_KP`, vào cua không đủ gắt thì tăng.
 

@@ -40,8 +40,10 @@ constexpr int STEER_CENTER = 90;
 constexpr int STEER_MIN = 60;
 constexpr int STEER_MAX = 120;
 
-constexpr float CAM_DEADZONE = 10.0f;
-constexpr float CAM_MAX_DEV = 50.0f;
+// dev (px ảnh tham chiếu 640, ~1.5 mm/px ở 0.65 m). Deadzone nhỏ để lệch
+// 1 cm đã bắt đầu kéo về giữa làn; bão hoà sớm hơn để đánh lái mạnh hơn.
+constexpr float CAM_DEADZONE = 4.0f;
+constexpr float CAM_MAX_DEV = 45.0f;
 constexpr float BLINK_THRESH = 10.0f;
 
 constexpr int ESC_NEUTRAL = 90;
@@ -56,7 +58,8 @@ constexpr int ESC_MAX_FWD = 180;
 // ESC_START_FWD: muc ga nho nhat khi xe chay. Cach do: dat xe xuong san, chay
 // sketch motor_test tang dan tu 1% (=95) cho toi khi banh vua quay, doi % ra
 // goc (95 + (pct-1)*85/99) roi ghi vao day.
-constexpr int ESC_START_FWD = 100;
+// 101 (~5 km/h): dưới mức này động cơ BLDC quay chậm và kêu cọt kẹt.
+constexpr int ESC_START_FWD = 101;
 // "De-pa": tu dung yen sang chay, ghi ESC_KICK_FWD trong ESC_KICK_MS de thang
 // ma sat tinh, sau do moi ve muc ga cua toc do dat.
 constexpr int ESC_KICK_FWD = 106;
@@ -75,12 +78,13 @@ constexpr float STOPPED_KMH = 0.3f;
 
 // ---- Lái ----
 // Mini PC đã lọc dev (chặn nhảy + EMA) nên ở đây chỉ lọc nhẹ để mượt servo.
-constexpr float ALPHA_STEER = 0.25f;
+// 0.5 ở 100 Hz: hằng số thời gian ~15 ms (bản cũ 0.25 ~ 35 ms).
+constexpr float ALPHA_STEER = 0.5f;
 
 // Góc lái = STEER_KP * map(dev) + D. map(): deadzone CAM_DEADZONE px, bão hoà
-// ở CAM_MAX_DEV px -> 0..30°. Xe lắc qua lại thì giảm STEER_KP; vào cua
-// không đủ gắt thì tăng (tối đa 1.0).
-constexpr float STEER_KP = 0.8f;
+// ở CAM_MAX_DEV px -> 0..30°. KP = 1.0 dùng hết 30° cho cua gắt. Xe lắc qua
+// lại trên đường thẳng thì giảm STEER_KP (0.8).
+constexpr float STEER_KP = 1.0f;
 
 // Khâu D tính trên tốc độ thay đổi của góc đã lọc (độ/giây), lọc thông thấp
 // thêm 1 lần và giới hạn ±STEER_D_MAX độ để KHÔNG bị giật mỗi khi có frame mới.
@@ -89,7 +93,7 @@ constexpr float STEER_D_ALPHA = 0.2f;   // lọc đạo hàm
 constexpr float STEER_D_MAX = 6.0f;     // độ
 
 // Tốc độ quay tối đa của lệnh servo (độ/giây): chặn giật cơ khí
-constexpr float STEER_RATE_DEG_S = 300.0f;
+constexpr float STEER_RATE_DEG_S = 500.0f;
 
 constexpr uint32_t UART_BAUD = 230400; 
 constexpr size_t RX_BUF_SIZE = 4096;
