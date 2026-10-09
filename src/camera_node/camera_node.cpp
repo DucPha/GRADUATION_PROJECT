@@ -105,6 +105,7 @@ CameraLane::CameraLane(int camera_index, int target_fps, int width, int height,
   h_ = std::max(0.05f, profile_.height_m);
   roi_bottom_frac_ = std::clamp(profile_.roi_bottom_frac, 0.1f, 1.0f);
   lane_w_m_ = std::clamp(profile_.lane_width_m, 0.2f, 1.0f);
+  lane_w_local_ = lane_w_m_;
   pitch_ = std::clamp(static_cast<double>(profile_.pitch_deg), 1.0, 85.0) *
            CV_PI / 180.0;
 
@@ -502,6 +503,11 @@ void CameraLane::get_latest(LaneOutput &out, bool copy_vis) const {
   out.stamp = latest_.stamp;
   out.gated = latest_.gated;
   out.horizon_frac = latest_.horizon_frac;
+  out.proj_f = latest_.proj_f;
+  out.proj_cx = latest_.proj_cx;
+  out.proj_cy = latest_.proj_cy;
+  out.proj_h = latest_.proj_h;
+  out.proj_pitch = latest_.proj_pitch;
   out.frame_w = latest_.frame_w;
   out.frame_h = latest_.frame_h;
   out.proc_ms = latest_.proc_ms;

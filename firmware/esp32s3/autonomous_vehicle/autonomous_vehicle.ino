@@ -36,14 +36,18 @@ constexpr uint8_t PIN_HALL   = 4;
 // ============================================================================
 // [2] THÔNG SỐ VẬT LÝ & ĐIỀU KHIỂN (PARAMETERS)
 // ============================================================================
+// ±35° (2026-10-09, trước ±30°): đánh lái rộng hơn ở cua. Servo kêu rè / gồng
+// khi đánh hết lái = chạm cữ cơ khí -> giảm về 57/123.
 constexpr int STEER_CENTER = 90;
-constexpr int STEER_MIN = 60;
-constexpr int STEER_MAX = 120;
+constexpr int STEER_MIN = 55;
+constexpr int STEER_MAX = 125;
 
 // dev (px ảnh tham chiếu 640, ~1.5 mm/px ở 0.65 m). Deadzone nhỏ để lệch
-// 1 cm đã bắt đầu kéo về giữa làn; bão hoà sớm hơn để đánh lái mạnh hơn.
+// 1 cm đã bắt đầu kéo về giữa làn. Độ dốc giữ nguyên 30° / 41 px như bản ±30°
+// (Mini PC cũ / mới đều ra đúng góc), chỉ bão hoà muộn hơn: 4 px -> 0°,
+// ~52 px -> 35°.
 constexpr float CAM_DEADZONE = 4.0f;
-constexpr float CAM_MAX_DEV = 45.0f;
+constexpr float CAM_MAX_DEV = CAM_DEADZONE + 41.0f * (STEER_MAX - STEER_CENTER) / 30.0f;
 constexpr float BLINK_THRESH = 10.0f;
 
 constexpr int ESC_NEUTRAL = 90;
@@ -55,11 +59,31 @@ constexpr int ESC_MAX_FWD = 180;
 // 95 -> 1527 us, 97 -> 1538 us, 100 -> 1555 us. ESC xe RC co VUNG CHET quanh
 // 1500 us (thuong +-30..50 us): xung 95-97 nam trong/sat vung chet -> ESC coi
 // la dung, banh KHONG quay du Mini PC da gui lenh chay.
-// ESC_START_FWD: muc ga nho nhat khi xe chay. Cach do: dat xe xuong san, chay
-// sketch motor_test tang dan tu 1% (=95) cho toi khi banh vua quay, doi % ra
-// goc (95 + (pct-1)*85/99) roi ghi vao day.
-// 101 (~5 km/h): dưới mức này động cơ BLDC quay chậm và kêu cọt kẹt.
-constexpr int ESC_START_FWD = 101;
+// SAN GA (muc nho nhat khi xe chay). Cach do: dat xe xuong san, chay sketch
+// motor_test tang dan tu 1% (=95) cho toi khi banh vua quay, doi % ra goc
+// (95 + (pct-1)*85/99). Do duoc: 101 (1561 us, ~5 km/h); duoi muc nay dong co
+// BLDC quay cham va keu cot ket.
+// XUNG ESC THAT (do 09/10): thu vien ESP32Servo mac dinh timer 10 bit ->
+// xung chi co buoc 20000/1024 = 19.53 us. Servo.write(goc) ra
+// 1000 + goc*1000/180 us roi CAT xuong boi so 19.53 us:
+//   90 -> 1484.4 us (neutral)   95 -> 1523.4    100, 101 -> 1543.0 (CUNG xung)
+//   102, 103, 104 -> 1562.5     105, 106 -> 1582.0
+// => san "101" thuc ra = 100 (BLDC keu), moi lenh 5.0-5.8 km/h deu ra 1543,
+// 5.9-7.9 km/h deu ra 1562.5: toc do chi nhay 2 bac, giam toc vao cua giat.
+// Nay ESC dung timer 16 bit (0.3 us / buoc). Cac muc cu (neutral, phanh,
+// de-pa, cac diem ESC_LUT) giu DUNG xung that cu (escLegacyUs) -> ESC thay
+// y het ban cu; chi phan GIUA cac muc la moi (noi suy theo us).
+constexpr int ESC_TIMER_BITS = 16;
+constexpr float ESC_US_PER_TICK = 20000.0f / (1 << ESC_TIMER_BITS);
+// SAN GA khi xe chay (us). Ban cu 1543 us: BLDC con keu (nhat la vao cua).
+// 1562.5 us (toc do duong thang cu) khong keu. Van keu thi tang 2-3 us; muon
+// cham hon thi giam, KHONG xuong duoi 1543. (Node con co speed_min_x10: san
+// that = max(ESC_START_US, xung cua speed_min_x10), tang duoc khong can nap.)
+constexpr float ESC_START_US = 1550.0f;
+// BU TAI KHI DANH LAI: banh truoc be goc thi ma sat lon, cung muc xung dong co
+// quay cham lai -> BLDC tut vong, keu dung luc vao cua. Cong them toi da
+// ESC_STEER_BOOST_US khi servo het lai (ti le |goc lai| / 35 do). 0 = tat.
+constexpr float ESC_STEER_BOOST_US = 3.0f;
 // "De-pa": tu dung yen sang chay, ghi ESC_KICK_FWD trong ESC_KICK_MS de thang
 // ma sat tinh, sau do moi ve muc ga cua toc do dat.
 constexpr int ESC_KICK_FWD = 106;
@@ -82,7 +106,7 @@ constexpr float STOPPED_KMH = 0.3f;
 constexpr float ALPHA_STEER = 0.5f;
 
 // Góc lái = STEER_KP * map(dev) + D. map(): deadzone CAM_DEADZONE px, bão hoà
-// ở CAM_MAX_DEV px -> 0..30°. KP = 1.0 dùng hết 30° cho cua gắt. Xe lắc qua
+// ở CAM_MAX_DEV px -> 0..35°. KP = 1.0 dùng hết 35° cho cua gắt. Xe lắc qua
 // lại trên đường thẳng thì giảm STEER_KP (0.8).
 constexpr float STEER_KP = 1.0f;
 
@@ -159,7 +183,9 @@ bool got_packet = false;   // da nhan it nhat 1 goi hop le tu Mini PC
 uint32_t next_pid_us = 0;
 bool pid_timer_init = false;
 
-int last_esc = ESC_NEUTRAL;
+int last_esc = ESC_NEUTRAL;      // goc tuong duong xung that (telemetry)
+float last_esc_us = 0.0f;        // xung that dang phat (us), 0 = chua ghi
+int last_esc_ticks = -1;
 int last_steer = STEER_CENTER;
 
 struct EscMap {
@@ -237,24 +263,45 @@ void readUART() {
   }
 }
 
-int getBasePWM(float spd) {
-  if (spd < 0.5f) return ESC_NEUTRAL;
-  if (spd < ESC_LUT[2].spd) return ESC_MIN_FWD;
+// Xung THAT (us) ban cu phat ra khi goi Servo.write(deg) voi timer 10 bit:
+// map(deg, 0, 180, 1000, 2000) roi cat xuong boi so 20000/1024 us
+float escLegacyUs(int deg) {
+  constexpr float tick10 = 20000.0f / 1024.0f;
+  const long us = 1000L + (long)deg * 1000L / 180L;
+  return (float)(long)(us / tick10) * tick10;
+}
+
+// Ghi xung ESC (us, cho phep le) neu khac xung dang phat. last_esc = goc
+// tuong duong cua xung THAT (telemetry: 1543 us -> 98, 1552 -> 99, 1562.5 -> 101)
+void escWriteUs(float us) {
+  const int ticks = (int)lroundf(us / ESC_US_PER_TICK);
+  if (ticks == last_esc_ticks) return;
+  motor_esc.writeTicks(ticks);
+  last_esc_ticks = ticks;
+  last_esc_us = ticks * ESC_US_PER_TICK;
+  last_esc = (int)lroundf((last_esc_us - 1000.0f) * 0.18f);
+}
+
+// Toc do (km/h) -> xung (us): noi suy ESC_LUT theo xung THAT cua tung diem
+float getBaseUs(float spd) {
+  if (spd < 0.5f) return escLegacyUs(ESC_NEUTRAL);
+  if (spd < ESC_LUT[2].spd) return escLegacyUs(ESC_MIN_FWD);
 
   for (size_t i = 0; i + 1 < LUT_SIZE; ++i) {
     if (spd >= ESC_LUT[i].spd && spd < ESC_LUT[i + 1].spd) {
-      float dSpd = ESC_LUT[i + 1].spd - ESC_LUT[i].spd;
-      if (dSpd <= 0.0f) return ESC_LUT[i].pwm;
-      float ratio = (spd - ESC_LUT[i].spd) / dSpd;
-      return roundf(ESC_LUT[i].pwm + ratio * (ESC_LUT[i + 1].pwm - ESC_LUT[i].pwm));
+      const float u0 = escLegacyUs(ESC_LUT[i].pwm);
+      const float u1 = escLegacyUs(ESC_LUT[i + 1].pwm);
+      const float dSpd = ESC_LUT[i + 1].spd - ESC_LUT[i].spd;
+      if (dSpd <= 0.0f) return u0;
+      return u0 + (spd - ESC_LUT[i].spd) / dSpd * (u1 - u0);
     }
   }
-  return ESC_LUT[LUT_SIZE - 1].pwm;
+  return escLegacyUs(ESC_LUT[LUT_SIZE - 1].pwm);
 }
 
 // Tính góc servo từ dev (px ảnh tham chiếu 640, dev < 0 = tâm làn lệch trái).
 //   1. Lọc EMA dev.
-//   2. map(|dev|): deadzone CAM_DEADZONE -> 0°, CAM_MAX_DEV -> 30°.
+//   2. map(|dev|): deadzone CAM_DEADZONE -> 0°, CAM_MAX_DEV -> 35°.
 //   3. P = STEER_KP * góc; D = STEER_KD * d(góc)/dt (đã lọc, có giới hạn).
 //   4. Giới hạn tốc độ quay servo STEER_RATE_DEG_S.
 // Bản cũ lấy D = 1.5 * Δgóc / 0.01 s: mỗi frame camera mới làm D vọt lên
@@ -302,23 +349,22 @@ void runPID(uint32_t now) {
     static uint32_t kick_until_ms = 0;
     const uint32_t now_ms = millis();
 
-    int target_pwm = getBasePWM(car.target_spd);
-    if (target_pwm > ESC_NEUTRAL) {
-      // Dang chay: khong de ga roi vao vung chet cua ESC
-      target_pwm = max(target_pwm, ESC_START_FWD);
+    const float neutral_us = escLegacyUs(ESC_NEUTRAL);
+    float us = neutral_us;
+    if (car.target_spd >= 0.5f) {
+      // Dang chay: khong de ga xuong duoi san (vung chet ESC / BLDC keu)
+      us = max(getBaseUs(car.target_spd), ESC_START_US);
+      // Bu tai theo goc lai dang ra lenh (chu ky truoc)
+      const float steer_frac = fabsf(steer.out - STEER_CENTER) / (float)(STEER_MAX - STEER_CENTER);
+      us += ESC_STEER_BOOST_US * constrain(steer_frac, 0.0f, 1.0f);
       // Vua tu dung yen (ESC dang neutral) chuyen sang chay -> de-pa
-      if (last_esc <= ESC_NEUTRAL) kick_until_ms = now_ms + ESC_KICK_MS;
-      if ((int32_t)(kick_until_ms - now_ms) > 0) target_pwm = max(target_pwm, ESC_KICK_FWD);
-      car.esc_cmd = constrain(target_pwm, ESC_MIN_FWD, ESC_MAX_FWD);
-    } else {
-      // Lenh toc do ~0 nhung khong EMG: dung (truoc day bi kep len 95 -> bo)
-      car.esc_cmd = ESC_NEUTRAL;
+      if (last_esc_us <= neutral_us + 1.0f) kick_until_ms = now_ms + ESC_KICK_MS;
+      if ((int32_t)(kick_until_ms - now_ms) > 0) us = max(us, escLegacyUs(ESC_KICK_FWD));
+      us = constrain(us, escLegacyUs(ESC_MIN_FWD), escLegacyUs(ESC_MAX_FWD));
     }
-
-    if (car.esc_cmd != last_esc) {
-      motor_esc.write(car.esc_cmd);
-      last_esc = car.esc_cmd;
-    }
+    // Lenh toc do ~0 nhung khong EMG: dung (truoc day bi kep len 95 -> bo)
+    escWriteUs(us);
+    car.esc_cmd = last_esc;
   }
 
   calcSteer(DT_SEC);
@@ -339,10 +385,10 @@ void processBrake() {
   if (!car.braking) { car.braking = true; phase = 0; start_ms = now; }
 
   if (phase == 0) {
-    if (last_esc != ESC_BRAKE) { motor_esc.write(ESC_BRAKE); last_esc = ESC_BRAKE; }
+    escWriteUs(escLegacyUs(ESC_BRAKE));
     if (now - start_ms >= BRAKE_HOLD_MS) { phase = 1; start_ms = now; }
   } else {
-    if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
+    escWriteUs(escLegacyUs(ESC_NEUTRAL));
     car.esc_cmd = ESC_NEUTRAL;
     car.braking = false;
   }
@@ -356,7 +402,7 @@ void checkSafety() {
   if (!car.emg_stop) {
     if (car.braking) {
       car.braking = false;
-      if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
+      escWriteUs(escLegacyUs(ESC_NEUTRAL));
       car.esc_cmd = ESC_NEUTRAL; 
     }
     return;
@@ -366,7 +412,7 @@ void checkSafety() {
   
   if (car.cur_spd > STOPPED_KMH) { processBrake(); return; }
 
-  if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
+  escWriteUs(escLegacyUs(ESC_NEUTRAL));
   car.esc_cmd = ESC_NEUTRAL;
 }
 
@@ -410,7 +456,9 @@ void setup() {
   servo_steer.write(STEER_CENTER);
 
   motor_esc.attach(PIN_ESC, 1000, 2000);
-  motor_esc.write(ESC_NEUTRAL);
+  // attach() luon dat lai timer 10 bit -> doi sang 16 bit SAU attach
+  motor_esc.setTimerWidth(ESC_TIMER_BITS);
+  escWriteUs(escLegacyUs(ESC_NEUTRAL));
 
   last_packet_ms = millis();
   next_pid_us = micros() + PID_DT_US;

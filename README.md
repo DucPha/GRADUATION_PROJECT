@@ -110,10 +110,12 @@ Khi khởi động, xe **luôn đứng yên** (gửi EMG) cho tới khi người
    vạch bám ổn định) `lane_start_frames` frame là **tự chạy lại**.
 4. Cổng ESP32 mở (`serial=open`) và ESP32 nhận gói đều (watchdog 500 ms).
 
-Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (7.0 km/h ≈ ESC 103, đường thẳng) về
-`speed_corner_x10` (5.0 km/h ≈ ESC 101, cua gắt) theo `speed_scale`; 1 vạch thì `speed_corner_x10`;
-**không thấp hơn `speed_min_x10`** (mặc định 5.0 km/h ≈ ESC 101). Lý do: động cơ BLDC chạy
-chậm (ESC 100, ~3.6 km/h) kêu cọt kẹt và dễ không đủ lực thắng ma sát.
+Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy liên tục từ `speed_x10` (1563 µs, đường thẳng, xe
+lệch ≤ 3 cm) về `speed_corner_x10` (1556 µs, cua gắt / xe lệch ≥ 7 cm); 1 vạch thì
+tương tự nhưng tối đa `speed_one_x10`; thấy cua phía trước thì nhả ga sớm
+(`coast_decel_mps2`, `corner_margin_m`, xem `docs/TUNING.md` §4);
+**không thấp hơn `speed_min_x10`** (mặc định 50 = 1552 µs). Lý do: động cơ BLDC chạy
+chậm (1543 µs, sàn bản cũ) kêu cọt kẹt và dễ không đủ lực thắng ma sát (xem `docs/TUNING.md` §4b).
 
 Dashboard gửi `std_msgs/Bool` lên `/autocar/run` 10 lần/giây. Không có dashboard vẫn cho
 chạy được bằng tay:
@@ -195,23 +197,32 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_width` / `camera_height` | `1920` / `1080` | độ phân giải xin camera (MJPG) |
 | `camera_fps` | `30` | FPS yêu cầu |
 | `camera_exposure` | `-1` | -1 = phơi sáng tự động; > 0 = phơi sáng tay (100 µs), vd `250` để giữ 30 fps |
-| `camera_pitch_deg` | `42.0` | **Góc cúi camera** (đo trên ảnh thật). `camera_auto_pitch:=true` để tự hiệu chỉnh (mặc định tắt: ước lượng nhảy 1–2°) |
+| `camera_pitch_deg` | `35.9` | **Góc cúi camera** (đo trên ảnh live 09/10; trước khi ngửa camera là 42). `camera_auto_pitch:=true` để tự hiệu chỉnh (mặc định tắt: ước lượng nhảy 1–2°) |
 | `camera_height_m` | `0.30` | Độ cao camera so với mặt sàn (m) |
 | `camera_vfov_deg` | `51.0` | Góc nhìn dọc của camera (giống nhau ở 1080p và 640×480) |
 | `lane_width_m` | `0.42` | Bề rộng làn tâm vạch – tâm vạch (tự học lại) |
 | `roi_top_frac` | `0.0` | Bỏ qua phần trên cùng ảnh (mặc định dùng hết) |
-| `speed_x10` | `70` | Tốc độ khi đủ 2 làn & đi thẳng (km/h × 10), ≈ ESC 103; cua nhẹ ESC 102, cua gắt ESC 101 |
+| `speed_x10` | `66` | Tốc độ khi đủ 2 làn, đi thẳng và xe giữa làn (lệch ≤ 3 cm) (km/h × 10), 1563 µs = xung đường thẳng cũ; cua / xe lệch ≥ 7 cm về `speed_corner_x10` |
+| `speed_one_x10` | `66` | Chỉ thấy 1 vạch trên đường thẳng, xe giữa làn (1563 µs); cua / xe lệch về `speed_corner_x10` |
 | `speed_hold_x10` | `50` | Tốc độ giữ hướng khi mất cả 2 vạch |
-| `speed_corner_x10` | `50` | Tốc độ vào cua: 1 vạch, hoặc 2 vạch cong gắt nhất (≈ ESC 101) |
+| `speed_corner_x10` | `55` | Tốc độ ở cua RỘNG (R ≥ 1.1 m): 1556 µs (bản cũ 1543) |
+| `speed_tight_x10` | `50` | Tốc độ ở cua GẮT (R ≤ 0.8 m), nội suy theo độ cong lớn nhất phía trước (`corner_k_easy` 0.9 → `corner_k_tight` 1.25 1/m) |
+| `steer_slow_start_deg` / `steer_slow_full_deg` | `4` / `10` | Bánh đang bẻ ≥ 4° bắt đầu, ≥ 10° ghim hẳn tốc độ về tốc độ cua: chưa tăng tốc khi xe còn trong cua |
 | `speed_ramp_x10` | `30` | Mức tăng tốc, x10 mỗi giây (`30` = 3 km/h/s); giảm tốc luôn tức thì |
-| `speed_min_x10` | `50` | Tốc độ nhỏ nhất khi đang chạy; BLDC kêu ở tốc độ thấp thì tăng |
+| `speed_min_x10` | `50` | Tốc độ nhỏ nhất khi đang chạy (1552 µs); BLDC còn kêu thì tăng 2–3 |
+| `coast_decel_mps2` / `corner_margin_m` | `0.7` / `0.20` | Giảm tốc trước cua: thấy cua cách d m ⇒ tốc độ ≤ √(v_cua² + 2·a·(d − margin)). Vẫn vọt cua ⇒ giảm `coast_decel_mps2` |
 | `lane_lost_stop_ms` | `2500` | Mất 2 làn quá lâu thì dừng (thấy lại làn thì tự chạy) |
 | `lane_start_frames` | `3` | Bấm chạy / mất làn đã dừng: chạy khi thấy làn (2 vạch hoặc 1 vạch ổn định) bấy nhiêu frame liên tiếp (`LANE_START_FRAMES` bản Python) |
 | `cam_to_rear_axle_m` | `0.18` | **Đo trên xe** (~18 cm): trục sau → điểm ngay dưới camera. Sai 0.15 m là xe chạy đè vạch (xem `docs/TUNING.md` §7) |
 | `steer_ratio` | `0.6` | Góc bánh / góc servo. Xe bắt về phía ngoài cua ⇒ giảm; xe cắt vào trong cua / lắc ⇒ tăng |
-| `single_search_m` | `0.08` | Chỉ thấy 1 vạch: dời tâm bám về phía vạch bị mất tối đa 8 cm ⇒ xe lái vào trong tìm lại vạch kia |
+| `single_search_m` / `single_search_rate` | `0.08` / `0.30` | Chỉ thấy 1 vạch, vạch kia **nằm ngoài khung** (xe lệch), đường thẳng: dời tâm bám về phía vạch bị mất tối đa 8 cm, 0.3 m/s ⇒ xe lái mạnh về phía đó tìm lại vạch kia. Trong cua tự tắt dần |
+| `single_search_view_m` | `0.25` | Vạch kia lẽ ra nằm trong khung ≥ bấy nhiêu m mà không thấy (mờ / lóa) ⇒ không dời tâm, giữ xe giữa làn theo vạch còn lại |
+| `corner_gain` | `1.25` | Trong cua nhân góc lái pure pursuit với hệ số này (đánh lái mạnh hơn), `1` = tắt |
+| `car_half_width_m` / `tape_half_m` / `line_margin_m` | `0.125` / `0.035` / `0.02` | Rào chắn vạch: nửa bề ngang xe (xe rộng 25 cm) / nửa bề rộng băng keo / khoảng hở tối thiểu tới mép băng keo |
 | `xte_gain` / `xte_ki` | `2.0` / `50` | Phản hồi lệch ngang P / I tại chân camera (bù trim servo, camera lắp lệch) |
-| `steer_filter_s` | `0.08` | Lọc góc bánh (s) ở chế độ `track`, `0` = tắt (`STEER_FILTER_SEC` bản Python) |
+| `lookahead_corner_scale` | `0.7` | Tầm nhìn pure pursuit tự co về 0.7 lần trong cua (bám sát cung cua), `1` = tắt |
+| `steer_filter_s` | `0.12` | Lọc góc bánh (s) trên đường thẳng ở chế độ `track` (Python 0.08): lớn = ít lái lung tung, `0` = tắt |
+| `steer_filter_corner_s` | `0.03` | Lọc góc bánh trong cua (độ cong 0.4 → 1.0 1/m giảm dần từ `steer_filter_s` về mức này): bẻ lái vào cua dứt khoát hơn |
 | `dev_sign` | `1` | `-1` nếu servo lắp ngược |
 | `require_start` | `true` | `true` = chỉ chạy khi bấm SPACE trên dashboard |
 | `start_timeout_ms` | `600` | Mất heartbeat `/autocar/run` quá mức này ⇒ dừng |
@@ -290,6 +301,9 @@ Góc bánh mong muốn được đổi ngược ra `dev` theo đúng công thứ
 `STEER_KP`) nên **firmware không cần sửa thêm**. Ảnh overlay có **bản đồ nhỏ nhìn từ trên**
 ở góc phải: khung xe, đường tâm đã nhớ (vàng), vạch thật (xanh) / vạch ảo (tím), điểm ngắm
 (đỏ), vạch xám = mép gần nhất camera thấy được.
+Trên chính ảnh camera còn vẽ **đường xe đang bám** (xanh lơ, dày): đường tâm đã nhớ chiếu lại
+lên ảnh, từ sát đầu xe (vùng camera không thấy, lấp bằng bộ nhớ + odometry) tới hết đoạn đã
+nhớ phía trước; vạch nhớ màu xám nhạt; chấm xanh lơ + số mét = điểm ngắm (tầm nhìn tự co trong cua).
 
 **Mô phỏng vòng kín** (xe động học + render camera + detector + firmware servo, trễ camera
 40 ms, servo 500°/s), khoảng hở nhỏ nhất từ thân xe (rộng 20 cm) tới vạch, làn 55 cm:
@@ -306,7 +320,7 @@ Tốc độ thật lệch ±25 % so với lệnh: vẫn không đè vạch. Tỉ
 hơn khai báo): chạm vạch ~2 cm ở cua R ≤ 0.8 m ⇒ **đo `steer_ratio` trước khi chạy** (xem
 `docs/TUNING.md` §7).
 
-**Hình học camera (quan trọng):** camera trên xe cúi xuống ~42° (đo trên ảnh thật), chân
+**Hình học camera (quan trọng):** camera trên xe cúi xuống ~36° (đo trên ảnh thật 09/10), chân
 trời nằm TRÊN mép ảnh. Detector chiếu ảnh xuống mặt sàn (BEV) bằng `camera_pitch_deg` /
 `camera_height_m` / `camera_vfov_deg`; sai góc cúi ⇒ bề rộng làn sai ⇒ ghép nhầm cặp vạch
 (góc cúi tự hiệu chỉnh khi chạy thẳng thấy 2 vạch).
@@ -354,10 +368,10 @@ lệnh chạy mà ESP32 vẫn phát 90 ⇒ trạng thái `NO THROTTLE` kèm lý 
 **Vùng chết ESC.** `Servo.write(góc)` phát xung `1000 + góc·1000/180` µs: 90 → 1500 µs
 (dừng), 95 → 1527, 97 → 1538, 100 → 1555 µs. ESC xe RC có vùng chết quanh 1500 µs (thường
 ±30–50 µs) nên xung 95–97 bị coi là dừng: **giao tiếp đúng nhưng bánh không quay**. Firmware
-giờ không bao giờ ra ga dưới `ESC_START_FWD = 101` khi đang chạy, và "đề-pa" `ESC_KICK_FWD =
-106` trong 300 ms khi bắt đầu lăn. Đo lại cho xe của bạn: đặt xe dưới sàn, chạy sketch
-`motor_test`, tăng dần từ 1% cho tới khi bánh vừa quay, đổi ra góc `95 + (pct−1)·85/99` rồi
-ghi vào `ESC_START_FWD`.
+giờ không bao giờ ra ga dưới `ESC_START_US = 1550` µs khi đang chạy, và "đề-pa" `ESC_KICK_FWD =
+106` (1582 µs thật) trong 300 ms khi bắt đầu lăn. Lưu ý: ESP32Servo mặc định timer 10 bit nên
+xung thật là bội số 19.53 µs (101 → 1543, 102 → 1562.5 µs); firmware giờ ghi ESC bằng timer 16
+bit, giữ đúng các mức xung thật cũ — bảng ở `docs/TUNING.md` §4b.
 
 Driver Mini PC mở cổng ở chế độ raw non-blocking (không bao giờ chặn vòng điều khiển), hạ
 DTR/RTS cùng lúc để ESP32 không bị reset, và **tự mở lại cổng mỗi giây** khi rút cáp.
@@ -395,7 +409,7 @@ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 --input-dir /tmp/esp
 ```
 
 **Lái** (`calcSteer`): `góc = 90 ± STEER_KP · map(dev) + D`, với `map`: deadzone 4 px →
-0°, 45 px → 30°; `STEER_KP = 1.0`; lọc `dev` `ALPHA_STEER = 0.5`; khâu D tính trên tốc độ
+0°, ~52 px → 35° (servo 55..125; độ dốc giữ như bản ±30° cũ: 30° / 41 px); `STEER_KP = 1.0`; lọc `dev` `ALPHA_STEER = 0.5`; khâu D tính trên tốc độ
 đổi góc đã lọc, giới hạn ±6°; servo quay tối đa 500°/s. Bản cũ tính `D = 1.5·Δgóc/0.01 s` nên mỗi frame camera mới làm
 D vọt lên hàng chục độ ⇒ servo giật hết lái rồi mới về. Xe lắc qua lại thì giảm
 `STEER_KP`, vào cua không đủ gắt thì tăng.

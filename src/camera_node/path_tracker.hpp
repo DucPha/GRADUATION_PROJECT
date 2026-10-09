@@ -39,10 +39,16 @@ struct VehicleParams {
   double lookahead_min_m = 0.35;   // Ld = clamp(min + gain * v, min, max)
   double lookahead_max_m = 0.80;
   double lookahead_gain_s = 0.20;
+  // Trong cua nhan Ld voi he so nay (cham toi lookahead_min_m), 1 = tat.
+  // Thu vong kin 09/10: 0.7 -> cham vach 20 % -> 17 %, vot cua giam.
+  double lookahead_corner_scale = 0.7;
   double camera_latency_s = 0.04;   // chup -> nhan diem (phoi sang + USB + giai ma)
   double actuator_latency_s = 0.08; // lenh -> servo quay toi
-  double car_half_width_m = 0.10;   // nua be ngang xe (tinh tu tam banh)
-  double line_margin_m = 0.04;      // khoang trong toi thieu con lai toi vach
+  // Xe rong 25 cm (do 2026-10-09), bang keo 7 cm, lan 0.42 m tam-tam: xe
+  // giua lan chi con ~5 cm moi ben toi MEP bang keo.
+  double car_half_width_m = 0.125;  // nua be ngang xe
+  double tape_half_m = 0.035;       // nua be rong bang keo (vach = tam bang keo)
+  double line_margin_m = 0.02;      // khoang trong toi thieu con lai toi mep vach
   double guard_gain_deg_per_m = 150.0;
   // Phan hoi LECH NGANG (kieu Stanley): cong them
   // atan(xte_gain * e / (v + xte_soft_mps)), e = khoang cach tu chan camera
@@ -56,6 +62,11 @@ struct VehicleParams {
   // thang va trong cua dai. Don vi: do banh / (m * s); gioi han +-xte_i_max_deg.
   double xte_ki = 50.0;
   double xte_i_max_deg = 6.0;
+  // DANH LAI MANH HON TRONG CUA: nhan phan pure pursuit voi he so nay khi
+  // duong phia truoc dang cong (noi suy theo do cong 0.4 -> 1.0 1/m). Bu tre
+  // servo / loc lai lam xe be lai thieu, bat ra phia ngoai cua. 1 = tat.
+  // 1.15 -> 1.25 (09/10): toc do cua tang, danh lai dut khoat hon.
+  double corner_gain = 1.25;
 };
 
 class PathTracker {
@@ -66,6 +77,13 @@ public:
     double lookahead_m = 0.0; // khoang nhin truoc dang dung
     double ahead_m = 0.0;     // chieu dai duong da nho con o truoc banh truoc
     double curv_ahead = 0.0;  // do cong duong phia truoc (1/m), > 0 = re phai
+    // Quang duong doc duong tam tu banh truoc toi CUA phia truoc (m), < 0 =
+    // chua thay cua. Dung de giam toc TRUOC khi vao cua (xem compute()).
+    double corner_dist_m = -1.0;
+    // Do cong LON NHAT (1/m) cua duong tam tu banh truoc tro di (ca cua dang
+    // di lan cua sap toi), giu dinh ~0.4 s. Phan biet cua RONG / cua GAT de
+    // chon toc do cua (R 0.8 m ~ 1.25, R 1.3 m ~ 0.77, thang < ~0.4).
+    double corner_k = 0.0;
     int turn = 0;             // du doan cua: -1 trai, 0 thang, +1 phai
     double guard_deg = 0.0;   // phan goc do rao chan vach cong them
     double xte_m = 0.0;       // lech ngang chan camera -> duong tam (> 0: tam ben phai)
@@ -135,6 +153,8 @@ private:
   Memory left_;
   Memory right_;
   int turn_ = 0;
+  double curv_prev_ = 0.0; // do cong phia truoc o lan compute truoc
+  double corner_k_ = 0.0;  // corner_k giu dinh (xem Output)
   double xte_i_deg_ = 0.0;
   std::chrono::steady_clock::time_point last_compute_{};
 };

@@ -8,7 +8,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr double kDeg = 3.14159265358979323846 / 180.0;
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kDeg = kPi / 180.0;
 
 // Bo nho qua bay lau khong duoc camera xac nhan lai thi xoa
 constexpr double MEMORY_TTL_S = 2.0;
@@ -28,6 +29,17 @@ constexpr float JUMP_TOL_M = 0.07f;
 constexpr double VIRTUAL_AFTER_S = 0.15;
 // Rao chan: goc cong them toi da (do)
 constexpr double GUARD_MAX_DEG = 15.0;
+// Do cua phia truoc: day cung CORNER_CHORD_M doc duong tam lech huong so voi
+// day cung tai banh truoc >= CORNER_TURN_DEG = co cua. Thu vong kin (nhieu
+// vach 1 cm): 15 do bao cua nham ~3% thoi gian tren duong thang (chi giam toc
+// nhe), phat hien cua R 0.8 khi con cach ~0.5-0.8 m truoc banh truoc.
+constexpr double CORNER_CHORD_M = 0.25;
+constexpr double CORNER_TURN_DEG = 15.0;
+constexpr double CORNER_STEP_M = 0.05;
+// corner_k giu dinh roi giam voi hang so thoi gian nay (s)
+constexpr double CORNER_K_DECAY_S = 0.4;
+// corner_k: do cong phai cao lien tiep bay nhieu diem (cach 5 cm)
+constexpr int CORNER_K_RUN = 3;
 
 inline float norm2(const cv::Point2f &v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
@@ -94,6 +106,8 @@ void PathTracker::reset() {
   right_ = Memory{};
   started_ = false;
   turn_ = 0;
+  curv_prev_ = 0.0;
+  corner_k_ = 0.0;
   xte_i_deg_ = 0.0;
   last_compute_ = {};
 }
@@ -328,8 +342,8 @@ void PathTracker::add_observation(const std::vector<cv::Point2f> &centre_cam,
 // LAI
 // ============================================================================
 
-// Khoang trong tu mep banh toi vach tai hang z (toa do xe). side -1: vach
-// trai, +1: vach phai. Am = da de len / qua vach.
+// Khoang trong tu mep xe toi MEP bang keo tai hang z (toa do xe). side -1:
+// vach trai, +1: vach phai. Am = da de len vach.
 double PathTracker::line_clearance(const std::vector<cv::Point2f> &line_v,
                                    double z, double x_wheel, int side,
                                    bool &found) const {
@@ -348,7 +362,7 @@ double PathTracker::line_clearance(const std::vector<cv::Point2f> &line_v,
     // Nhieu giao diem (vach cong): lay giao diem gan banh nhat
     if (std::fabs(x - x_wheel) < best_dx) {
       best_dx = std::fabs(x - x_wheel);
-      best = c - p_.car_half_width_m;
+      best = c - p_.car_half_width_m - p_.tape_half_m;
       found = true;
     }
   }
@@ -403,8 +417,17 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   }
 
   // ---- Pure pursuit tu truc sau ----
-  const double Ld = std::clamp(p_.lookahead_min_m + p_.lookahead_gain_s * v,
-                               p_.lookahead_min_m, p_.lookahead_max_m);
+  double Ld = std::clamp(p_.lookahead_min_m + p_.lookahead_gain_s * v,
+                         p_.lookahead_min_m, p_.lookahead_max_m);
+  // TU THICH UNG: duong phia truoc cong (curv_prev 0.4 -> 1.0 1/m) thi rut
+  // ngan khoang nhin truoc ve lookahead_corner_scale lan -> bam sat cung
+  // cua, khong cat / vot. Duong thang giu nguyen (thu vong kin: keo dai
+  // tren duong thang lam xe lech tam nhieu hon).
+  if (p_.lookahead_corner_scale < 1.0) {
+    const double r = std::clamp((std::fabs(curv_prev_) - 0.4) / 0.6, 0.0, 1.0);
+    const double lc = std::max(Ld * p_.lookahead_corner_scale, p_.lookahead_min_m);
+    Ld += (lc - Ld) * r;
+  }
   o.lookahead_m = Ld;
   bool have = false;
   cv::Point2f prev(0.0f, 0.0f);
@@ -439,6 +462,15 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   const double Le = std::max(0.20, static_cast<double>(norm2(o.target_v)));
   const double kappa = 2.0 * o.target_v.x / (Le * Le);
   double steer = std::atan(L * kappa) / kDeg;
+  // Trong cua: danh lai manh hon. Do "dang trong cua" = max(do cong phia
+  // truoc lan tinh truoc, do cong dang lai kappa): nua sau cua tam nhin da
+  // thay duong thang (curv_prev ~0) nhung xe CHUA ra khoi cua -> truoc day
+  // he so tut ve 1 dung luc do, xe thieu lai, vot ra ngoai o loi ra cua.
+  if (p_.corner_gain != 1.0) {
+    const double kr = std::max(std::fabs(curv_prev_), std::fabs(kappa));
+    const double r = std::clamp((kr - 0.4) / 0.6, 0.0, 1.0);
+    steer *= 1.0 + (p_.corner_gain - 1.0) * r;
+  }
 
   // ---- Phan hoi lech ngang tai CHAN CAMERA ----
   // Do o chan camera chu khong o banh truoc: lech ngang + huong duong tam
@@ -508,6 +540,81 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
       arc += norm2(fw[i] - fw[i - 1]);
     }
     o.curv_ahead = dth / std::max(0.15, arc * (1.0 - 1.0 / 3.0));
+  }
+  curv_prev_ = o.curv_ahead;
+
+  // ---- Khoang cach toi CUA phia truoc (giam toc truoc khi vao cua) ----
+  // curv_ahead la do cong TRUNG BINH ca doan 1.2 m: cua vua lo ra o cuoi tam
+  // nhin bi pha loang voi doan thang truoc no -> truoc day xe chi giam toc khi
+  // da sat cua, xe con dang troi (ESC chi nha ga, khong phanh) nen vot ra
+  // ngoai cua. O day tim diem dau tien doc duong ma huong duong da quay
+  // CORNER_TURN_DEG so voi huong duong tai banh truoc. Cung R 0.8 m: phat hien
+  // tre ~0.1 m sau diem bat dau cong (bu bang corner_margin o node).
+  {
+    size_t i0 = 0;
+    while (i0 < c.size() && c[i0].y < L) {
+      ++i0;
+    }
+    std::vector<double> s_acc;
+    for (size_t i = i0; i < c.size(); ++i) {
+      s_acc.push_back(i == i0 ? 0.0 : s_acc.back() + norm2(c[i] - c[i - 1]));
+    }
+    auto at = [&](double s) {
+      size_t j = 1;
+      while (j + 1 < s_acc.size() && s_acc[j] < s) {
+        ++j;
+      }
+      const double span = std::max(1e-6, s_acc[j] - s_acc[j - 1]);
+      const float r = static_cast<float>(std::clamp((s - s_acc[j - 1]) / span, 0.0, 1.0));
+      return c[i0 + j - 1] + (c[i0 + j] - c[i0 + j - 1]) * r;
+    };
+    // Diem trung binh +-5 cm quanh s (detector cho diem cach 5 cm): nhieu
+    // vach o xa (~1 m) khong bao cua nham tren duong thang
+    auto avg_at = [&](double s) {
+      cv::Point2f m(0.0f, 0.0f);
+      for (int k = -2; k <= 2; ++k) {
+        m += at(std::clamp(s + 0.025 * k, 0.0, s_acc.back()));
+      }
+      return m * 0.2f;
+    };
+    auto heading = [&](double s) {
+      const cv::Point2f d = avg_at(s + CORNER_CHORD_M) - avg_at(s);
+      return std::atan2(static_cast<double>(d.x), static_cast<double>(d.y));
+    };
+    // Do cong lon nhat: lech huong giua 2 day cung LIEN TIEP (cach nhau
+    // CORNER_CHORD_M) / CORNER_CHORD_M. Cung tron that cho do cong DEU tren ca doan; nhieu vach chi tao dinh
+    // le -> lay min cua CORNER_K_RUN diem lien tiep (cach 5 cm) roi moi max.
+    double k_max = 0.0;
+    if (s_acc.size() >= 3 && s_acc.back() >= 2.0 * CORNER_CHORD_M) {
+      std::vector<double> ks;
+      for (double s = 0.0; s + 2.0 * CORNER_CHORD_M <= s_acc.back() + 1e-9; s += CORNER_STEP_M) {
+        const double dh = std::remainder(heading(s + CORNER_CHORD_M) - heading(s), 2.0 * kPi);
+        ks.push_back(std::fabs(dh) / CORNER_CHORD_M);
+      }
+      for (size_t i = 0; i < ks.size(); ++i) {
+        double m = ks[i];
+        for (int j = 1; j < CORNER_K_RUN && i + j < ks.size(); ++j) {
+          m = std::min(m, ks[i + j]);
+        }
+        k_max = std::max(k_max, m);
+      }
+    }
+    // Tang ngay, giam dan (tau CORNER_K_DECAY_S): ra khoi tam nhin / nhieu
+    // 1 frame khong lam toc do nhay
+    const double keep = std::exp(-dt_c / CORNER_K_DECAY_S);
+    corner_k_ = std::max(k_max, corner_k_ * keep);
+    o.corner_k = corner_k_;
+    if (s_acc.size() >= 3 && s_acc.back() >= CORNER_CHORD_M + CORNER_STEP_M) {
+      const double h0 = heading(0.0);
+      for (double s = CORNER_STEP_M; s + CORNER_CHORD_M <= s_acc.back() + 1e-9;
+           s += CORNER_STEP_M) {
+        const double dh = std::remainder(heading(s) - h0, 2.0 * kPi);
+        if (std::fabs(dh) >= CORNER_TURN_DEG * kDeg) {
+          o.corner_dist_m = s;
+          break;
+        }
+      }
+    }
   }
   // Tre: vao trang thai cua khi |k| > 0.6, thoat khi < 0.3
   if (turn_ == 0) {
