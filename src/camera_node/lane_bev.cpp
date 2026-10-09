@@ -193,18 +193,6 @@ float percentile(std::vector<float> v, float q) {
 // HINH HOC CAMERA PINHOLE (cao h, cui pitch, khong nghieng ngang)
 // ============================================================================
 
-bool CameraLane::project_vis(const LaneOutput &o, const cv::Point2f &g, cv::Point &p) {
-  if (o.proj_f <= 0.0f) {
-    return false;
-  }
-  double u = 0.0, v = 0.0;
-  if (!to_image(o.proj_pitch, o.proj_f, o.proj_h, o.proj_cx, o.proj_cy, g.x, g.y, u, v)) {
-    return false;
-  }
-  p = cv::Point(cvRound(u), cvRound(v));
-  return true;
-}
-
 bool CameraLane::to_image(double pitch, double f, double h, double cx,
                           double cy, double X, double Z, double &u, double &v) {
   const double c = std::cos(pitch);
@@ -690,43 +678,6 @@ void CameraLane::consume(cv::Mat &work, const cv::Point2f &p, int r) const {
   }
 }
 
-float CameraLane::cross_width(const cv::Point2f &g, const cv::Point2f &d) const {
-  if (clean_ref_.empty()) {
-    return 0.0f;
-  }
-  const cv::Point2f n(-d.y, d.x);
-  const int lim = 40;
-  auto on = [&](float k) {
-    float c = 0.0f, r = 0.0f;
-    px_of(g + n * (k * BEV_RES_M), c, r);
-    const int ci = static_cast<int>(std::lround(c)), ri = static_cast<int>(std::lround(r));
-    return ci >= 0 && ri >= 0 && ci < clean_ref_.cols && ri < clean_ref_.rows &&
-           clean_ref_.at<uchar>(ri, ci) != 0;
-  };
-  float o = 0.0f;
-  bool found = false;
-  for (float s = 0.0f; s <= 2.0f && !found; s += 1.0f) {
-    for (float sg : {1.0f, -1.0f}) {
-      if (on(s * sg)) {
-        o = s * sg;
-        found = true;
-        break;
-      }
-    }
-  }
-  if (!found) {
-    return 0.0f;
-  }
-  float lo = o, hi = o;
-  while (hi - o < lim && on(hi + 1.0f)) {
-    hi += 1.0f;
-  }
-  while (o - lo < lim && on(lo - 1.0f)) {
-    lo -= 1.0f;
-  }
-  return hi - lo + 1.0f;
-}
-
 // Di doc vach tu p theo huong d, an dan pixel da di qua (khong quay lai, khong
 // bat vach do lan 2). Het vach phia truoc thi thu cac huong GAP (goc cua gap)
 // roi di tiep.
@@ -759,15 +710,6 @@ CameraLane::Poly CameraLane::walk(cv::Mat &work, cv::Point2f p, cv::Point2f d,
   // cap / do vat ben kia; di tiep thi cong queo -> cat bo tu cho noi.
   size_t bridge_at = 0;
   int probation = 0;
-  // Be rong NGANG vach (mat cat vuong goc huong di, tren mask chua bi an):
-  // cua so truot chi rong ~ bang keo nen khong thay duoc vach di vao VAT
-  // (hop, day cap bo, bong ghe dinh vao dau vach). Rong gap WIDE_FRAC lan be
-  // rong cua chinh vach (va > WIDE_MIN_M) WIDE_STEPS buoc lien tiep -> dung,
-  // bo cac buoc do. Ngay sau goc gap bo qua (mat cat o dinh goc chu L rong).
-  float width_ref = 0.0f;
-  int n_width = 0;
-  int wide = 0;
-  int since_kink = 1000;
   for (int it = 0; it < max_iter && length < max_len; ++it) {
     cv::Point2f found;
     int cnt = 0;
@@ -838,27 +780,6 @@ CameraLane::Poly CameraLane::walk(cv::Mat &work, cv::Point2f p, cv::Point2f d,
       thick_ema = thick_ema <= 0.0f ? static_cast<float>(cnt)
                                     : 0.7f * thick_ema + 0.3f * static_cast<float>(cnt);
     }
-    since_kink = kink ? 0 : since_kink + 1;
-    if (WIDE_FRAC > 0.0f && ok && !glare_gap && !kink && since_kink > WIDE_AFTER_KINK) {
-      const float w = cross_width(found, d);
-      if (n_width >= WIDE_REF_STEPS && w > WIDE_FRAC * width_ref &&
-          w * BEV_RES_M > WIDE_MIN_M) {
-        if (++wide >= WIDE_STEPS) {
-          const size_t drop = std::min(pts.size() - 1, static_cast<size_t>(wide - 1));
-          pts.resize(pts.size() - drop);
-          length = std::max(0.0f, length - static_cast<float>(drop) * WALK_STEP_M);
-          break;
-        }
-      } else {
-        wide = 0;
-        if (w > 0.0f) {
-          width_ref = n_width == 0 ? w : (n_width < WIDE_REF_STEPS
-                                              ? (width_ref * n_width + w) / (n_width + 1)
-                                              : 0.8f * width_ref + 0.2f * w);
-          ++n_width;
-        }
-      }
-    }
     const cv::Point2f seg = found - p;
     const float n = norm2(seg);
     if (n < 0.4f * WALK_STEP_M) {
@@ -894,29 +815,6 @@ CameraLane::Poly CameraLane::walk(cv::Mat &work, cv::Point2f p, cv::Point2f d,
   // (khong phai goc cua that) -> bo, khong de sinh "goc cua" gia
   if (last_kink > 0 && last_kink < pts.size() && length - len_at_kink < MIN_KINK_TAIL_M) {
     pts.resize(last_kink);
-  }
-  // Cung luat cho cho re TU TU (khong qua buoc tim goc gap): duoi vach be
-  // >= TAIL_BEND_DEG ma doan sau cho be ngan < MIN_KINK_TAIL_M = vach lan vao
-  // bong / do vat o mep tam nhin -> cat tai cho be
-  if (TAIL_BEND_DEG > 0.0f && pts.size() >= 4) {
-    const Poly v = simplify(pts, RDP_EPS_M);
-    if (v.size() >= 3) {
-      const cv::Point2f a = v[v.size() - 2] - v[v.size() - 3];
-      const cv::Point2f b = v.back() - v[v.size() - 2];
-      const float turn = std::fabs(std::atan2(cross2(a, b), a.dot(b))) / kDeg;
-      if (turn >= TAIL_BEND_DEG && norm2(b) < MIN_KINK_TAIL_M && norm2(a) >= MIN_KINK_TAIL_M) {
-        size_t cut = 0;
-        float best = std::numeric_limits<float>::max();
-        for (size_t k = 0; k < pts.size(); ++k) {
-          const float d = norm2(pts[k] - v[v.size() - 2]);
-          if (d < best) {
-            best = d;
-            cut = k;
-          }
-        }
-        pts.resize(cut + 1);
-      }
-    }
   }
   return pts;
 }
@@ -1057,140 +955,11 @@ std::vector<CameraLane::Poly> CameraLane::candidates(cv::Mat &work, int max_n) c
     if (pts.size() >= 2 && norm2(pts.back() - axle) < norm2(pts.front() - axle)) {
       std::reverse(pts.begin(), pts.end());
     }
-    trim_zigzag(pts);
-    if (trim_upright(pts) && poly_len(pts) >= 0.12f && dark_enough(pts)) {
+    if (poly_len(pts) >= 0.12f) {
       out.push_back(std::move(pts));
     }
   }
   return out;
-}
-
-// Vi du log that 08/10: vach trai di thang roi re ngoat vao hop giay o xa
-// (2 goc gap nguoc chieu cach 7 cm) -> "goc cua" gia, duong tam queo trai.
-// Giu doan truoc rang cua, bo phan duoi.
-bool CameraLane::trim_zigzag(Poly &pts) {
-  const Poly v = simplify(pts, RDP_EPS_M);
-  float prev = 0.0f;
-  for (size_t i = 1; i + 1 < v.size(); ++i) {
-    const cv::Point2f a = v[i] - v[i - 1];
-    const cv::Point2f b = v[i + 1] - v[i];
-    const float turn = std::atan2(cross2(a, b), a.dot(b)) / kDeg;
-    if (std::fabs(turn) >= ZIGZAG_DEG && std::fabs(prev) >= ZIGZAG_DEG &&
-        turn * prev < 0.0f && norm2(a) < ZIGZAG_GAP_M) {
-      // Cat tai dinh dau cua rang cua (v[i - 1])
-      size_t cut = 0;
-      float best = std::numeric_limits<float>::max();
-      for (size_t k = 0; k < pts.size(); ++k) {
-        const float d = norm2(pts[k] - v[i - 1]);
-        if (d < best) {
-          best = d;
-          cut = k;
-        }
-      }
-      pts.resize(cut + 1);
-      return true;
-    }
-    prev = turn;
-  }
-  return false;
-}
-
-// Doan vach chia thang ve chan camera = chan ban / ghe (xem camera_node.hpp)
-bool CameraLane::trim_upright(Poly &pts) const {
-  const Poly p = resample_lin(pts, WALK_STEP_M);
-  if (p.size() < 3) {
-    return true;
-  }
-  const float cos_lim = std::cos(RADIAL_LINE_DEG * kDeg);
-  const float cos_kink = std::cos(RADIAL_KINK_DEG * kDeg);
-  size_t i = 1;
-  while (i < p.size()) {
-    auto radial = [&](size_t k) {
-      return std::fabs(unit(p[k] - p[k - 1]).dot(unit(0.5f * (p[k] + p[k - 1])))) >= cos_lim;
-    };
-    if (!radial(i)) {
-      ++i;
-      continue;
-    }
-    // Doan tia bat dau o segment i (p[i-1] -> ...)
-    const size_t start = i;
-    float len = 0.0f;
-    while (i < p.size() && radial(i)) {
-      len += norm2(p[i] - p[i - 1]);
-      ++i;
-    }
-    if (len < RADIAL_LINE_MIN_M) {
-      continue;
-    }
-    if (start == 1) {
-      float c = 0.0f, r = 0.0f;
-      px_of(p[0], c, r);
-      const int col = std::clamp(static_cast<int>(std::lround(c)), 0, nx_ - 1);
-      if (p[0].y - z_near_col_[static_cast<size_t>(col)] >= RADIAL_LINE_GAP_M) {
-        return false;
-      }
-      continue;
-    }
-    // Co goc gap ngay truoc doan tia?
-    const cv::Point2f d_in = unit(p[start - 1] - p[start >= 3 ? start - 3 : 0]);
-    const cv::Point2f d_out = unit(p[std::min(start + 1, p.size() - 1)] - p[start - 1]);
-    if (d_in.dot(d_out) < cos_kink) {
-      const cv::Point2f cut = p[start - 1];
-      size_t k_cut = 0;
-      float best = std::numeric_limits<float>::max();
-      for (size_t k = 0; k < pts.size(); ++k) {
-        if (norm2(pts[k] - cut) < best) {
-          best = norm2(pts[k] - cut);
-          k_cut = k;
-        }
-      }
-      pts.resize(k_cut + 1);
-      return pts.size() >= 2;
-    }
-  }
-  return true;
-}
-
-// Do toi trung vi doc vach (max o 3x3 quanh moi diem, giong
-// adapt_threshold; bo diem loa den), thang 0..255. < 0 = khong du diem.
-float CameraLane::line_dark(const Poly &pts) const {
-  if (rel_.empty()) {
-    return -1.0f;
-  }
-  std::vector<float> vals;
-  for (const auto &q : pts) {
-    float c = 0.0f, r = 0.0f;
-    px_of(q, c, r);
-    const int ci = static_cast<int>(std::lround(c));
-    const int ri = static_cast<int>(std::lround(r));
-    if (ci >= 1 && ci < nx_ - 1 && ri >= 1 && ri < nz_ - 1 && !in_glare(q)) {
-      double mx = 0.0;
-      cv::minMaxLoc(rel_(cv::Range(ri - 1, ri + 2), cv::Range(ci - 1, ci + 2)), nullptr, &mx);
-      vals.push_back(static_cast<float>(mx));
-    }
-  }
-  return vals.size() < 3 ? -1.0f : median_of(vals);
-}
-
-// Vach du toi nhu bang keo? Vet bong chan ban / ghe mo nhat hon nhieu.
-bool CameraLane::dark_enough(const Poly &pts, float ref) const {
-  if (ref <= 0.0f) {
-    // Vach moi: so voi vach dang thay NHAT hon; khong co thi voi do tuong
-    // phan chung (neu con moi)
-    for (const Track *t : {&left_, &right_}) {
-      if (t->valid && t->observed && t->dark > 0.0f) {
-        ref = ref <= 0.0f ? t->dark : std::min(ref, t->dark);
-      }
-    }
-    if (ref <= 0.0f && contrast_ > 0.0f && contrast_age_ <= CONTRAST_STALE_SEC) {
-      ref = contrast_ * 255.0f;
-    }
-  }
-  if (ref <= 0.0f) {
-    return true;
-  }
-  const float d = line_dark(pts);
-  return d < 0.0f || d >= LINE_MIN_CONTRAST_FRAC * ref;
 }
 
 // ============================================================================
@@ -1248,29 +1017,17 @@ float CameraLane::x_at_car(const Poly &p) {
   return cross2(init_dir(p), cv::Point2f(0.0f, 0.0f) - p[0]);
 }
 
-bool CameraLane::left_of(const Poly &a, const Poly &b) const {
-  if (a.size() < 2 || b.size() < 2) {
-    return true;
-  }
-  float dist = 0.0f, ang = 0.0f;
-  bool right = false;
-  pair_geom(a, b, dist, ang, right);
-  return right && dist >= 0.5f * LANE_W_MIN_M;
-}
-
 void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
                          bool have_right, bool allow_single) {
-  // Be rong cap chi can nam trong khoang tuyet doi (lan rong / hep tung
-  // doan); diem uu tien gan be rong tai cho
-  const float lo = LANE_W_MIN_M;
-  const float hi = LANE_W_MAX_M;
+  // Be rong lan KHONG co dinh (bang keo dan tay, moi doan rong / hep khac
+  // nhau): ghep cap chi doi khoang tuyet doi LANE_W_MIN_M..LANE_W_MAX_M; W
+  // (be rong vua do gan day) chi dung de uu tien cap gan dung nhat
   const float max_ang = pitch_confirmed_ ? 25.0f : 40.0f;
   const float W = lane_w_local_;
-  auto make = [this](const Poly &p, bool verified) {
+  auto make = [](const Poly &p, bool verified) {
     Track t;
     t.valid = true;
     t.pts = p;
-    t.dark = line_dark(p);
     t.observed = true;
     t.verified = verified;
     t.seen = 1;
@@ -1289,7 +1046,7 @@ void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
       float dist = 0.0f, ang = 0.0f;
       bool right = false;
       pair_geom(ref.pts, cands[i], dist, ang, right);
-      if (right != want_right || dist < lo || dist > hi || ang > max_ang + 5.0f) {
+      if (right != want_right || dist < LANE_W_MIN_M || dist > LANE_W_MAX_M || ang > max_ang + 5.0f) {
         continue;
       }
       const float xc = x_at_car(cands[i]);
@@ -1323,7 +1080,7 @@ void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
       float dist = 0.0f, ang = 0.0f;
       bool right = false;
       pair_geom(cands[i], cands[j], dist, ang, right);
-      if (!right || dist < lo || dist > hi || ang > max_ang) {
+      if (!right || dist < LANE_W_MIN_M || dist > LANE_W_MAX_M || ang > max_ang) {
         continue;
       }
       // Xe phai nam GIUA 2 vach (vach trai ben trai, vach phai ben phai chan
@@ -1331,7 +1088,7 @@ void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
       // cam / to giay ben ngoai lan -> danh lai het co sang phai.
       const float xl = x_at_car(cands[i]);
       const float xr = x_at_car(cands[j]);
-      if (xl > CAR_SIDE_SLACK_M || xr < -CAR_SIDE_SLACK_M || xl < -hi || xr > hi) {
+      if (xl > CAR_SIDE_SLACK_M || xr < -CAR_SIDE_SLACK_M || xl < -LANE_W_MAX_M || xr > LANE_W_MAX_M) {
         continue;
       }
       const float score = poly_len(cands[i]) + poly_len(cands[j]) - 2.0f * std::fabs(dist - W) -
@@ -1409,10 +1166,10 @@ void CameraLane::learn_width(const Poly &left, const Poly &right) {
   const float w = 0.5f * (std::fabs(cross2(ab, ra - la)) + std::fabs(cross2(ab, rb - la))) / n;
   if (w >= LANE_W_MIN_M && w <= LANE_W_MAX_M) {
     width_samples_.push_back(w);
-    if (width_samples_.size() > WIDTH_WINDOW) {
+    if (width_samples_.size() > 100) {
       width_samples_.pop_front();
     }
-    if (width_samples_.size() >= WIDTH_MIN_SAMPLES) {
+    if (width_samples_.size() >= 15) {
       lane_w_m_ = median_of(std::vector<float>(width_samples_.begin(), width_samples_.end()));
     }
   }
@@ -1461,8 +1218,7 @@ bool CameraLane::pitch_from_pair(const cv::Point2f ha[2], const cv::Point2f hb[2
   const float s2 = cross2(ab, g[2] - g[0]) / n;
   const float s3 = cross2(ab, g[3] - g[0]) / n;
   const float w = 0.5f * std::fabs(s2 + s3);
-  const float cfg = profile_.lane_width_m;
-  if (w < 0.75f * cfg || w > 1.3f * cfg) {
+  if (w < LANE_W_MIN_M || w > LANE_W_MAX_M) {
     return false;
   }
   // Xe (diem duoi camera) phai nam GIUA 2 vach
@@ -1550,10 +1306,8 @@ void CameraLane::adapt_threshold(const cv::Mat &rel,
     }
   }
   float ratio = dark_ratio_;
-  contrast_age_ += dt_;
   if (vals.size() >= 8) {
     contrast_ = median_of(vals) / 255.0f;
-    contrast_age_ = 0.0f;
     const float target = std::min(CONTRAST_THR_MAX, CONTRAST_FRAC * contrast_);
     ratio += 0.1f * (target - ratio);
   } else if (obs.empty()) {
@@ -1762,9 +1516,7 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
   // ---- 2-3. Mask vach + loc do vat ---------------------------------------
   cv::Mat mask, rel, clean, rejected;
   line_mask(bev, mask, rel, glare_);
-  rel_ = rel;
   filter_clutter(mask, rel, clean, rejected);
-  clean_ref_ = clean;
   last_fill_ = static_cast<float>(cv::countNonZero(mask)) / static_cast<float>(n_valid_);
   cv::Mat work = clean.clone();
 
@@ -1785,39 +1537,7 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
   for (Track *t : order) {
     Poly pts;
     float e = 0.0f;
-    // Vach bam duoc phai van nam dung phia vach con lai: truoc day vach trai
-    // gia (vet bong) bam lan sang bang keo PHAI -> 2 vach trung nhau, bo nham
-    // vach phai that -> vach phai thanh "vach trai", tam lan lech ra ngoai.
-    Track &other = t == &left_ ? right_ : left_;
-    auto side_ok = [&](const Poly &p) {
-      if (!other.valid || (t == &left_ ? left_of(p, other.pts) : left_of(other.pts, p))) {
-        return true;
-      }
-      // Mau thuan phia: tin vach da bam LAU hon. Vach kia moi bam vai frame
-      // (vd chan ghe vua bi nhan lam vach) thi bo vach kia, giu vach nay.
-      if (t->seen > other.seen + 2 && (t->verified || !other.verified)) {
-        other = Track{};
-        return true;
-      }
-      return false;
-    };
-    cv::Mat backup = work.clone();
-    // ... va du toi nhu chinh no o frame truoc: vach that ra khoi khung thi
-    // khong bam sang mep vet bong ben canh. Duoi rang cua (re vao do vat)
-    // bi cat bo.
     if (follow(work, t->pts, gate, pts, e)) {
-      trim_zigzag(pts);
-      if (!trim_upright(pts) || poly_len(pts) < 0.08f || !side_ok(pts) ||
-          !dark_enough(pts, t->dark)) {
-        backup.copyTo(work); // tra lai pixel cho vach kia
-        pts.clear();
-      }
-    }
-    if (!pts.empty()) {
-      const float d = line_dark(pts);
-      if (d > 0.0f) {
-        t->dark = t->dark > 0.0f ? 0.7f * t->dark + 0.3f * d : d;
-      }
       t->pts = std::move(pts);
       t->gate_err = e;
       t->observed = true;
@@ -1833,22 +1553,14 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
     }
   }
 
-  // 2 vach trung / bat cheo nhau -> bo vach SAI PHIA xe truoc (vach trai ma
-  // nam ben phai chan camera...), roi toi vach moi hon / chua xac minh / khop
-  // kem hon. Truoc day chi so do khop -> co luc bo nham vach that.
-  if (left_.valid && right_.valid && left_.observed && right_.observed &&
-      !left_of(left_.pts, right_.pts)) {
-    const bool l_bad = x_at_car(left_.pts) > CAR_SIDE_SLACK_M;
-    const bool r_bad = x_at_car(right_.pts) < -CAR_SIDE_SLACK_M;
-    bool drop_left = left_.gate_err > right_.gate_err;
-    if (l_bad != r_bad) {
-      drop_left = l_bad;
-    } else if (left_.verified != right_.verified) {
-      drop_left = !left_.verified;
-    } else if (left_.seen != right_.seen) {
-      drop_left = left_.seen < right_.seen;
+  // 2 vach trung / bat cheo nhau -> bo vach khop kem hon
+  if (left_.valid && right_.valid && left_.observed && right_.observed) {
+    float dist = 0.0f, ang = 0.0f;
+    bool right = false;
+    pair_geom(left_.pts, right_.pts, dist, ang, right);
+    if (dist < 0.5f * LANE_W_MIN_M || !right) {
+      (left_.gate_err > right_.gate_err ? left_ : right_) = Track{};
     }
-    (drop_left ? left_ : right_) = Track{};
   }
 
   // ---- 5. Tim vach con thieu ---------------------------------------------
@@ -1873,11 +1585,6 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
         const float xc = x_at_car(c);
         const bool side_ok = t == &left_ ? xc < CAR_SIDE_SLACK_M : xc > -CAR_SIDE_SLACK_M;
         if (!side_ok) {
-          continue;
-        }
-        // ... va dung phia vach con lai (neu vach do dang thay)
-        const Track &o = t == &left_ ? right_ : left_;
-        if (o.valid && o.observed && !(t == &left_ ? left_of(c, o.pts) : left_of(o.pts, c))) {
           continue;
         }
         const float cosang = init_dir(c).dot(init_dir(t->pts));
@@ -1913,7 +1620,6 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
       }
       if (best >= 0) {
         t->pts = cands[static_cast<size_t>(best)];
-        t->dark = line_dark(t->pts);
         t->observed = true;
         t->missed = 0.0f;
         t->seen = 1;
@@ -1949,11 +1655,18 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
     if (both_ok) {
       left_.verified = right_.verified = true;
       learn_width(left_.pts, right_.pts);
-      lane_w_local_ += LANE_W_LOCAL_ALPHA * (width - lane_w_local_);
+      // Be rong TAI CHO: lan dau thay du 2 vach lay ngay, sau do EMA nhanh
+      if (!have_width_) {
+        lane_w_m_ = width;
+      }
+      lane_w_local_ = have_width_ ? lane_w_local_ + LANE_W_LOCAL_ALPHA * (width - lane_w_local_)
+                                  : width;
+      have_width_ = true;
       lane_w_local_age_ = 0.0f;
     }
   }
   if (!both_ok) {
+    // Lau khong thay du 2 vach: tro dan ve be rong hoc dai han
     lane_w_local_age_ += dt;
     if (lane_w_local_age_ > LANE_W_LOCAL_HOLD_SEC) {
       lane_w_local_ += 0.05f * (lane_w_m_ - lane_w_local_);
@@ -1990,32 +1703,11 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
     out.lane_width_cm = width * 100.0f;
   }
 
-  // Chi thay 1 vach: vach kia co nam trong vung camera nhin thay khong? Du
-  // doan o be rong lan RONG NHAT con hop ly (OTHER_VIEW_WIDTH x be rong da
-  // hoc): ca vi tri do cung trong khung ma khong nhan duoc = vach mo / loa /
-  // dut -> xe dang o dung cho, dung di tim. Nam ngoai khung = xe lech ve
-  // phia vach dang thay, hoac lan doan nay rong hon (log that 08/10: vach
-  // kia khong co o vi tri lan 0.42 m) -> phai lai ve phia vach kia tim lai.
-  if (state == LaneState::ONE_LINE) {
-    const Poly pred = resample_lin(offset_mitre(use_l ? left_.pts : right_.pts,
-                                                OTHER_VIEW_WIDTH * lane_w_local_,
-                                                use_l ? +1 : -1, RDP_EPS_M),
-                                   OTHER_VIEW_STEP_M);
-    const cv::Point2f margin(OTHER_VIEW_MARGIN_M, 0.0f);
-    int n_in = 0;
-    for (const auto &p : pred) {
-      if (p.y <= OTHER_VIEW_MAX_Z_M && inside(p - margin) && inside(p + margin)) {
-        ++n_in;
-      }
-    }
-    out.other_view_m = n_in * OTHER_VIEW_STEP_M;
-  }
-
   // ---- 7. Tam lan tu tung vach (doi nua lan theo phap tuyen, mitre) ------
   // Du 2 vach: doi nua be rong DO O FRAME NAY -> 2 duong tam trung nhau =
-  // dung giua 2 vach du lan rong / hep hon be rong da hoc. (Truoc day luon
-  // doi nua be rong da hoc: lan rong hon 10 cm thi 2 duong tam lech nhau
-  // 10 cm, diem ngam nhay qua lai giua 2 duong, xe lac +-10 cm.)
+  // dung GIUA 2 vach du lan rong / hep bao nhieu. (Truoc day doi nua be rong
+  // da hoc, khoi dau 0.42 m: lan 0.52 m thi tam lech 5 cm ve 1 vach.) Chi 1
+  // vach: doi nua be rong vua do gan nhat (lane_w_local_).
   const float half = 0.5f * (both_ok ? width : lane_w_local_);
   const Poly c_left = use_l ? offset_mitre(left_.pts, half, +1, RDP_EPS_M) : Poly{};
   const Poly c_right = use_r ? offset_mitre(right_.pts, half, -1, RDP_EPS_M) : Poly{};
@@ -2266,15 +1958,6 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
 
   out.horizon_frac = static_cast<float>(horizon_y_ / WH);
   out.pitch_deg = static_cast<float>(pitch_ * 180.0 / CV_PI);
-  {
-    // Anh vis giu ti le khung lam viec -> cung 1 he so cho ca 2 truc
-    const double k = static_cast<double>(VIS_W) / WORK_W;
-    out.proj_f = static_cast<float>(f_px_ * k);
-    out.proj_cx = static_cast<float>(WORK_W / 2.0 * k);
-    out.proj_cy = static_cast<float>(cy_ * k);
-    out.proj_h = static_cast<float>(h_);
-    out.proj_pitch = static_cast<float>(pitch_);
-  }
   out.pitch_confirmed = pitch_confirmed_;
   out.near_z_m = z_min_ + 0.03f;
   out.dark_ratio = dark_ratio_;
@@ -2385,104 +2068,22 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
                   cv::Scalar(255, 255, 255), 2);
   out.roi = bv;
   // Anh BINARY cho GUI: chi pixel cua 2 vach dang dung de lai (trang), bo
-  // het do vat / vach chua xac minh. Moi diem doc vach (1 cm / buoc) lay doan
-  // mask LIEN TUC chua vach theo phap tuyen, roi CAT ve be rong bang keo cua
-  // chinh vach do (trung vi doc vach + 1 cm) -> day cap, mep bong, vat dinh
-  // sat vach khong loi ra thanh "gai" (ban truoc: dai 10 cm quanh vach AND
-  // mask). Chi la anh hien thi, khong anh huong nhan lan.
+  // het do vat / vach chua xac minh
   {
     cv::Mat lanes = cv::Mat::zeros(clean.size(), CV_8U);
-    const float max_half = 1.5f * TAPE_MAX_THICK_M / BEV_RES_M; // px
-    auto on = [&](float c, float r) {
-      const int ci = cvRound(c), ri = cvRound(r);
-      return ci >= 0 && ri >= 0 && ci < clean.cols && ri < clean.rows &&
-             clean.at<uchar>(ri, ci) != 0;
-    };
+    const int th = std::max(3, static_cast<int>(std::lround(0.10f / BEV_RES_M)));
     for (const Poly *g : {use_l ? &left_.pts : nullptr, use_r ? &right_.pts : nullptr}) {
-      if (!g || g->size() < 2) {
-        continue;
-      }
-      struct Cut { cv::Point2f p, n; float a, b, o; };
-      std::vector<Cut> cuts;
-      std::vector<float> widths;
-      for (size_t k = 0; k + 1 < g->size(); ++k) {
-        float c0 = 0.0f, r0 = 0.0f, c1 = 0.0f, r1 = 0.0f;
-        px_of((*g)[k], c0, r0);
-        px_of((*g)[k + 1], c1, r1);
-        const cv::Point2f a(c0, r0), d(c1 - c0, r1 - r0);
-        const float len = norm2(d);
-        if (len < 1e-3f) {
-          continue;
+      if (g && g->size() >= 2) {
+        float c = 0.0f, r = 0.0f;
+        std::vector<cv::Point> p;
+        for (const auto &q : *g) {
+          px_of(q, c, r);
+          p.emplace_back(cvRound(c), cvRound(r));
         }
-        const cv::Point2f t = d * (1.0f / len), n(-t.y, t.x);
-        for (float u = 0.0f; u < len; u += 1.0f) {
-          const cv::Point2f p = a + t * u;
-          // Tam doan mask gan diem vach nhat (vach ve lech tam bang keo 1-2 px)
-          float o = 0.0f;
-          bool found = false;
-          for (float s0 = 0.0f; s0 <= 2.0f && !found; s0 += 1.0f) {
-            for (float sg : {1.0f, -1.0f}) {
-              if (on(p.x + n.x * s0 * sg, p.y + n.y * s0 * sg)) {
-                o = s0 * sg;
-                found = true;
-                break;
-              }
-            }
-          }
-          if (!found) {
-            continue; // vach dut o day (loa den / che): khong ve
-          }
-          float lo = o, hi = o;
-          while (hi - o < max_half && on(p.x + n.x * (hi + 1.0f), p.y + n.y * (hi + 1.0f))) {
-            hi += 1.0f;
-          }
-          while (o - lo < max_half && on(p.x + n.x * (lo - 1.0f), p.y + n.y * (lo - 1.0f))) {
-            lo -= 1.0f;
-          }
-          cuts.push_back({p, n, lo, hi, o});
-          widths.push_back(hi - lo);
-        }
-      }
-      if (cuts.empty()) {
-        continue;
-      }
-      std::nth_element(widths.begin(), widths.begin() + widths.size() / 2, widths.end());
-      const float med = widths[widths.size() / 2];
-      const float half = 0.5f * med + 1.0f;
-      for (const auto &cu : cuts) {
-        // Rong gap ~2.5 lan bang keo = doan vach chay qua VAT (hop, day cap
-        // bo, bong): khong phai bang keo -> khong ve
-        if (cu.b - cu.a > 2.5f * med + 2.0f) {
-          continue;
-        }
-        // Doan rong hon bang keo (vat dinh vao 1 ben): giu quanh diem vach
-        const bool wide = cu.b - cu.a > 2.0f * half;
-        const float a = wide ? std::max(cu.a, cu.o - half) : cu.a;
-        const float b = wide ? std::min(cu.b, cu.o + half) : cu.b;
-        cv::line(lanes,
-                 cv::Point(cvRound(cu.p.x + cu.n.x * a), cvRound(cu.p.y + cu.n.y * a)),
-                 cv::Point(cvRound(cu.p.x + cu.n.x * b), cvRound(cu.p.y + cu.n.y * b)),
-                 cv::Scalar(255), 2);
+        cv::polylines(lanes, p, false, cv::Scalar(255), th);
       }
     }
     cv::bitwise_and(lanes, clean, lanes);
-    // Manh con lai khong thuon dai (khoi tron = vat ma vach di xuyen qua,
-    // vun nho) -> bo. Bang keo: dai >= 2.5 lan rong hoac dai >= 15 cm.
-    {
-      cv::Mat lab, stats, cent;
-      const int n = cv::connectedComponentsWithStats(lanes, lab, stats, cent, 8, CV_32S);
-      for (int k = 1; k < n; ++k) {
-        cv::Mat comp = lab == k;
-        std::vector<cv::Point> pts;
-        cv::findNonZero(comp, pts);
-        const cv::RotatedRect rr = cv::minAreaRect(pts);
-        const float lo = std::min(rr.size.width, rr.size.height) + 1.0f;
-        const float hi = std::max(rr.size.width, rr.size.height) + 1.0f;
-        if (hi < 2.5f * lo && hi * BEV_RES_M < 0.15f) {
-          lanes.setTo(0, comp);
-        }
-      }
-    }
     out.bin = lanes / 255;
   }
 

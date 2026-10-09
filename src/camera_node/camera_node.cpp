@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -104,8 +106,6 @@ CameraLane::CameraLane(int camera_index, int target_fps, int width, int height,
       roi_top_frac_(std::clamp(profile.roi_top_frac, 0.0f, 0.90f)) {
   h_ = std::max(0.05f, profile_.height_m);
   roi_bottom_frac_ = std::clamp(profile_.roi_bottom_frac, 0.1f, 1.0f);
-  lane_w_m_ = std::clamp(profile_.lane_width_m, 0.2f, 1.0f);
-  lane_w_local_ = lane_w_m_;
   pitch_ = std::clamp(static_cast<double>(profile_.pitch_deg), 1.0, 85.0) *
            CV_PI / 180.0;
 
@@ -114,7 +114,68 @@ CameraLane::CameraLane(int camera_index, int target_fps, int width, int height,
   update_geometry(req_w_, req_h_);
 }
 
-CameraLane::~CameraLane() { stop(); }
+CameraLane::~CameraLane() {
+  stop();
+  stop_recorder();
+}
+
+// ============================================================================
+// GHI ANH KHI CHAY
+// ============================================================================
+
+void CameraLane::set_record_dir(const std::string &dir) {
+  stop_recorder();
+  rec_dir_ = dir;
+  if (rec_dir_.empty()) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(rec_dir_, ec);
+  if (ec) {
+    std::cerr << "[CameraLane] Khong tao duoc thu muc ghi anh " << rec_dir_ << ": "
+              << ec.message() << "\n";
+    rec_dir_.clear();
+    return;
+  }
+  {
+    std::ofstream f(rec_dir_ + "/frames.csv", std::ios::app);
+    f << "file,steady_ms,frame_id,state,width_cm,v_mps,wheel_deg,exposure\n";
+  }
+  rec_running_ = true;
+  rec_thread_ = std::thread([this]() { record_loop(); });
+  std::cout << "[CameraLane] Ghi anh khi xe chay vao " << rec_dir_ << "\n";
+}
+
+void CameraLane::stop_recorder() {
+  {
+    std::lock_guard<std::mutex> lock(rec_mtx_);
+    rec_running_ = false;
+  }
+  rec_cv_.notify_all();
+  if (rec_thread_.joinable()) {
+    rec_thread_.join();
+  }
+}
+
+void CameraLane::record_loop() {
+  std::ofstream csv(rec_dir_ + "/frames.csv", std::ios::app);
+  const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+  while (true) {
+    RecItem it;
+    {
+      std::unique_lock<std::mutex> lock(rec_mtx_);
+      rec_cv_.wait(lock, [this]() { return !rec_q_.empty() || !rec_running_; });
+      if (rec_q_.empty()) {
+        return; // da dung va ghi het hang doi
+      }
+      it = std::move(rec_q_.front());
+      rec_q_.pop_front();
+    }
+    cv::imwrite(rec_dir_ + "/" + it.name, it.img, params);
+    csv << it.csv;
+    csv.flush();
+  }
+}
 
 // ============================================================================
 // HINH HOC THEO KICH THUOC ANH
@@ -428,6 +489,23 @@ void CameraLane::capture_loop() {
     out.frame_id = ++frame_id_;
     detect(frame, out, draw);
 
+    if (rec_on_.load() && !rec_dir_.empty()) {
+      const long ms = static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            t_grab.time_since_epoch())
+                                            .count());
+      char name[48];
+      std::snprintf(name, sizeof(name), "%012ld.jpg", ms);
+      char line[160];
+      std::snprintf(line, sizeof(line), "%s,%ld,%lu,%d,%.1f,%.3f,%.2f,%d\n", name, ms,
+                    static_cast<unsigned long>(out.frame_id), static_cast<int>(out.state),
+                    out.lane_width_cm, v_mps_.load(), wheel_deg_.load(), locked_exposure_);
+      std::lock_guard<std::mutex> lock(rec_mtx_);
+      if (rec_running_ && rec_q_.size() < REC_QUEUE_MAX) {
+        rec_q_.push_back({frame.clone(), name, line});
+        rec_cv_.notify_one();
+      }
+    }
+
     {
       std::lock_guard<std::mutex> lock(mtx_);
       if (draw) {
@@ -503,11 +581,6 @@ void CameraLane::get_latest(LaneOutput &out, bool copy_vis) const {
   out.stamp = latest_.stamp;
   out.gated = latest_.gated;
   out.horizon_frac = latest_.horizon_frac;
-  out.proj_f = latest_.proj_f;
-  out.proj_cx = latest_.proj_cx;
-  out.proj_cy = latest_.proj_cy;
-  out.proj_h = latest_.proj_h;
-  out.proj_pitch = latest_.proj_pitch;
   out.frame_w = latest_.frame_w;
   out.frame_h = latest_.frame_h;
   out.proc_ms = latest_.proc_ms;
