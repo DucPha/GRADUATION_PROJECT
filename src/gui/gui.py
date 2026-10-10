@@ -910,6 +910,9 @@ class AutoCarMonitor(QMainWindow):
         ctx = Qt.ShortcutContext.ApplicationShortcut
         self.sc_space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self.sc_space.setContext(ctx)
+        # Giu phim SPACE: ban phim tu lap ~30 lan/s -> xe bat/tat lien tuc
+        # (log 10/10 12:58). Chi nhan 1 lan moi lan bam.
+        self.sc_space.setAutoRepeat(False)
         self.sc_space.activated.connect(self.toggle_run)
         self.sc_esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.sc_esc.setContext(ctx)

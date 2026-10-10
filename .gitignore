@@ -49,3 +49,6 @@ cache/
 # Bien cuc bo
 .env
 .local/
+
+# Ban build firmware (arduino-cli / Arduino IDE tao lai khi nap)
+firmware/**/build/

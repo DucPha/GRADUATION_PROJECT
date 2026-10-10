@@ -38,8 +38,7 @@
 //      goc cua 90 do. Thieu vach -> tim vach moi, ghep cap dung be rong lan.
 //   5. Tam lan = vach doi nua lan theo PHAP TUYEN, noi goc kieu MITRE -> o goc
 //      gap 90 do duong tam di dung giua goc, khong cat qua vach trong.
-//   6. Goc cui camera tu hieu chinh tu diem tu cua 2 vach thang.
-//   7. Pure pursuit tu truc sau -> dev_px (thang do firmware), phat hien goc
+//   6. Pure pursuit tu truc sau -> dev_px (thang do firmware), phat hien goc
 //      gap phia truoc -> he so toc do.
 //
 // Toa do mat dat: X (m) sang PHAI, Z (m) ve PHIA TRUOC, goc = diem tren san
@@ -63,14 +62,10 @@ struct CameraProfile {
   // Do cao tam ong kinh so voi mat san (m)
   float height_m = 0.30f;
 
-  // Goc cui cua truc quang so voi phuong ngang (do). Do tren log that:
-  // 2 vach thang keo dai gap nhau o hang -106 cua anh 320x240 -> ~42 do.
-  // auto_pitch = true: tu chinh lai khi chay thang thay 2 vach. MAC DINH TAT:
-  // thu vong kin (goc that co dinh 42) no nhay 42 -> 44.5 -> 42.7 -> 44.5...
-  // moi lan doi > 2 do con xoa vach dang bam -> mat lan giua duong.
+  // Goc cui cua truc quang so voi phuong ngang (do), CO DINH. Do bang diem
+  // tu cua 2 dai thang song song tren anh that (doi goc camera -> do lai).
+  // (Ban tu hieu chinh khi chay da bo: tren duong that no nhay 38-46 do.)
   float pitch_deg = 35.5f; // toi 09/10 camera ngua len (08/10: 42)
-  bool auto_pitch = false;
-  float pitch_max_dev_deg = 8.0f; // chi nhan hieu chinh trong +- bay nhieu do
 
   // Goc nhin DOC (do). Tieu cu 250 px o anh 320x240 (lane_bev.py) = 51 do.
   float vfov_deg = 51.0f;
@@ -159,6 +154,19 @@ public:
   static constexpr float BLOB_THICK_M = 0.18f;
   static constexpr float RADIAL_DEG = 8.0f;
   static constexpr float RADIAL_NEAR_GAP_M = 0.12f;
+  // Doan vach chia thang ve chan camera (lech <= RADIAL_LINE_DEG) dai >=
+  // RADIAL_LINE_MIN_M = chan ban / ghe (vat dung dung chieu xuong san thanh
+  // tia ve camera). Bang keo chi chia ve camera khi xe nam tren duong keo dai
+  // cua no. Loc khoi (filter_clutter) khong bat duoc khi chan ban CHAM vach
+  // (dinh chung 1 khoi). 2 truong hop (ban 09/10 15:47):
+  //  - doan dau vach, bat dau cach mep duoi tam nhin >= RADIAL_LINE_GAP_M
+  //    (chan ban dung rieng) -> bo ca vach,
+  //  - doan sau 1 goc gap >= RADIAL_KINK_DEG (di doc bang keo roi re vao chan
+  //    ban dung sat vach) -> cat tu goc gap.
+  static constexpr float RADIAL_LINE_DEG = 12.0f;
+  static constexpr float RADIAL_LINE_MIN_M = 0.12f;
+  static constexpr float RADIAL_LINE_GAP_M = 0.06f;
+  static constexpr float RADIAL_KINK_DEG = 30.0f;
   // TACH KHOI DAY: vung nao chua vua 1 hinh tron duong kinh BLOB_OPEN_M
   // (giay, o cam, ghe, tui...) la vat, khong phai bang keo -> xoa vung do
   // (kem vien BLOB_EAT_PX) truoc khi chia thanh phan. Nho vay vach dinh vao
@@ -180,6 +188,13 @@ public:
   static constexpr int GLARE_MIN_V = 245; // = LINE_GLARE_LEVEL cua Python (chay sang)
   static constexpr float GLARE_FLOOR_GAIN = 1.20f; // hoac sang hon muc san 20%
   static constexpr int GLARE_BRIDGE_STEPS = 8;     // 8 x 3 cm = 24 cm
+  // Vung loa de "to den lai" vach: nen cuc bo sang hon muc san cua khoi >= 10%
+  static constexpr float GLARE_ZONE_GAIN = 1.10f;
+  // Khoi mask nam trong dai +-CORRIDOR_HALF_M quanh vach dang bam (du doan)
+  // it nhat CORRIDOR_FRAC dien tich -> giu du manh / nhat / chia ve camera
+  static constexpr float CORRIDOR_HALF_M = 0.04f;
+  static constexpr float CORRIDOR_FRAC = 0.7f;
+  static constexpr float CORRIDOR_OTHER_HALF_M = 0.07f; // vach kia (du doan tu be rong lan)
   // Cho dut binh thuong noi toi da 2 buoc (6 cm). Ban truoc 3 buoc (9 cm):
   // dau vach nhay sang bui day cap / to giay nam gan -> vach cong queo.
   static constexpr int GAP_STEPS = 2;
@@ -345,7 +360,6 @@ public:
 
     float horizon_frac = 0.0f; // chan troi (ti le chieu cao anh, < 0 = tren mep anh)
     float pitch_deg = 0.0f;    // goc cui camera dang dung
-    bool pitch_confirmed = false;
     float near_z_m = 0.0f;     // mep gan nhat camera thay duoc (m truoc chan camera)
     float dark_ratio = 0.0f;   // nguong toi dang dung
 
@@ -473,6 +487,7 @@ private:
   bool follow(cv::Mat &work, const Poly &pred, float gate, Poly &pts,
               float &err) const;
   std::vector<Poly> candidates(cv::Mat &work, int max_n = 8) const;
+  bool trim_upright(Poly &pts) const;
 
   void predict_tracks(float dt);
   void pair_geom(const Poly &a, const Poly &b, float &dist, float &ang,
@@ -483,9 +498,6 @@ private:
   bool straight_head(const Poly &pts, float length, cv::Point2f &a,
                      cv::Point2f &b) const;
   void learn_width(const Poly &left, const Poly &right);
-  bool pitch_from_pair(const cv::Point2f ha[2], const cv::Point2f hb[2],
-                       double &pitch) const;
-  void calibrate_pitch(const std::vector<const Poly *> &lines);
   void adapt_threshold(const cv::Mat &rel, const std::vector<const Poly *> &obs);
 
   bool target_on(const Poly &path, float L, cv::Point2f &target,
@@ -497,8 +509,6 @@ private:
   bool ground_to_img(const cv::Point2f &g, cv::Point2d &p) const;
   static bool to_image(double pitch, double f, double h, double cx, double cy,
                        double X, double Z, double &u, double &v);
-  static cv::Point2f to_ground(double pitch, double f, double h, double cx,
-                               double cy, double u, double v);
   double ground_dist_m(double y) const;
 
   static float dist_to_polyline(const cv::Point2f &p, const Poly &poly,
@@ -599,10 +609,6 @@ private:
   float lane_w_local_age_ = 0.0f;       // s tu lan cuoi do duoc be rong
   bool have_width_ = false;             // da do duoc be rong lan nao chua
   std::deque<float> width_samples_;
-  std::deque<float> pitch_samples_;
-  bool pitch_confirmed_ = false;
-  double pending_pitch_ = -1.0; // goc cui moi, ap dung o frame sau
-  bool pending_reset_ = false;
   float dark_ratio_ = DARK_RATIO_INIT;
   float contrast_ = -1.0f;
   float last_fill_ = 0.0f;

@@ -571,7 +571,6 @@ void CameraLane::get_latest(LaneOutput &out, bool copy_vis) const {
   out.kink_dir = latest_.kink_dir;
   out.kink_deg = latest_.kink_deg;
   out.pitch_deg = latest_.pitch_deg;
-  out.pitch_confirmed = latest_.pitch_confirmed;
   out.near_z_m = latest_.near_z_m;
   out.dark_ratio = latest_.dark_ratio;
   out.fit_ok = latest_.fit_ok;

@@ -37,15 +37,14 @@ phép đổi pixel ↔ mét dựa vào 3 số trong launch:
 
 | Tham số | Mặc định | Ý nghĩa |
 |---|---|---|
-| `camera_pitch_deg` | 42.0 | góc cúi camera. Đo trên ảnh thật (log Python 08/10): 2 vạch thẳng kéo dài gặp nhau ở hàng −106 của ảnh 320×240 ⇒ ~42°, bề rộng làn đo lại ra đúng 42 cm |
+| `camera_pitch_deg` | 35.5 | góc cúi camera, CỐ ĐỊNH. Đo: chụp 2 dải thẳng song song, kéo dài gặp nhau ở hàng v ⇒ pitch = atan((H/2 − v)/f), f = (H/2)/tan 25.5°. 08/10 ~42°; tối 09/10 camera ngửa lên: 35.5° (2 dải cách 50 cm trên bàn đo ra 49.5 cm) |
 | `camera_height_m` | 0.30 | tâm ống kính cách sàn |
 | `camera_vfov_deg` | 51.0 | góc nhìn **dọc**. Chế độ 1920×1080 và 640×480 của cam này cùng góc dọc (4:3 chỉ cắt 2 bên) |
-| `camera_auto_pitch` | false | tự hiệu chỉnh góc cúi khi chạy thẳng thấy 2 vạch (±8° quanh `camera_pitch_deg`). Mặc định TẮT: thử vòng kín, ước lượng nhảy 42 → 44.5 → 42.7° dù góc thật cố định, mỗi lần đổi > 2° còn xoá vạch đang bám. Bật để đo 1 lần: log in `Tu hieu chinh goc cui camera: ... -> X` ⇒ điền X vào `camera_pitch_deg` rồi tắt lại |
 | (bỏ `lane_width_m`) | — | bề rộng làn không cài đặt: đo mỗi frame thấy 2 vạch (0.28–0.70 m), đường tâm = giữa 2 vạch đo được; chỉ 1 vạch thì dời nửa bề rộng vừa đo gần nhất |
 
 Kiểm tra: đặt xe giữa 2 vạch thẳng, overlay phải hiện `2 LANES` và `w` ≈ bề rộng làn thật.
-Camera cúi ~42° nên **không thấy chân trời** trong ảnh; mặt sàn nhìn thấy từ ~0.13 m tới
-~1.1 m trước chân camera (ô BEV góc trên trái overlay).
+Camera cúi 35.5° nên **không thấy chân trời** trong ảnh; mặt sàn nhìn thấy từ ~0.14 m tới
+~1.6 m trước chân camera (ô BEV góc trên trái overlay).
 
 ## 2. Vùng làm việc
 
@@ -56,7 +55,7 @@ Camera cúi ~42° nên **không thấy chân trời** trong ảnh; mặt sàn nh
 
 Log khởi động in `geometry: ... BEV 160xN (1 cm), Z gần..xa m` = vùng mặt sàn nhìn thấy.
 
-## 3. Lái theo `dev_px` của camera (chỉ dùng khi `steer_mode:=camera`)
+## 3. Lái theo `dev_px` của camera (chỉ khi PathTracker chưa có / mất đường nhớ)
 
 | Hằng số | Mặc định | Ý nghĩa |
 |---|---|---|
@@ -71,19 +70,25 @@ Log khởi động in `geometry: ... BEV 160xN (1 cm), Z gần..xa m` = vùng m�
 
 | Tham số (launch) | Mặc định | Ý nghĩa |
 |---|---|---|
-| `speed_x10` | 70 | đủ 2 vạch + đường thẳng (7.0 km/h ≈ ESC 103). Cua nhẹ rơi về ESC 102, cua gắt ESC 101 |
-| `speed_corner_x10` | 50 | 1 vạch, hoặc 2 vạch ở cua gắt nhất (5.0 km/h ≈ ESC 101 = `ESC_CURVE` 1561 µs) |
-| `speed_hold_x10` | 50 | mất cả 2 vạch, đang giữ hướng |
-| `speed_min_x10` | 50 | sàn tốc độ khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
-| `speed_ramp_x10` | 30 | tăng tốc 3 km/h mỗi giây; giảm tốc luôn tức thì |
+| `speed_x10` | 65 | đủ 2 vạch + đường thẳng (lệnh 6.5 km/h ≈ 1562 µs) |
+| `speed_one_x10` | 60 | 1 vạch, đường thẳng, xe giữa làn (≈ 1559 µs) |
+| `speed_corner_x10` | 58 | cua gắt (cả khi đang ở chế độ bám vạch ngoài), 1 vạch, hoặc 2 vạch cong gắt nhất (≈ 1557.5 µs; 52 vẫn kêu két) |
+| `coast_decel_mps2` / `corner_margin_m` | 0.45 / 0.20 | giảm tốc trước cua theo khoảng cách tới cua (ESC chỉ nhả ga, xe trôi). Đường thẳng dài rồi vẫn vọt ra ngoài cua ⇒ giảm `coast_decel_mps2` (0.5) |
+| `speed_hold_x10` | 58 | mất cả 2 vạch, đang giữ hướng |
+| `speed_min_x10` | 58 | sàn tốc độ lệnh khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
+| `speed_ramp_x10` / `speed_down_x10` | 30 / 20 | tăng tốc khi ra cua (58 → 65 ~0.25 s) / giảm đều khi vào cua (~0.35 s), x10 mỗi giây |
 
 Đủ 2 vạch: `tốc độ = corner + (speed − corner) × speed_scale`. `speed_scale` (camera) = 1
 trên đường thẳng, về 0 khi hướng đường tâm ở đầu xa lệch ≥ 50° (`CURVE_HEADING_*_DEG`),
 độ cong ≥ 1.5 1/m (`CURVE_K_*`), hoặc góc gập cách trục sau ≤ 0.7 m (`CORNER_SLOW_*`).
 
-Bảng ESC firmware rất dốc: 100 ≈ 3.6, 101 ≈ 5.1, 102 ≈ 6.6, 104 ≈ 7.8, 105 ≈ 8.3 km/h.
-Muốn nhanh hơn trên đường thẳng: `speed_x10:=75` (ESC 104). Cua đã ở sàn ESC 101: firmware ghi
-ESC theo độ nguyên nên mọi lệnh < ~6.1 km/h đều ra ESC 101; chậm hơn nữa phải sửa firmware.
+Firmware ghi ESC theo µs: `1543 + (v − 3.58) / 2.98 × 19.5` (v = km/h lệnh), sàn 1550 µs,
+cộng tới +3 µs khi hết lái. Mỗi đơn vị x10 ≈ 0.65 µs.
+
+**Tốc độ thật** (đo từ ảnh ghi 09/10): lệnh 4.8 km/h ⇒ ~0.42 m/s (×0.32) và chậm dần khi
+pin yếu. Ở 0.42 m/s xe đi 1.7 cm mỗi frame (25 fps) ⇒ xử lý ảnh không bị ảnh hưởng; mô
+phỏng cũng cho thấy giảm tốc đường thẳng 62 → 55 không đổi gì việc bám làn (giới hạn là góc
+lái). BLDC kêu ⇒ tăng `speed_min_x10` / `speed_corner_x10` (54, 56…), đừng giảm.
 
 ## 5. Mask vạch (giống `lane_bev.py`)
 
@@ -104,7 +109,7 @@ mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, tự hiệu chỉnh)
 ## 6. Hướng lái (firmware)
 
 - `dev` luôn tính theo ảnh **tham chiếu 640 px** tại 0.65 m (~1.5 mm/px). `> 0` = lái phải.
-- `CAM_DEADZONE = 4` px, bão hoà `CAM_MAX_DEV = 45` px → 30°.
+- `CAM_DEADZONE = 4` px, độ dốc 30° / 41 px, bão hoà `CAM_MAX_DEV ≈ 52` px → 35° (servo 55..125).
 - `STEER_KP = 1.0`: xe lắc qua lại ⇒ giảm (0.8); cua gắt không đủ lái thì giữ 1.0 và giảm
   `PP_LOOKAHEAD_M` phía camera.
 - `ALPHA_STEER = 0.5`: lọc nhẹ `dev` trên ESP32 (Mini PC đã lọc chính).
@@ -115,21 +120,26 @@ mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, tự hiệu chỉnh)
 - Dashboard ước lượng góc servo bằng cùng công thức (`fusion_viz_node.cpp`, `FW_*`): đổi
   firmware thì đổi luôn ở đó.
 
-## 7. Lái theo đường đã nhớ (`steer_mode:=track`, mặc định) — ĐO 3 SỐ NÀY TRƯỚC
+## 7. Lái theo đường đã nhớ (PathTracker) — ĐO 3 SỐ NÀY TRƯỚC
 
 | Tham số (launch) | Mặc định | Cách đo / khi nào chỉnh |
 |---|---|---|
 | `wheelbase_m` | 0.26 | thước: tâm trục trước → tâm trục sau |
 | `cam_to_rear_axle_m` | 0.18 | đo trên xe ~18 cm. Thả dây dọi từ camera xuống sàn, đo dọc từ điểm đó tới tâm trục sau. **Ảnh hưởng lớn nhất**: thử vòng kín khai báo 0.12 mà thật 0.30 (hoặc ngược lại) ⇒ xe chạm vạch 30–50 % thời gian. (car_config.py ghi 0.12 — sai) |
-| `steer_ratio` | 0.6 | quay servo hết lái (dashboard SERVO ≈ 60 hoặc 120): đo góc bánh lệch so với thẳng, chia cho 30. Chạy thật với 0.8 rồi 0.65: xe bắt về phía ngoài cua, cua nhẹ bẻ không đủ ⇒ hạ 0.6. Khai báo CAO hơn thật ⇒ lệch ra ngoài cua; THẤP hơn thật ⇒ cắt vào trong / lắc |
-| `single_search_m` / `single_search_rate` | 0.08 / 0.15 | chỉ thấy 1 vạch: dời dần tâm bám về phía vạch bị mất (tối đa m, tốc độ m/s) ⇒ xe lái vào trong tìm lại vạch kia, ôm cua khi vạch trong ra khỏi khung (`SINGLE_LINE_SEARCH_PX` bản Python). Thấy lại 2 vạch thì trả dần về 0 |
+| `steer_ratio` | 0.6 | góc bánh / góc servo khai báo. Đo từ ảnh 09/10: thật ~0.42 (servo hết lái 30° ⇒ xe quay 21°/s ở 0.42 m/s ⇒ bánh ~12.7°). GIỮ 0.6: thử vòng kín, đặt đúng 0.42 (kèm `odom_speed_scale` 0.32) lại tệ hơn vì odometry ước lượng thừa đang vô tình giúp bẻ lái sớm |
+| `single_search_m` / `single_search_rate` | 0.08 / 0.30 | chỉ thấy 1 vạch: dời dần tâm bám về phía vạch bị mất (tối đa m, tốc độ m/s) ⇒ xe lái vào trong tìm lại vạch kia, ôm cua khi vạch trong ra khỏi khung (`SINGLE_LINE_SEARCH_PX` bản Python). Thấy lại 2 vạch thì trả dần về 0 |
 | `xte_gain` | 2.0 | phản hồi lệch ngang tại chân camera: `atan(xte_gain·e / (v + 0.5))`. Pure pursuit thuần lệch 5 cm chỉ bẻ ~3°. Xe lắc qua lại trên đường thẳng ⇒ giảm (1.0); hay lệch ra ngoài cua ⇒ tăng (2.5) |
 | `xte_ki` / `xte_i_max_deg` | 50 / 6 | tích phân lệch ngang (độ bánh / m / s): bù trim servo, camera lắp lệch/xoay vài độ (`STEER_KI` / `STEER_I_LIMIT` bản Python). `/lane/status`: `xte=` lệch (cm), `xi=` phần tích phân (độ) |
 | `lookahead_min_m` / `lookahead_gain_s` / `lookahead_max_m` | 0.35 / 0.20 / 0.80 | tầm nhìn = min + gain·v. Xe lắc trên đường thẳng ⇒ tăng `min` (0.45); cắt cua ⇒ giảm `min` (0.30) |
 | `actuator_latency_s` | 0.08 | xe vào cua trễ, văng ra ngoài ⇒ tăng (0.12) |
 | `camera_latency_s` | 0.04 | tương tự, cho trễ camera |
-| `car_half_width_m` / `line_margin_m` | 0.10 / 0.04 | rào chắn vạch: nửa bề ngang xe / khoảng hở tối thiểu |
-| `odom_speed_scale` | 1.0 | tốc độ thật / tốc độ lệnh. Đo: cho chạy 2 m thẳng, bấm giờ |
+| `car_half_width_m` / `tape_half_m` / `line_margin_m` | 0.125 / 0.035 / 0.02 | rào chắn vạch (bánh trước và 0.25 m trước đó): nửa bề ngang xe / nửa bề rộng băng keo / khoảng hở tối thiểu tới MÉP băng keo |
+| `corner_gain` | 1.15 | trong cua nhân góc lái pure pursuit (1 = tắt) |
+| `lookahead_corner_scale` | 0.8 | trong cua (độ cong phía trước 0.4 → 1.0 1/m) nhân khoảng nhìn trước với hệ số này: điểm ngắm ~0.51 m thay vì ~0.64 m, không rơi lên đoạn thẳng SAU cua ⇒ bớt cắt góc đè vạch trong. 0.6 đã thử trên bản ghi: điểm ngắm sát đầu đường, lái giật ±21°. `1` = tắt |
+| `kink_radius_m` | 1.0 | đường đua là các đoạn thẳng nối GÓC GẤP. Pure pursuit ngắm ~0.65 m nên thấy đỉnh góc là bẻ ngay ⇒ vào sớm, cắt góc. Ở đây chỉ bẻ khi trục sau còn cách đỉnh R·tan(góc/2), trước đó đi thẳng theo đoạn trước góc (chỉ khi thân xe song song đoạn đó, lệch < 12°; đang quay dở qua góc trước thì không giữ). Vẫn vào sớm / đè vạch trong ⇒ giảm (0.8); vọt ra vạch ngoài ⇒ tăng (1.3); `0` = tắt |
+| `corner_outer_gap_m` / `corner_outer_max_m` | 0.08 / 0.15 | CHỈ Ở CUA GẮT: bám theo vạch NGOÀI, giữ mép xe cách mép băng keo vạch ngoài đúng `gap`. Khoảng cách đo TRỰC TIẾP từ điểm ngắm tới vạch ngoài (trong cua thường không thấy vạch trong nên bề rộng làn chỉ là ước lượng); quá sát thì dời vào trong (tối đa 5 cm). Chạm vạch ngoài ⇒ tăng (0.10–0.12); vẫn đè vạch trong ⇒ giảm (0.05); `-1` = tắt. `/lane/status`: `cob=` (cm, > 0 = sang phải), `sharp=L/R/-`, `od=` (cm, điểm ngắm → vạch ngoài) |
+| `corner_sharp_k` | 1.0 | điều kiện vào chế độ cua gắt: độ cong phía trước ≥ mức này VÀ bánh đã bẻ ≥ 8° cùng chiều trong 0.15 s; giữ tới khi bánh về < 6° (0.2 s). Không giữ theo độ cong vì giữa cua gấp khúc đoạn thẳng kế tiếp nằm chéo trước mặt ⇒ độ cong ~0 dù bánh hết lái. Cua lớn không bật ⇒ giảm (0.8) |
+| `odom_speed_scale` | 1.0 | tốc độ thật / tốc độ lệnh khai báo. Đo thật ~0.32 nhưng giữ 1.0 (xem `steer_ratio`) |
 | `lost_memory_ms` | 1500 | mất cả 2 vạch: chạy tiếp theo đường đã nhớ tối đa bao lâu |
 
 Kiểm tra trên bản đồ nhỏ góc phải ảnh overlay:
@@ -139,4 +149,3 @@ Kiểm tra trên bản đồ nhỏ góc phải ảnh overlay:
 - `/lane/status`: `mode=track turn=R mem=0.85 la=0.63 wheel=+18.0 guard=+0.0`.
   `guard` ≠ 0 thường xuyên ⇒ xe hay sát vạch ⇒ kiểm tra `steer_ratio`, giảm tốc cua.
 
-Muốn quay lại cách lái cũ để so sánh: `./run.sh steer_mode:=camera`.

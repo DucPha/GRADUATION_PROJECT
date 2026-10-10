@@ -39,8 +39,8 @@ constexpr uint8_t PIN_HALL   = 4;
 // ±35° (2026-10-09, trước ±30°): đánh lái rộng hơn ở cua. Servo kêu rè / gồng
 // khi đánh hết lái = chạm cữ cơ khí -> giảm về 57/123.
 constexpr int STEER_CENTER = 90;
-constexpr int STEER_MIN = 60;   // 60..120 (+-30 do, 09/10 toi theo yeu cau)
-constexpr int STEER_MAX = 120;
+constexpr int STEER_MIN = 55;   // 55..125 (+-35 do) nhu lan chay 09/10 15:47 (10/10)
+constexpr int STEER_MAX = 125;
 
 // dev (px ảnh tham chiếu 640, ~1.5 mm/px ở 0.65 m). Deadzone nhỏ để lệch
 // 1 cm đã bắt đầu kéo về giữa làn. Độ dốc giữ nguyên 30° / 41 px như bản ±30°
