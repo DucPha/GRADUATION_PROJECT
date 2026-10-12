@@ -1053,7 +1053,7 @@ class AutoCarMonitor(QMainWindow):
         footer.setFixedHeight(26)
         lay = QHBoxLayout(footer)
         lay.setContentsMargins(16, 0, 16, 0)
-        hint = QLabel("SPACE  chạy / dừng      ESC  dừng ngay      Lăn chuột trên LiDAR  đổi tầm nhìn")
+        hint = QLabel("SPACE  chạy / dừng      ESC  dừng ngay      X (cửa sổ)  thoát      Lăn chuột trên LiDAR  đổi tầm nhìn")
         hint.setObjectName("keyHint")
         self.footer_info = QLabel("")
         self.footer_info.setObjectName("bottomText")

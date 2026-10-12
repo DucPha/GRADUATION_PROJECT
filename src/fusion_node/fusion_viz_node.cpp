@@ -21,11 +21,17 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -417,6 +423,25 @@ public:
                 "/autocar/dbg/lane_bin/compressed", 1);
         }
 
+        // Quy dao xe cho Foxglove (panel 3D, fixed frame = odom): TF
+        // odom -> base_link (truc sau) theo odometry cua PathTracker, va
+        // base_link -> laser de /scan nam dung huong xe. Chi de xem.
+        path_pub_ = create_publisher<nav_msgs::msg::Path>("/autocar/path", 1);
+        odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/autocar/odom", 10);
+        tf_pub_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        static_tf_pub_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+        {
+            // a_xe = a_ROS + offset (lidar_node.hpp) -> laser quay offset quanh Z
+            geometry_msgs::msg::TransformStamped t;
+            t.header.stamp = now();
+            t.header.frame_id = "base_link";
+            t.child_frame_id = "laser";
+            const double yaw = lidar_offset_deg_ * M_PI / 180.0;
+            t.transform.rotation.z = std::sin(0.5 * yaw);
+            t.transform.rotation.w = std::cos(0.5 * yaw);
+            static_tf_pub_->sendTransform(t);
+        }
+
         if (enable_lidar) {
             lidar_.set_mount_offset_deg(lidar_offset_deg_);
             lidar_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
@@ -427,6 +452,17 @@ public:
                 },
                 ctrl_opts);
         }
+
+        // DIEM DICH: bam 1 diem tren /autocar/path (Foxglove panel 3D, Display
+        // frame = odom, cong cu "Publish point" -> /clicked_point). Xe van bam
+        // lan bang camera, chi tu DUNG khi toi diem do. Bam xa duong da ve
+        // (> GOAL_SNAP_M) = huy dich.
+        goal_pub_ = create_publisher<geometry_msgs::msg::PointStamped>(
+            "/autocar/goal", rclcpp::QoS(1).transient_local());
+        goal_sub_ = create_subscription<geometry_msgs::msg::PointStamped>(
+            "/clicked_point", 10,
+            [this](geometry_msgs::msg::PointStamped::ConstSharedPtr msg) { on_goal(*msg); },
+            ctrl_opts);
 
         // Lenh chay/dung tu GUI (nut SPACE). GUI gui lai ~10 Hz lam heartbeat.
         run_sub_ = create_subscription<std_msgs::msg::Bool>(
@@ -459,7 +495,10 @@ public:
                         : "require_start:=false -> xe chay ngay khi thay lan.");
     }
 
-    // Node tat: gui lenh EMG mot lan cuoi truoc khi dong serial
+    // Node tat (Ctrl+C / dong dashboard): gui EMG + dev 0 = nha ga, servo ve
+    // 90 do (STEER_CENTER firmware). Gui ~100 ms de firmware (100 Hz, loc EMA
+    // dev) kip dua banh ve thang truoc khi dong serial; mat goi thi watchdog
+    // firmware 500 ms cung dat dev 0.
     ~FusionNode() override {
         control_timer_.reset();
         viz_timer_.reset();
@@ -467,10 +506,12 @@ public:
 
         if (serial_ && serial_->is_open()) {
             SerialCommand stop;
+            stop.dev_final_px = 0;
+            stop.speed_control = 0;
             stop.emergency_stop = true;
-            for (int i = 0; i < 3; ++i) {
+            for (int i = 0; i < 10; ++i) {
                 serial_->send_command(stop);
-                std::this_thread::sleep_for(5ms);
+                std::this_thread::sleep_for(10ms);
             }
         }
         if (camera_) {
@@ -742,6 +783,10 @@ private:
             // thay du 2 vach roi moi xuat phat
             lane_lost_since_ = t_now;
             lane_acquired_ = false;
+            if (goal_reached_) {
+                // Da toi dich, bam chay lai -> bo dich, chay binh thuong
+                clear_goal();
+            }
             RCLCPP_INFO(get_logger(), "RUN: xe bat dau chay");
         } else if (!armed && armed_) {
             RCLCPP_WARN(get_logger(), "STOP: %s",
@@ -828,6 +873,33 @@ private:
         if (!armed_) {
             emg = true;
             dev = 0;
+        }
+
+        // Diem dich: VACH NGANG duong tai dich. Xe di cung chieu, lech ngang
+        // < GOAL_LAT_M, vuot qua vach -> dung va giu dung (odometry troi
+        // ngang sau 1 vong nen khong doi xe toi dung ban kinh nho quanh dich).
+        // Con cach < GOAL_SLOW_M -> chay toc do nho nhat de dung chinh xac.
+        if (goal_active_) {
+            double px = 0.0, pz = 0.0, th = 0.0;
+            tracker_.pose(px, pz, th);
+            const double gx = goal_x_ - pz;      // REP-103: x = z, y = -x
+            const double gy = goal_y_ + px;
+            goal_dist_m_ = std::hypot(gx, gy);
+            const double along = gx * std::cos(goal_yaw_) + gy * std::sin(goal_yaw_);   // > 0: dich phia truoc
+            const double lat = std::fabs(-gx * std::sin(goal_yaw_) + gy * std::cos(goal_yaw_));
+            const bool near = std::cos(-th - goal_yaw_) > 0.5 && lat < GOAL_LAT_M;
+            if (!goal_reached_ && near && goal_prev_along_ > 0.0 && along <= 0.0) {
+                goal_reached_ = true;
+                RCLCPP_INFO(get_logger(), "DICH: da toi (%.2f, %.2f) m, lech ngang %.0f cm -> DUNG. "
+                            "Bam chay lai = bo dich.", goal_x_, goal_y_, lat * 100.0);
+            }
+            goal_prev_along_ = along;
+            if (goal_reached_) {
+                emg = true;
+                dev = 0;
+            } else if (near && along > 0.0 && along < GOAL_SLOW_M && target > 0) {
+                target = std::min(target, speed_min_x10_);
+            }
         }
 
         // Dang o cua gat: toc do cua (= toc do nho nhat); ra khoi cua moi tang
@@ -1078,7 +1150,7 @@ private:
             "devm=%.1fcm curv=%.3f scale=%.2f spd=%.1f kmh=%.2f fbage=%ld "
             "servo=%.1f hz=%.2f pitch=%.1f esc=%d fwemg=%d fwwd=%d fwcmd=%d "
             "mode=%s turn=%c mem=%.2f la=%.2f wheel=%.1f guard=%.1f xte=%.1fcm xi=%.1f corner=%.2f vest=%.1f cob=%.1fcm sharp=%c od=%.0fcm kink=%.2f/%.0f%s "
-            "pidw=%.2f pide=%.1fcm pidpsi=%.1f pidi=%.1f pid=%.1f",
+            "pidw=%.2f pide=%.1fcm pidpsi=%.1f pidi=%.1f pid=%.1f goal=%.0fcm goalok=%d",
             two_lanes_ ? 1 : 0,
             kTrack[(track_ >= 0 && track_ <= 2) ? track_ : 0],
             last_dev_px_,
@@ -1120,13 +1192,140 @@ private:
             trk_xte_m_ * 100.0, trk_xte_i_deg_, trk_corner_m_, v_odom_x10_ / 10.0, corner_bias_m_ * 100.0,
             sharp_turn_ < 0 ? 'L' : sharp_turn_ > 0 ? 'R' : '-', outer_d_m_ * 100.0,
             trk_kink_m_, trk_kink_deg_, trk_kink_hold_ ? "H" : "",
-            trk_pid_w_, trk_pid_e_m_ * 100.0, trk_pid_psi_deg_, trk_pid_i_deg_, trk_pid_deg_);
+            trk_pid_w_, trk_pid_e_m_ * 100.0, trk_pid_psi_deg_, trk_pid_i_deg_, trk_pid_deg_,
+            goal_active_ ? goal_dist_m_ * 100.0 : -1.0, goal_reached_ ? 1 : 0);
 
         std_msgs::msg::String msg;
         msg.data = buf;
         status_pub_->publish(msg);
 
+        publish_pose();
+
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "%s", buf);
+    }
+
+    // Odometry PathTracker (X phai, Z truoc, th > 0 = quay phai) -> REP-103
+    // (x truoc, y trai, yaw nguoc kim dong ho): x = z, y = -x, yaw = -th.
+    // TF 10 Hz; /autocar/path 2 Hz, 1 diem moi PATH_STEP_M, toi da
+    // PATH_MAX_PTS diem (bo diem cu) cho nhe WiFi.
+    void publish_pose() {
+        double px = 0.0, pz = 0.0, th = 0.0;
+        tracker_.pose(px, pz, th);
+        const auto stamp = now();
+
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = stamp;
+        t.header.frame_id = "odom";
+        t.child_frame_id = "base_link";
+        t.transform.translation.x = pz;
+        t.transform.translation.y = -px;
+        t.transform.rotation.z = std::sin(-0.5 * th);
+        t.transform.rotation.w = std::cos(-0.5 * th);
+        tf_pub_->sendTransform(t);
+
+        // Cung vi tri, dang Odometry de ve x / y / z theo thoi gian (Plot).
+        // z luon 0: odometry 2D, xe khong co cam bien do cao.
+        nav_msgs::msg::Odometry od;
+        od.header = t.header;
+        od.child_frame_id = "base_link";
+        od.pose.pose.position.x = t.transform.translation.x;
+        od.pose.pose.position.y = t.transform.translation.y;
+        od.pose.pose.orientation = t.transform.rotation;
+        const double v_mps = v_odom_x10_ / 36.0 * odom_speed_scale_;
+        od.twist.twist.linear.x = v_mps;
+        od.twist.twist.angular.z = -v_mps / std::max(0.05, tracker_.params().wheelbase_m) *
+                                   std::tan(std::clamp(wheel_now_deg_, -tracker_.params().max_steer_deg,
+                                              tracker_.params().max_steer_deg) * M_PI / 180.0);
+        odom_pub_->publish(od);
+
+        geometry_msgs::msg::PoseStamped ps;
+        ps.header = t.header;
+        ps.pose.position.x = t.transform.translation.x;
+        ps.pose.position.y = t.transform.translation.y;
+        ps.pose.orientation = t.transform.rotation;
+        const auto& poses = path_msg_.poses;
+        if (poses.empty() ||
+            std::hypot(ps.pose.position.x - poses.back().pose.position.x,
+                       ps.pose.position.y - poses.back().pose.position.y) >= PATH_STEP_M) {
+            path_msg_.poses.push_back(ps);
+            if (path_msg_.poses.size() > PATH_MAX_PTS) {
+                path_msg_.poses.erase(path_msg_.poses.begin(),
+                                      path_msg_.poses.begin() + PATH_MAX_PTS / 10);
+            }
+        }
+        if (++path_tick_ % 5 == 0) {
+            path_msg_.header.stamp = stamp;
+            path_msg_.header.frame_id = "odom";
+            path_pub_->publish(path_msg_);
+        }
+    }
+
+    // Diem bam -> diem gan nhat tren duong da ve (path_msg_, frame odom).
+    // Huong dich = huong duong tai do, de chi dung khi xe di CUNG CHIEU.
+    void on_goal(const geometry_msgs::msg::PointStamped& msg) {
+        if (!msg.header.frame_id.empty() && msg.header.frame_id != "odom") {
+            RCLCPP_WARN(get_logger(), "DICH: diem bam o frame '%s', can 'odom' (Foxglove: "
+                        "Display frame = odom) -> bo qua", msg.header.frame_id.c_str());
+            return;
+        }
+        const auto& ps = path_msg_.poses;
+        if (ps.size() < 3) {
+            RCLCPP_WARN(get_logger(), "DICH: chua co duong da ve, cho xe chay 1 doan truoc");
+            return;
+        }
+        size_t best = 0;
+        double best_d = 1e9;
+        for (size_t i = 0; i < ps.size(); ++i) {
+            const double d = std::hypot(ps[i].pose.position.x - msg.point.x,
+                                        ps[i].pose.position.y - msg.point.y);
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        if (best_d > GOAL_SNAP_M) {
+            if (goal_active_) {
+                clear_goal();
+                RCLCPP_INFO(get_logger(), "DICH: bam xa duong da ve %.0f cm -> HUY dich",
+                            best_d * 100.0);
+            } else {
+                RCLCPP_WARN(get_logger(), "DICH: diem bam cach duong da ve %.0f cm (> %.0f) "
+                            "-> bo qua", best_d * 100.0, GOAL_SNAP_M * 100.0);
+            }
+            return;
+        }
+        const auto& a = ps[best > 0 ? best - 1 : 0].pose.position;
+        const auto& b = ps[std::min(best + 1, ps.size() - 1)].pose.position;
+        goal_x_ = ps[best].pose.position.x;
+        goal_y_ = ps[best].pose.position.y;
+        goal_yaw_ = std::atan2(b.y - a.y, b.x - a.x);
+        goal_active_ = true;
+        goal_reached_ = false;
+        goal_prev_along_ = -1.0;   // can thay dich o PHIA TRUOC truoc khi tinh vuot
+        double px = 0.0, pz = 0.0, th = 0.0;
+        tracker_.pose(px, pz, th);
+        goal_dist_m_ = std::hypot(goal_x_ - pz, goal_y_ + px);
+
+        geometry_msgs::msg::PointStamped g;
+        g.header.stamp = now();
+        g.header.frame_id = "odom";
+        g.point.x = goal_x_;
+        g.point.y = goal_y_;
+        goal_pub_->publish(g);
+        RCLCPP_INFO(get_logger(), "DICH: (%.2f, %.2f) m, cach xe %.0f cm. Bam chay (SPACE) "
+                    "-> xe bam lan toi do roi dung.", goal_x_, goal_y_, goal_dist_m_ * 100.0);
+    }
+
+    void clear_goal() {
+        goal_active_ = false;
+        goal_reached_ = false;
+        goal_dist_m_ = -1.0;
+        // Diem rat xa = an diem dich tren Foxglove
+        geometry_msgs::msg::PointStamped g;
+        g.header.stamp = now();
+        g.header.frame_id = "odom";
+        g.point.z = -1000.0;
+        goal_pub_->publish(g);
     }
 
     // =========================================================================
@@ -1159,6 +1358,29 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr roi_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr bin_pub_;
     long last_viz_frame_ = -1;   // chi dung trong viz_tick
+
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_pub_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_pub_;
+    nav_msgs::msg::Path path_msg_;   // chi dung trong status_tick
+    long path_tick_ = 0;
+    static constexpr double PATH_STEP_M = 0.05;
+    static constexpr size_t PATH_MAX_PTS = 3000;
+
+    // ---- Diem dich (control_tick / on_goal / status_tick, cung nhom ctrl) ----
+    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_sub_;
+    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr goal_pub_;
+    bool goal_active_ = false;
+    bool goal_reached_ = false;
+    double goal_prev_along_ = -1.0; // khoang cach doc duong toi dich chu ky truoc (m)
+    double goal_x_ = 0.0;          // odom, REP-103 (m)
+    double goal_y_ = 0.0;
+    double goal_yaw_ = 0.0;        // huong duong tai dich (rad)
+    double goal_dist_m_ = -1.0;
+    static constexpr double GOAL_SNAP_M = 0.5;   // diem bam xa duong hon -> bo / huy
+    static constexpr double GOAL_LAT_M = 0.35;   // lech ngang toi da khi vuot vach dich
+    static constexpr double GOAL_SLOW_M = 0.6;   // gan hon -> chay toc do nho nhat
 
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr viz_timer_;

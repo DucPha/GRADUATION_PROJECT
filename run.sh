@@ -8,7 +8,8 @@
 #   ./run.sh speed_x10:=30        # tham so launch truyen nguyen
 #
 # Xe chi chay khi bam SPACE (hoac nut CHAY XE) tren dashboard.
-# Dong dashboard hoac Ctrl+C -> xe dung.
+# Dong dashboard (nut X tren cua so) hoac Ctrl+C -> tat CA chuong trinh:
+# node gui lenh dung (EMG, dev 0) -> ESP32 nha ga, servo ve 90 do.
 set -e
 
 cd "$(dirname "$0")"
@@ -55,21 +56,49 @@ fi
 source install/setup.bash
 
 GUI_PID=""
+VEHICLE_PID=""
 cleanup() {
+	trap - EXIT INT TERM
 	[ -n "$GUI_PID" ] && kill "$GUI_PID" 2>/dev/null || true
-	[ -n "$VEHICLE_PID" ] && kill -INT "$VEHICLE_PID" 2>/dev/null || true
+	if [ -n "$VEHICLE_PID" ] && kill -0 "$VEHICLE_PID" 2>/dev/null; then
+		# SIGINT cho CA NHOM launch (fusion_node, lidar): fusion_node thoat dang
+		# hoang, gui EMG + dev 0 (servo 90) truoc khi dong serial; het node thi
+		# launch tu thoat. Gui ca nhom vi ros2 launch co the dang lo SIGINT
+		# (12/10 10:46: dong dashboard xong xe van chay). Doi toi 10 s; chua
+		# thoat thi TERM ca nhom (fusion_node bat ca SIGTERM, van gui EMG).
+		kill -INT -- "-$VEHICLE_PID" 2>/dev/null || kill -INT "$VEHICLE_PID" 2>/dev/null || true
+		for _ in $(seq 100); do
+			kill -0 "$VEHICLE_PID" 2>/dev/null || break
+			sleep 0.1
+		done
+		kill -TERM -- "-$VEHICLE_PID" 2>/dev/null || true
+	fi
 	wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "==== KHOI DONG XE (camera + ESP32 /dev/ttyUSB0 + LiDAR /dev/ttyUSB1) ===="
+# Job control: moi tien trinh nen co nhom rieng (PGID = PID) de cleanup() gui
+# tin hieu cho ca nhom launch. Ctrl+C toi run.sh -> cleanup() chuyen tiep.
+set -m
+
+echo "==== KHOI DONG XE (camera + ESP32 /dev/ttyUSB0 + LiDAR /dev/ttyUSB1 + Foxglove) ===="
+# Laptop cung WiFi: Foxglove -> Open connection -> Foxglove WebSocket -> dia chi duoi
+for ip in $(hostname -I); do
+	case "$ip" in *:*) ;; *) echo "  Foxglove: ws://$ip:8765" ;; esac
+done
 ros2 launch fusion_node fusion.launch.py "${ARGS[@]}" &
 VEHICLE_PID=$!
 
 if [ "$GUI" -eq 1 ]; then
-	echo "==== KHOI DONG DASHBOARD (SPACE = chay/dung, ESC = dung) ===="
+	echo "==== KHOI DONG DASHBOARD (SPACE = chay/dung, ESC = dung, nut X cua so = thoat) ===="
 	python3 src/gui/gui.py &
 	GUI_PID=$!
 fi
 
-wait "$VEHICLE_PID"
+if [ -n "$GUI_PID" ]; then
+	# Thoat khi 1 trong 2 dung: dong dashboard -> tat xe; xe loi -> tat dashboard
+	wait -n "$VEHICLE_PID" "$GUI_PID" || true
+	echo "==== DUNG CHUONG TRINH (servo ve 90) ===="
+else
+	wait "$VEHICLE_PID" || true
+fi

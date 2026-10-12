@@ -97,6 +97,15 @@ def resolve_ports(esp_req, lidar_req):
     return esp, lidar, note
 
 
+FOXGLOVE_PORT = 8765
+
+
+def port_busy(port):
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+
 def is_true(value):
     return str(value).strip().lower() in ('true', '1', 'yes', 'on')
 
@@ -126,6 +135,29 @@ def setup(context, *args, **kwargs):
         ))
     elif enable_lidar:
         actions.append(LogInfo(msg='[fusion] Khong co cong LiDAR: xe van chay, chi khong co /scan.'))
+
+    # Foxglove tren laptop cung mang: Open connection -> Foxglove WebSocket ->
+    # ws://<IP mini PC>:8765 (run.sh in san dia chi). Tat cung launch.
+    # Laptop KHONG duoc publish /autocar/run (khong cho chay xe tu xa).
+    # 12/10: foxglove_bridge chay tay o user khac (ROS_DOMAIN_ID 0, xe o 10) giu
+    # cong -> laptop ket noi duoc nhung khong thay topic nao cua xe.
+    if port_busy(FOXGLOVE_PORT):
+        actions.append(LogInfo(msg='[fusion] CANH BAO: cong %d dang bi chuong trinh khac giu '
+                                   '(foxglove_bridge chay tay?). Tat no roi chay lai, neu khong '
+                                   'Foxglove tren laptop co the khong thay topic cua xe '
+                                   '(khac ROS_DOMAIN_ID).' % FOXGLOVE_PORT))
+    else:
+        actions.append(Node(
+            package='foxglove_bridge',
+            executable='foxglove_bridge',
+            name='foxglove_bridge',
+            output='log',
+            parameters=[{
+                'port': FOXGLOVE_PORT,
+                'address': '0.0.0.0',
+                'client_topic_whitelist': ['^(?!/autocar/run$).*'],
+            }],
+        ))
 
     def arg(name):
         return LaunchConfiguration(name)
