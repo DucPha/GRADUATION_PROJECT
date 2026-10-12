@@ -206,18 +206,18 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_vfov_deg` | `51.0` | Góc nhìn dọc của camera (giống nhau ở 1080p và 640×480) |
 | (không còn `lane_width_m`) | — | Bề rộng làn **đo mỗi frame** khi thấy 2 vạch, đường tâm luôn ở giữa 2 vạch đo được; 1 vạch thì dùng bề rộng vừa đo gần nhất |
 | `roi_top_frac` | `0.0` | Bỏ qua phần trên cùng ảnh (mặc định dùng hết) |
-| `speed_x10` | `65` | Tốc độ LỆNH khi đủ 2 vạch & đi thẳng (km/h × 10) ≈ 1562 µs |
+| `speed_x10` | `70` | Tốc độ LỆNH khi đủ 2 vạch & đi thẳng (km/h × 10) ≈ 1565 µs (65 ≈ 1562 µs trước 10/10 18:05) |
 | `speed_hold_x10` | `58` | Tốc độ giữ hướng khi mất cả 2 vạch |
 | `speed_one_x10` | `60` | Chỉ thấy 1 vạch, đường thẳng, xe giữa làn (≈ 1559 µs); cua / xe lệch ⇒ `speed_corner_x10` |
 | `speed_corner_x10` | `58` | Tốc độ cua gắt / 1 vạch / 2 vạch cong gắt nhất (≈ 1557.5 µs) |
 | `coast_decel_mps2` / `corner_margin_m` | `0.45` / `0.20` | Giảm tốc TRƯỚC cua: thấy cua cách d m ⇒ tốc độ ≤ √(v_cua² + 2·a·(d − margin)). Vẫn vọt cua ⇒ giảm `coast_decel_mps2` |
-| `speed_ramp_x10` / `speed_down_x10` | `30` / `20` | Tăng / giảm tốc, x10 mỗi giây |
+| `speed_ramp_x10` / `speed_down_x10` | `12` / `20` | Tăng / giảm tốc, x10 mỗi giây |
 | `speed_min_x10` | `58` | Tốc độ lệnh nhỏ nhất khi đang chạy; BLDC kêu thì tăng (mỗi đơn vị ≈ 0.65 µs) |
 | `lane_lost_stop_ms` | `2500` | Mất 2 làn quá lâu thì dừng (thấy lại làn thì tự chạy) |
 | `lane_start_frames` | `3` | Bấm chạy / mất làn đã dừng: chạy khi thấy làn (2 vạch hoặc 1 vạch ổn định) bấy nhiêu frame liên tiếp (`LANE_START_FRAMES` bản Python) |
 | `cam_to_rear_axle_m` | `0.18` | **Đo trên xe** (~18 cm): trục sau → điểm ngay dưới camera. Sai 0.15 m là xe chạy đè vạch (xem `docs/TUNING.md` §7) |
 | `steer_ratio` | `0.6` | Góc bánh / góc servo khai báo. Đã chỉnh tay trên xe; số đo thật là 0.42 (xem dưới) |
-| `odom_speed_scale` | `1.0` | Tốc độ thật / tốc độ lệnh khai báo cho odometry; số đo thật 0.32 |
+| `odom_speed_scale` | `0.30` | Tốc độ thật / tốc độ lệnh, chỉ cho odometry (bộ nhớ đường). Đo từ ảnh 10/10: thật ×0.27–0.32 |
 | `single_search_m` | `0.08` | Chỉ thấy 1 vạch: dời tâm bám về phía vạch bị mất tối đa 8 cm ⇒ xe lái vào trong tìm lại vạch kia |
 | `xte_gain` / `xte_ki` / `xte_i_max_deg` | `2.0` / `50` / `6` | Phản hồi lệch ngang P / I tại chân camera (như lần chạy 09/10 15:47) |
 | `corner_gain` | `1.15` | Trong cua nhân góc lái pure pursuit (1 = tắt) |
@@ -226,6 +226,11 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `corner_outer_gap_m` / `corner_outer_max_m` | `0.08` / `0.15` | Chỉ ở CUA GẮT (`corner_sharp_k`, bánh đã bẻ ≥ 8°): bám vạch NGOÀI, mép xe cách mép băng keo vạch ngoài 8 cm, đo trực tiếp từ vạch ngoài; `/lane/status` `cob=`, `sharp=`, `od=`; `< 0` = tắt |
 | `corner_sharp_k` | `1.0` | Độ cong phía trước (1/m) để vào chế độ cua gắt; giữ tới khi bánh về < 6° |
 | `steer_filter_s` | `0.08` | Lọc góc bánh (s), `0` = tắt (`STEER_FILTER_SEC` bản Python) |
+| `steer_rate_dps` / `steer_rate_corner_dps` | `15` / `45` | Tốc độ đánh lái tối đa (độ bánh/s) trên đường thẳng / trong cua, áp lên lệnh cuối. `0` = tắt |
+| `pid_kp` / `pid_kd` / `pid_ki` | `54` / `1.0` / `10` | PID ĐƯỜNG THẲNG: độ bánh / m lệch tâm, / độ lệch hướng xe so với làn, tích phân. `pid_kp:=0` = tắt (pure pursuit như cũ) |
+| `pid_max_deg` / `pid_i_max_deg` / `pid_filter_s` | `15` / `3` / `0.12` | PID: góc bánh tối đa, trần tích phân, lọc lệch/hướng (s) |
+| `servo_straight_deg` | `90.0` | Góc servo mà bánh đi thẳng (kê xe lên: servo 90 bánh thẳng). Chỉ để thử |
+| `record_frames` / `record_dir` | `true` / `auto` | Ghi ảnh camera + `frames.csv` khi xe CHẠY vào `~/lane_logs/run_*` |
 | `dev_sign` | `1` | `-1` nếu servo lắp ngược |
 | `require_start` | `true` | `true` = chỉ chạy khi bấm SPACE trên dashboard |
 | `start_timeout_ms` | `600` | Mất heartbeat `/autocar/run` quá mức này ⇒ dừng |

@@ -70,13 +70,13 @@ Log khởi động in `geometry: ... BEV 160xN (1 cm), Z gần..xa m` = vùng m�
 
 | Tham số (launch) | Mặc định | Ý nghĩa |
 |---|---|---|
-| `speed_x10` | 65 | đủ 2 vạch + đường thẳng (lệnh 6.5 km/h ≈ 1562 µs) |
+| `speed_x10` | 70 | đủ 2 vạch + đường thẳng (lệnh 7.0 km/h ≈ 1565 µs) |
 | `speed_one_x10` | 60 | 1 vạch, đường thẳng, xe giữa làn (≈ 1559 µs) |
 | `speed_corner_x10` | 58 | cua gắt (cả khi đang ở chế độ bám vạch ngoài), 1 vạch, hoặc 2 vạch cong gắt nhất (≈ 1557.5 µs; 52 vẫn kêu két) |
 | `coast_decel_mps2` / `corner_margin_m` | 0.45 / 0.20 | giảm tốc trước cua theo khoảng cách tới cua (ESC chỉ nhả ga, xe trôi). Đường thẳng dài rồi vẫn vọt ra ngoài cua ⇒ giảm `coast_decel_mps2` (0.5) |
 | `speed_hold_x10` | 58 | mất cả 2 vạch, đang giữ hướng |
 | `speed_min_x10` | 58 | sàn tốc độ lệnh khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
-| `speed_ramp_x10` / `speed_down_x10` | 30 / 20 | tăng tốc khi ra cua (58 → 65 ~0.25 s) / giảm đều khi vào cua (~0.35 s), x10 mỗi giây |
+| `speed_ramp_x10` / `speed_down_x10` | 12 / 20 | tăng tốc khi ra cua (58 → 70 ~1 s) / giảm đều khi vào cua (~0.35 s), x10 mỗi giây |
 
 Đủ 2 vạch: `tốc độ = corner + (speed − corner) × speed_scale`. `speed_scale` (camera) = 1
 trên đường thẳng, về 0 khi hướng đường tâm ở đầu xa lệch ≥ 50° (`CURVE_HEADING_*_DEG`),
@@ -104,7 +104,7 @@ xám, và tối hơn **mức sàn** xung quanh (phân vị 40% khối 40×20 cm)
 | Vạch dính vào ghế / vật có màu bên cạnh | lọc màu: pixel bão hoà > `COLOR_MAX_SAT` (100) không phải vạch. Vạch đen bị mất ⇒ tăng (130) |
 
 Đo trên ảnh thật (2 dải cao su đen trên bàn, 08/10): cao su S 40–70, ghế cam S 130–150,
-mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, tự hiệu chỉnh).
+mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, cố định).
 
 ## 6. Hướng lái (firmware)
 
@@ -139,7 +139,10 @@ mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, tự hiệu chỉnh)
 | `kink_radius_m` | 1.0 | đường đua là các đoạn thẳng nối GÓC GẤP. Pure pursuit ngắm ~0.65 m nên thấy đỉnh góc là bẻ ngay ⇒ vào sớm, cắt góc. Ở đây chỉ bẻ khi trục sau còn cách đỉnh R·tan(góc/2), trước đó đi thẳng theo đoạn trước góc (chỉ khi thân xe song song đoạn đó, lệch < 12°; đang quay dở qua góc trước thì không giữ). Vẫn vào sớm / đè vạch trong ⇒ giảm (0.8); vọt ra vạch ngoài ⇒ tăng (1.3); `0` = tắt |
 | `corner_outer_gap_m` / `corner_outer_max_m` | 0.08 / 0.15 | CHỈ Ở CUA GẮT: bám theo vạch NGOÀI, giữ mép xe cách mép băng keo vạch ngoài đúng `gap`. Khoảng cách đo TRỰC TIẾP từ điểm ngắm tới vạch ngoài (trong cua thường không thấy vạch trong nên bề rộng làn chỉ là ước lượng); quá sát thì dời vào trong (tối đa 5 cm). Chạm vạch ngoài ⇒ tăng (0.10–0.12); vẫn đè vạch trong ⇒ giảm (0.05); `-1` = tắt. `/lane/status`: `cob=` (cm, > 0 = sang phải), `sharp=L/R/-`, `od=` (cm, điểm ngắm → vạch ngoài) |
 | `corner_sharp_k` | 1.0 | điều kiện vào chế độ cua gắt: độ cong phía trước ≥ mức này VÀ bánh đã bẻ ≥ 8° cùng chiều trong 0.15 s; giữ tới khi bánh về < 6° (0.2 s). Không giữ theo độ cong vì giữa cua gấp khúc đoạn thẳng kế tiếp nằm chéo trước mặt ⇒ độ cong ~0 dù bánh hết lái. Cua lớn không bật ⇒ giảm (0.8) |
-| `odom_speed_scale` | 1.0 | tốc độ thật / tốc độ lệnh khai báo. Đo thật ~0.32 nhưng giữ 1.0 (xem `steer_ratio`) |
+| `odom_speed_scale` | 0.30 | tốc độ thật / tốc độ lệnh, chỉ cho odometry. Đo từ ảnh 10/10: ×0.27–0.32 (1.0 = bộ nhớ đường trôi nhanh 3.5 lần) |
+| `steer_rate_dps` / `steer_rate_corner_dps` | 15 / 45 | tốc độ đánh lái tối đa (độ bánh/s) trên thẳng / trong cua, áp lên lệnh cuối (mọi nhánh, trừ dừng khẩn). Log 19:27 không giới hạn: 150–270 °/s, xe chao. `0` = tắt |
+| `pid_kp` / `pid_kd` / `pid_ki` | 54 / 1.0 / 10 | PID ĐƯỜNG THẲNG trên đường thẳng fit 0.6 m từ chân camera: P = độ bánh/m lệch tâm, D = độ bánh/độ lệch HƯỚNG xe, I chỉ tích khi gần tâm. Về tâm chậm ⇒ tăng `kp`; vọt qua tâm ⇒ tăng `kd`. `pid_kp:=0` = tắt |
+| `pid_max_deg` / `pid_i_max_deg` / `pid_filter_s` | 15 / 3 / 0.12 | PID: góc bánh tối đa, trần I, lọc (s). Trọng số PID về 0 trong cua / gặp góc gấp / lệch hướng 10→20°. `/lane/status`: `pidw` `pide` `pidpsi` `pidi` `pid` |
 | `lost_memory_ms` | 1500 | mất cả 2 vạch: chạy tiếp theo đường đã nhớ tối đa bao lâu |
 
 Kiểm tra trên bản đồ nhỏ góc phải ảnh overlay:
