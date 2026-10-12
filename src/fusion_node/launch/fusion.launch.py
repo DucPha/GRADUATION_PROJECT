@@ -97,15 +97,6 @@ def resolve_ports(esp_req, lidar_req):
     return esp, lidar, note
 
 
-FOXGLOVE_PORT = 8765
-
-
-def port_busy(port):
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('127.0.0.1', port)) == 0
-
-
 def is_true(value):
     return str(value).strip().lower() in ('true', '1', 'yes', 'on')
 
@@ -135,29 +126,6 @@ def setup(context, *args, **kwargs):
         ))
     elif enable_lidar:
         actions.append(LogInfo(msg='[fusion] Khong co cong LiDAR: xe van chay, chi khong co /scan.'))
-
-    # Foxglove tren laptop cung mang: Open connection -> Foxglove WebSocket ->
-    # ws://<IP mini PC>:8765 (run.sh in san dia chi). Tat cung launch.
-    # Laptop KHONG duoc publish /autocar/run (khong cho chay xe tu xa).
-    # 12/10: foxglove_bridge chay tay o user khac (ROS_DOMAIN_ID 0, xe o 10) giu
-    # cong -> laptop ket noi duoc nhung khong thay topic nao cua xe.
-    if port_busy(FOXGLOVE_PORT):
-        actions.append(LogInfo(msg='[fusion] CANH BAO: cong %d dang bi chuong trinh khac giu '
-                                   '(foxglove_bridge chay tay?). Tat no roi chay lai, neu khong '
-                                   'Foxglove tren laptop co the khong thay topic cua xe '
-                                   '(khac ROS_DOMAIN_ID).' % FOXGLOVE_PORT))
-    else:
-        actions.append(Node(
-            package='foxglove_bridge',
-            executable='foxglove_bridge',
-            name='foxglove_bridge',
-            output='log',
-            parameters=[{
-                'port': FOXGLOVE_PORT,
-                'address': '0.0.0.0',
-                'client_topic_whitelist': ['^(?!/autocar/run$).*'],
-            }],
-        ))
 
     def arg(name):
         return LaunchConfiguration(name)
@@ -270,7 +238,7 @@ def generate_launch_description():
                                           '(do bang diem tu 2 dai thang song song; doi goc camera thi do lai)'),
         DeclareLaunchArgument('camera_vfov_deg', default_value='51.0',
                               description='Goc nhin DOC cua camera (do), giong nhau o 1080p va 640x480'),
-        DeclareLaunchArgument('speed_min_x10', default_value='58',
+        DeclareLaunchArgument('speed_min_x10', default_value='66',
                               description='Toc do lenh nho nhat khi chay (km/h x10) = toc do cua gat. 58 = ~1557.5 us (+3 us khi het lai; 52 van keu). '
                                           'Toc do THAT chi ~0.4 m/s (do 09/10) va giam khi pin yeu -> BLDC keu thi tang'),
         DeclareLaunchArgument('roi_top_frac', default_value='0.0',
@@ -279,14 +247,14 @@ def generate_launch_description():
         DeclareLaunchArgument('speed_x10', default_value='70',
                               description='Toc do du 2 vach + duong thang + xe giua lan, km/h x 10 (70 = ~1565 us, '
                                           '65 = ~1562 us ban truoc 10/10 18:05)'),
-        DeclareLaunchArgument('speed_hold_x10', default_value='58',
+        DeclareLaunchArgument('speed_hold_x10', default_value='66',
                               description='Toc do giu huong khi mat ca 2 vach, km/h x 10'),
-        DeclareLaunchArgument('speed_corner_x10', default_value='58',
+        DeclareLaunchArgument('speed_corner_x10', default_value='66',
                               description='Toc do vao cua (1 vach, hoac 2 vach cong gat nhat), km/h x 10. '
                                           '58 = ~1557.5 us (firmware san 1550 us); moi don vi ~0.65 us'),
         DeclareLaunchArgument('speed_down_x10', default_value='20',
                               description='Giam toc khi vao cua (km/h x10 moi giay): nhanh nhung deu, khong giat'),
-        DeclareLaunchArgument('speed_one_x10', default_value='60',
+        DeclareLaunchArgument('speed_one_x10', default_value='66',
                               description='Toc do chi thay 1 vach tren duong thang + xe giua lan, km/h x 10 '
                                           '(60 = ~1559 us); cua / xe lech -> speed_corner_x10'),
         DeclareLaunchArgument('speed_ramp_x10', default_value='12',
@@ -332,8 +300,9 @@ def generate_launch_description():
                               description='Tre servo (s)'),
         DeclareLaunchArgument('car_half_width_m', default_value='0.125',
                               description='Nua be ngang xe (m), xe rong 25 cm; dung cho rao chan vach'),
-        DeclareLaunchArgument('tape_half_m', default_value='0.035',
-                              description='Nua be rong bang keo vach (m), bang keo 7 cm'),
+        DeclareLaunchArgument('tape_half_m', default_value='0.02',
+                              description='Nua be rong VACH (m). Vach = mieng cao su den rong 4 cm (co doan '
+                                          'rong / hep hon), day 3 mm -> 0.02. Truoc day 0.035 (tuong bang keo 7 cm)'),
         DeclareLaunchArgument('line_margin_m', default_value='0.02',
                               description='Khoang trong toi thieu tu than xe toi MEP bang keo (m)'),
         DeclareLaunchArgument('corner_gain', default_value='1.15',

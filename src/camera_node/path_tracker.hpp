@@ -46,7 +46,7 @@ struct VehicleParams {
   // Xe rong 25 cm (do 2026-10-09), bang keo 7 cm, lan 0.42 m tam-tam: xe
   // giua lan chi con ~5 cm moi ben toi MEP bang keo.
   double car_half_width_m = 0.125;  // nua be ngang xe
-  double tape_half_m = 0.035;       // nua be rong bang keo (vach = tam bang keo)
+  double tape_half_m = 0.02;        // nua be rong vach: mieng cao su den 4 cm (12/10, truoc 0.035 = bang keo 7 cm)
   double line_margin_m = 0.02;      // khoang trong toi thieu con lai toi mep vach
   double guard_gain_deg_per_m = 150.0;
   // Phan hoi LECH NGANG (kieu Stanley): cong them
@@ -150,14 +150,6 @@ public:
   Output compute(double v, double bias_m = 0.0);
 
   const VehicleParams &params() const { return p_; }
-
-  // Vi tri truc sau theo odometry (m, goc = luc khoi dong node; X phai, Z
-  // truoc) va huong th (rad, > 0 = da quay sang phai). Chi de ve / debug.
-  void pose(double &x, double &z, double &th) const {
-    x = pose_.x;
-    z = pose_.z;
-    th = pose_.th;
-  }
 
 private:
   struct Pose {

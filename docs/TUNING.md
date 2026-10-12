@@ -133,7 +133,7 @@ mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, cố định).
 | `lookahead_min_m` / `lookahead_gain_s` / `lookahead_max_m` | 0.35 / 0.20 / 0.80 | tầm nhìn = min + gain·v. Xe lắc trên đường thẳng ⇒ tăng `min` (0.45); cắt cua ⇒ giảm `min` (0.30) |
 | `actuator_latency_s` | 0.08 | xe vào cua trễ, văng ra ngoài ⇒ tăng (0.12) |
 | `camera_latency_s` | 0.04 | tương tự, cho trễ camera |
-| `car_half_width_m` / `tape_half_m` / `line_margin_m` | 0.125 / 0.035 / 0.02 | rào chắn vạch (bánh trước và 0.25 m trước đó): nửa bề ngang xe / nửa bề rộng băng keo / khoảng hở tối thiểu tới MÉP băng keo |
+| `car_half_width_m` / `tape_half_m` / `line_margin_m` | 0.125 / 0.02 / 0.02 | rào chắn vạch (bánh trước và 0.25 m trước đó): nửa bề ngang xe / nửa bề rộng băng keo / khoảng hở tối thiểu tới MÉP băng keo |
 | `corner_gain` | 1.15 | trong cua nhân góc lái pure pursuit (1 = tắt) |
 | `lookahead_corner_scale` | 0.8 | trong cua (độ cong phía trước 0.4 → 1.0 1/m) nhân khoảng nhìn trước với hệ số này: điểm ngắm ~0.51 m thay vì ~0.64 m, không rơi lên đoạn thẳng SAU cua ⇒ bớt cắt góc đè vạch trong. 0.6 đã thử trên bản ghi: điểm ngắm sát đầu đường, lái giật ±21°. `1` = tắt |
 | `kink_radius_m` | 1.0 | đường đua là các đoạn thẳng nối GÓC GẤP. Pure pursuit ngắm ~0.65 m nên thấy đỉnh góc là bẻ ngay ⇒ vào sớm, cắt góc. Ở đây chỉ bẻ khi trục sau còn cách đỉnh R·tan(góc/2), trước đó đi thẳng theo đoạn trước góc (chỉ khi thân xe song song đoạn đó, lệch < 12°; đang quay dở qua góc trước thì không giữ). Vẫn vào sớm / đè vạch trong ⇒ giảm (0.8); vọt ra vạch ngoài ⇒ tăng (1.3); `0` = tắt |

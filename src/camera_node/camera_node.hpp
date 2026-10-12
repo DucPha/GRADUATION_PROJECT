@@ -94,8 +94,10 @@ public:
   static constexpr float DEV_REF_DIST_M = 0.65f;
   static constexpr float DEV_M_PER_PX = 0.00155f;
 
-  // Anh quan sat gui cho GUI duoc thu ve be ngang nay
-  static constexpr int VIS_W = 640;
+  // Anh quan sat gui cho GUI duoc thu ve be ngang nay. 960 = dung kich thuoc
+  // camera da giai ma (1920 / 2), khong ton them giai ma. 640 cu bi GUI phong
+  // to ra ca cua so -> anh trong rat mo (12/10). Detector khong dung so nay.
+  static constexpr int VIS_W = 960;
 
   // ------------------------------------------------------------------------
   // Luoi mat san (BEV)
@@ -305,7 +307,9 @@ public:
   static constexpr double EXPOSURE_TARGET = 110.0;
   static constexpr int EXPOSURE_START = 300;
   static constexpr int EXPOSURE_MIN = 80;
-  static constexpr int EXPOSURE_MAX = 1500;
+  // 12/10: 1500 -> 3000. Phong toi (san 78-92, muc tieu 110) ma phoi sang
+  // kep 1500 -> anh toi, nhoe. Camera van 26 fps o 3000-4000 (do truc tiep).
+  static constexpr int EXPOSURE_MAX = 3000;
 
   // Mat lan: giu dev_px cuoi toi da bay nhieu ms
   static constexpr int HOLD_MS = 500;
