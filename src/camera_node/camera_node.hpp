@@ -307,9 +307,9 @@ public:
   static constexpr double EXPOSURE_TARGET = 110.0;
   static constexpr int EXPOSURE_START = 300;
   static constexpr int EXPOSURE_MIN = 80;
-  // 12/10: 1500 -> 3000. Phong toi (san 78-92, muc tieu 110) ma phoi sang
-  // kep 1500 -> anh toi, nhoe. Camera van 26 fps o 3000-4000 (do truc tiep).
-  static constexpr int EXPOSURE_MAX = 3000;
+  // 12/10 thu 3000: chay 19:27 anh chay sang (134 > muc tieu 110), giua mieng
+  // cao su loa mat, mat lan 6% -> 21% -> giu 1500.
+  static constexpr int EXPOSURE_MAX = 1500;
 
   // Mat lan: giu dev_px cuoi toi da bay nhieu ms
   static constexpr int HOLD_MS = 500;

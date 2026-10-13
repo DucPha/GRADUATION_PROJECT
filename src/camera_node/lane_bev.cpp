@@ -668,8 +668,8 @@ void CameraLane::filter_clutter(const cv::Mat &mask_in, const cv::Mat &rel,
       px_of(g, c, r);
       px.emplace_back(static_cast<int>(std::lround(c)), static_cast<int>(std::lround(r)));
     }
-    const int thick = 2 * static_cast<int>(std::lround(half / BEV_RES_M)) + 1;
-    cv::polylines(corridor, px, false, cv::Scalar(255), thick);
+    const int line_px = 2 * static_cast<int>(std::lround(half / BEV_RES_M)) + 1;
+    cv::polylines(corridor, px, false, cv::Scalar(255), line_px);
     have_corridor = true;
   };
   auto live = [](const Track &t) {

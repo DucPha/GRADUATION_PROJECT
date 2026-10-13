@@ -739,7 +739,10 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
     const size_t k = std::max<size_t>(1, n / 3);
     const cv::Point2f t_near = unit(fw[k] - fw[0]);
     const cv::Point2f t_far = unit(fw[n - 1] - fw[n - 1 - k]);
-    double dth = std::atan2(t_far.x, t_far.y) - std::atan2(t_near.x, t_near.y);
+    // Quan ve [-pi, pi]: duong quay qua huong +-180 do (cua chu U) khong
+    // duoc nhay thanh +-2pi
+    const double dth = std::remainder(std::atan2(t_far.x, t_far.y) - std::atan2(t_near.x, t_near.y),
+                                      2.0 * kPi);
     double arc = 0.0;
     for (size_t i = 1; i < n; ++i) {
       arc += norm2(fw[i] - fw[i - 1]);

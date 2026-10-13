@@ -1135,6 +1135,13 @@ class AutoCarMonitor(QMainWindow):
         run = num("run") == 1
         emg = num("emg") == 1
         track = st.get("track")
+        spd = num("spd")
+        # Muc xung ESP32 THAT SU dang phat cho ESC (telemetry v2): 90 = dung,
+        # > 90 = tien. -1 = firmware cu chua bao (can nap firmware moi).
+        # Phai tinh TRUOC khoi trang thai xe: truoc day gan o duoi -> moi lan
+        # xe dang chay ham nay loi UnboundLocalError, bang so lieu dung im.
+        esc = num("esc")
+        esc = esc if esc is not None and esc >= 0 else None
         c = self.control
         if not fusion_ok:
             c.set_state("OFFLINE", C_MUTED, "no /lane/status")
@@ -1169,12 +1176,7 @@ class AutoCarMonitor(QMainWindow):
         def show(key, value, fmt, color=None):
             c.m[key].set(fmt.format(value) if value is not None else "--", color)
 
-        spd = num("spd")
         show("speed", spd, "{:.1f}")
-        # Muc xung ESP32 THAT SU dang phat cho ESC (telemetry v2): 90 = dung,
-        # > 90 = tien. -1 = firmware cu chua bao (can nap firmware moi).
-        esc = num("esc")
-        esc = esc if esc is not None and esc >= 0 else None
         show("esc", esc, "{:.0f}",
              None if esc is None else (C_GREEN if esc > 90 else C_TEXT_2))
         show("servo", num("servo"), "{:.1f}")

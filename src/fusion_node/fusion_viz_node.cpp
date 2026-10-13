@@ -208,19 +208,20 @@ public:
         // frame); san thap hon thi BLDC keu / dung.
         // speed_x10: du 2 vach + duong thang; vao cua 2 vach noi suy ve
         // speed_corner_x10 theo speed_scale cua camera.
-        const auto speed_x10 = declare_parameter<int>("speed_x10", 70);
+        const auto speed_x10 = declare_parameter<int>("speed_x10", 75);
         // Chi thay 1 vach tren duong thang + xe giua lan (vach kia mo / loa);
         // cua hoac xe lech -> ve speed_corner_x10
-        const auto speed_one_x10 = declare_parameter<int>("speed_one_x10", 60);
-        const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 58);
-        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 58);
-        // Tang toc khi het cua: x10 km/h moi giay (12: 58 -> 70 deu trong ~1 s)
+        const auto speed_one_x10 = declare_parameter<int>("speed_one_x10", 64);
+        const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 62);
+        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 62);
+        // Tang toc khi het cua: x10 km/h moi giay (12: 62 -> 75 deu trong ~1 s)
         const auto speed_ramp_x10 = declare_parameter<int>("speed_ramp_x10", 12);
-        // Giam toc vao cua: x10 km/h moi giay (20: 65 -> 58 trong ~0.35 s, deu)
+        // Giam toc vao cua: x10 km/h moi giay (20: 75 -> 62 trong ~0.65 s, deu)
         speed_down_x10_ = static_cast<float>(declare_parameter<int>("speed_down_x10", 20));
         // Toc do nho nhat khi xe CHAY (km/h x10). Xung thap (1543 us) BLDC keu
-        // cot ket; 10/10 cua gat 52 (~1554 us) van keu ket -> 58 (~1557.5 us).
-        const auto speed_min_x10 = declare_parameter<int>("speed_min_x10", 58);
+        // cot ket; 10/10 cua gat 52 (~1554 us) van keu ket -> 58 (~1557.5 us);
+        // 13/10 58 van co tieng dong co -> 62 (~1560 us).
+        const auto speed_min_x10 = declare_parameter<int>("speed_min_x10", 62);
         const auto dev_sign = declare_parameter<int>("dev_sign", 1);
         // Mat ca 2 vach bay lau moi dung (Python: bo cham giu goc lai, chi dung
         // khi ra khoi duong ~3 s). Ban truoc 400 ms: 1 frame toi / loa den la
@@ -318,6 +319,13 @@ public:
         // thang, 150-270 do/s), trong cua nhanh vua. 0 = khong gioi han
         steer_rate_dps_ = declare_parameter<double>("steer_rate_dps", 15.0);
         steer_rate_corner_dps_ = declare_parameter<double>("steer_rate_corner_dps", 45.0);
+        // Lenh can doi LON (ne vach, dao lai vao cua): cong them steer_rate_gain
+        // (do/s moi do) x phan chenh vuot steer_rate_db_deg. Log 12/10 19:27:
+        // tracker doi +21 -> -21 do trong 0.25 s (vach trong hien ra) ma banh
+        // mat 1.05 s moi dao (45 do/s) -> xe de qua vach trong (173.5-174.9 s,
+        // 63.6-65.5 s). Chenh nho (nhieu tren duong thang) van cham nhu cu.
+        steer_rate_gain_ = declare_parameter<double>("steer_rate_gain", 8.0);
+        steer_rate_db_deg_ = declare_parameter<double>("steer_rate_db_deg", 4.0);
         lane_start_frames_ = static_cast<int>(declare_parameter<int>("lane_start_frames", 3));
         // Chi thay 1 vach: doi tam bam ve phia vach mat toi da bay nhieu m,
         // toc do doi (m/s)
@@ -883,8 +891,10 @@ private:
                 if (use_trk && tracker_.params().pid_kp_deg_per_m > 0.0) {
                     rc = std::max(rc, 1.0 - trk.pid_w);
                 }
+                const double err = std::fabs(want - steer_lim_deg_);
                 const double rate = steer_rate_dps_ +
-                                    (std::max(steer_rate_corner_dps_, steer_rate_dps_) - steer_rate_dps_) * rc;
+                                    (std::max(steer_rate_corner_dps_, steer_rate_dps_) - steer_rate_dps_) * rc +
+                                    steer_rate_gain_ * std::max(0.0, err - steer_rate_db_deg_);
                 const double step = rate * dt;
                 steer_lim_deg_ += std::clamp(want - steer_lim_deg_, -step, step);
                 dev = dev_for_wheel(steer_lim_deg_);
@@ -1164,16 +1174,16 @@ private:
     rclcpp::TimerBase::SharedPtr viz_timer_;
     rclcpp::TimerBase::SharedPtr status_timer_;
 
-    int speed_x10_ = 70;
-    int speed_hold_x10_ = 58;
-    int speed_corner_x10_ = 58;
+    int speed_x10_ = 75;
+    int speed_hold_x10_ = 62;
+    int speed_corner_x10_ = 62;
     double coast_decel_mps2_ = 0.45; // gia toc giam khi nha ga (m/s^2)
     double corner_margin_m_ = 0.20;  // xuong toc do cua truoc cua bay nhieu m
     double v_odom_x10_ = 0.0;        // toc do that uoc luong (km/h x10)
-    int speed_one_x10_ = 60;
+    int speed_one_x10_ = 64;
     float speed_ramp_x10_ = 12.0f;   // don vi x10 moi giay (12 = 1.2 km/h/s)
     float speed_down_x10_ = 20.0f;   // giam toc vao cua, don vi x10 moi giay
-    int speed_min_x10_ = 58;         // toc do nho nhat khi dang chay
+    int speed_min_x10_ = 62;         // toc do nho nhat khi dang chay
     float speed_cur_x10_f_ = 0.0f;   // lenh hien tai, tang dan khi ramp
     float dt_control_s_ = 0.01f;     // 1 / control_hz
     double steer_filter_s_ = 0.08;   // loc goc banh (s)
@@ -1183,6 +1193,8 @@ private:
     SteadyClock::time_point steer_lim_at_{};
     double steer_rate_dps_ = 15.0;          // toc do danh lai duong thang (do banh / s)
     double steer_rate_corner_dps_ = 45.0;   // toc do danh lai trong cua
+    double steer_rate_gain_ = 8.0;          // them do/s moi do chenh vuot steer_rate_db_deg_
+    double steer_rate_db_deg_ = 4.0;
     int lane_start_frames_ = 3;      // so frame thay lan lien tiep de xuat phat
     int lane_streak_ = 0;
     double single_search_m_ = 0.08;

@@ -70,13 +70,13 @@ Log khởi động in `geometry: ... BEV 160xN (1 cm), Z gần..xa m` = vùng m�
 
 | Tham số (launch) | Mặc định | Ý nghĩa |
 |---|---|---|
-| `speed_x10` | 70 | đủ 2 vạch + đường thẳng (lệnh 7.0 km/h ≈ 1565 µs) |
-| `speed_one_x10` | 60 | 1 vạch, đường thẳng, xe giữa làn (≈ 1559 µs) |
-| `speed_corner_x10` | 58 | cua gắt (cả khi đang ở chế độ bám vạch ngoài), 1 vạch, hoặc 2 vạch cong gắt nhất (≈ 1557.5 µs; 52 vẫn kêu két) |
+| `speed_x10` | 75 | đủ 2 vạch + đường thẳng (lệnh 7.5 km/h ≈ 1573 µs; 70 trước 13/10) |
+| `speed_one_x10` | 64 | 1 vạch, đường thẳng, xe giữa làn (≈ 1561 µs) |
+| `speed_corner_x10` | 62 | cua gắt (cả khi đang ở chế độ bám vạch ngoài), 1 vạch, hoặc 2 vạch cong gắt nhất (≈ 1560 µs; 52 kêu két, 58 vẫn có tiếng) |
 | `coast_decel_mps2` / `corner_margin_m` | 0.45 / 0.20 | giảm tốc trước cua theo khoảng cách tới cua (ESC chỉ nhả ga, xe trôi). Đường thẳng dài rồi vẫn vọt ra ngoài cua ⇒ giảm `coast_decel_mps2` (0.5) |
-| `speed_hold_x10` | 58 | mất cả 2 vạch, đang giữ hướng |
-| `speed_min_x10` | 58 | sàn tốc độ lệnh khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
-| `speed_ramp_x10` / `speed_down_x10` | 12 / 20 | tăng tốc khi ra cua (58 → 70 ~1 s) / giảm đều khi vào cua (~0.35 s), x10 mỗi giây |
+| `speed_hold_x10` | 62 | mất cả 2 vạch, đang giữ hướng |
+| `speed_min_x10` | 62 | sàn tốc độ lệnh khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
+| `speed_ramp_x10` / `speed_down_x10` | 12 / 20 | tăng tốc khi ra cua (62 → 75 ~1 s) / giảm đều khi vào cua (~0.65 s), x10 mỗi giây |
 
 Đủ 2 vạch: `tốc độ = corner + (speed − corner) × speed_scale`. `speed_scale` (camera) = 1
 trên đường thẳng, về 0 khi hướng đường tâm ở đầu xa lệch ≥ 50° (`CURVE_HEADING_*_DEG`),
@@ -141,6 +141,7 @@ mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, cố định).
 | `corner_sharp_k` | 1.0 | điều kiện vào chế độ cua gắt: độ cong phía trước ≥ mức này VÀ bánh đã bẻ ≥ 8° cùng chiều trong 0.15 s; giữ tới khi bánh về < 6° (0.2 s). Không giữ theo độ cong vì giữa cua gấp khúc đoạn thẳng kế tiếp nằm chéo trước mặt ⇒ độ cong ~0 dù bánh hết lái. Cua lớn không bật ⇒ giảm (0.8) |
 | `odom_speed_scale` | 0.30 | tốc độ thật / tốc độ lệnh, chỉ cho odometry. Đo từ ảnh 10/10: ×0.27–0.32 (1.0 = bộ nhớ đường trôi nhanh 3.5 lần) |
 | `steer_rate_dps` / `steer_rate_corner_dps` | 15 / 45 | tốc độ đánh lái tối đa (độ bánh/s) trên thẳng / trong cua, áp lên lệnh cuối (mọi nhánh, trừ dừng khẩn). Log 19:27 không giới hạn: 150–270 °/s, xe chao. `0` = tắt |
+| `steer_rate_gain` / `steer_rate_db_deg` | 8 / 4 | lệnh lái cần đổi LỚN hơn 4° (né vạch, đảo lái vào cua) thì tốc độ đánh lái cộng thêm 8 °/s mỗi độ chênh vượt 4°; chênh nhỏ giữ chậm như trên. Log 12/10 19:27: bánh mất ~1 s mới đảo +21 → −21° ⇒ đè vạch trong. `steer_rate_gain:=0` = như cũ |
 | `pid_kp` / `pid_kd` / `pid_ki` | 54 / 1.0 / 10 | PID ĐƯỜNG THẲNG trên đường thẳng fit 0.6 m từ chân camera: P = độ bánh/m lệch tâm, D = độ bánh/độ lệch HƯỚNG xe, I chỉ tích khi gần tâm. Về tâm chậm ⇒ tăng `kp`; vọt qua tâm ⇒ tăng `kd`. `pid_kp:=0` = tắt |
 | `pid_max_deg` / `pid_i_max_deg` / `pid_filter_s` | 15 / 3 / 0.12 | PID: góc bánh tối đa, trần I, lọc (s). Trọng số PID về 0 trong cua / gặp góc gấp / lệch hướng 10→20°. `/lane/status`: `pidw` `pide` `pidpsi` `pidi` `pid` |
 | `lost_memory_ms` | 1500 | mất cả 2 vạch: chạy tiếp theo đường đã nhớ tối đa bao lâu |

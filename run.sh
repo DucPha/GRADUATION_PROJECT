@@ -81,11 +81,7 @@ trap cleanup EXIT INT TERM
 # tin hieu cho ca nhom launch. Ctrl+C toi run.sh -> cleanup() chuyen tiep.
 set -m
 
-echo "==== KHOI DONG XE (camera + ESP32 /dev/ttyUSB0 + LiDAR /dev/ttyUSB1 + Foxglove) ===="
-# Laptop cung WiFi: Foxglove -> Open connection -> Foxglove WebSocket -> dia chi duoi
-for ip in $(hostname -I); do
-	case "$ip" in *:*) ;; *) echo "  Foxglove: ws://$ip:8765" ;; esac
-done
+echo "==== KHOI DONG XE (camera + ESP32 /dev/ttyUSB0 + LiDAR /dev/ttyUSB1) ===="
 ros2 launch fusion_node fusion.launch.py "${ARGS[@]}" &
 VEHICLE_PID=$!
 

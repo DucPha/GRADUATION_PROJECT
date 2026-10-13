@@ -110,9 +110,9 @@ Khi khởi động, xe **luôn đứng yên** (gửi EMG) cho tới khi người
    vạch bám ổn định) `lane_start_frames` frame là **tự chạy lại**.
 4. Cổng ESP32 mở (`serial=open`) và ESP32 nhận gói đều (watchdog 500 ms).
 
-Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (6.5 km/h lệnh ≈ 1562 µs, đường
-thẳng) về `speed_corner_x10` (5.8 km/h lệnh ≈ 1557.5 µs, cua gắt) theo `speed_scale`, độ cong phía
-trước, độ lệch tâm và khoảng cách tới cua (`coast_decel_mps2`); 1 vạch thì tương tự từ `speed_one_x10`; **không thấp hơn `speed_min_x10`** (5.8 km/h lệnh). Firmware còn có sàn
+Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (7.5 km/h lệnh ≈ 1573 µs, đường
+thẳng) về `speed_corner_x10` (6.2 km/h lệnh ≈ 1560 µs, cua gắt) theo `speed_scale`, độ cong phía
+trước, độ lệch tâm và khoảng cách tới cua (`coast_decel_mps2`); 1 vạch thì tương tự từ `speed_one_x10`; **không thấp hơn `speed_min_x10`** (6.2 km/h lệnh). Firmware còn có sàn
 1550 µs và cộng tới +3 µs khi đánh hết lái. Lý do: xung thấp (1543 µs) động cơ BLDC kêu cọt
 kẹt và dễ không đủ lực thắng ma sát.
 
@@ -206,13 +206,13 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_vfov_deg` | `51.0` | Góc nhìn dọc của camera (giống nhau ở 1080p và 640×480) |
 | (không còn `lane_width_m`) | — | Bề rộng làn **đo mỗi frame** khi thấy 2 vạch, đường tâm luôn ở giữa 2 vạch đo được; 1 vạch thì dùng bề rộng vừa đo gần nhất |
 | `roi_top_frac` | `0.0` | Bỏ qua phần trên cùng ảnh (mặc định dùng hết) |
-| `speed_x10` | `70` | Tốc độ LỆNH khi đủ 2 vạch & đi thẳng (km/h × 10) ≈ 1565 µs (65 ≈ 1562 µs trước 10/10 18:05) |
-| `speed_hold_x10` | `58` | Tốc độ giữ hướng khi mất cả 2 vạch |
-| `speed_one_x10` | `60` | Chỉ thấy 1 vạch, đường thẳng, xe giữa làn (≈ 1559 µs); cua / xe lệch ⇒ `speed_corner_x10` |
-| `speed_corner_x10` | `58` | Tốc độ cua gắt / 1 vạch / 2 vạch cong gắt nhất (≈ 1557.5 µs) |
+| `speed_x10` | `75` | Tốc độ LỆNH khi đủ 2 vạch & đi thẳng (km/h × 10) ≈ 1573 µs (70 ≈ 1567 µs trước 13/10) |
+| `speed_hold_x10` | `62` | Tốc độ giữ hướng khi mất cả 2 vạch |
+| `speed_one_x10` | `64` | Chỉ thấy 1 vạch, đường thẳng, xe giữa làn (≈ 1561 µs); cua / xe lệch ⇒ `speed_corner_x10` |
+| `speed_corner_x10` | `62` | Tốc độ cua gắt / 1 vạch / 2 vạch cong gắt nhất (≈ 1560 µs) |
 | `coast_decel_mps2` / `corner_margin_m` | `0.45` / `0.20` | Giảm tốc TRƯỚC cua: thấy cua cách d m ⇒ tốc độ ≤ √(v_cua² + 2·a·(d − margin)). Vẫn vọt cua ⇒ giảm `coast_decel_mps2` |
 | `speed_ramp_x10` / `speed_down_x10` | `12` / `20` | Tăng / giảm tốc, x10 mỗi giây |
-| `speed_min_x10` | `58` | Tốc độ lệnh nhỏ nhất khi đang chạy; BLDC kêu thì tăng (mỗi đơn vị ≈ 0.65 µs) |
+| `speed_min_x10` | `62` | Tốc độ lệnh nhỏ nhất khi đang chạy; BLDC kêu thì tăng (mỗi đơn vị ≈ 0.65 µs) |
 | `lane_lost_stop_ms` | `2500` | Mất 2 làn quá lâu thì dừng (thấy lại làn thì tự chạy) |
 | `lane_start_frames` | `3` | Bấm chạy / mất làn đã dừng: chạy khi thấy làn (2 vạch hoặc 1 vạch ổn định) bấy nhiêu frame liên tiếp (`LANE_START_FRAMES` bản Python) |
 | `cam_to_rear_axle_m` | `0.18` | **Đo trên xe** (~18 cm): trục sau → điểm ngay dưới camera. Sai 0.15 m là xe chạy đè vạch (xem `docs/TUNING.md` §7) |
@@ -227,6 +227,7 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `corner_sharp_k` | `1.0` | Độ cong phía trước (1/m) để vào chế độ cua gắt; giữ tới khi bánh về < 6° |
 | `steer_filter_s` | `0.08` | Lọc góc bánh (s), `0` = tắt (`STEER_FILTER_SEC` bản Python) |
 | `steer_rate_dps` / `steer_rate_corner_dps` | `15` / `45` | Tốc độ đánh lái tối đa (độ bánh/s) trên đường thẳng / trong cua, áp lên lệnh cuối. `0` = tắt |
+| `steer_rate_gain` / `steer_rate_db_deg` | `8` / `4` | Lệnh lái cần đổi > 4° (né vạch, đảo lái) ⇒ đánh lái nhanh thêm 8 °/s mỗi độ chênh; chênh nhỏ vẫn chậm, mượt. `0` = như cũ |
 | `pid_kp` / `pid_kd` / `pid_ki` | `54` / `1.0` / `10` | PID ĐƯỜNG THẲNG: độ bánh / m lệch tâm, / độ lệch hướng xe so với làn, tích phân. `pid_kp:=0` = tắt (pure pursuit như cũ) |
 | `pid_max_deg` / `pid_i_max_deg` / `pid_filter_s` | `15` / `3` / `0.12` | PID: góc bánh tối đa, trần tích phân, lọc lệch/hướng (s) |
 | `servo_straight_deg` | `90.0` | Góc servo mà bánh đi thẳng (kê xe lên: servo 90 bánh thẳng). Chỉ để thử |
