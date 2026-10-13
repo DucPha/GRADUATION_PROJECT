@@ -1,20 +1,562 @@
 // ============================================================================
-// NHAN LAN TREN MAT SAN (BEV) - port tu lane_bev.py (ban Python da chay tren xe)
+// lane_detector.cpp - NHAN DIEN LAN tu camera (cai dat cua lane_detector.hpp)
 // ----------------------------------------------------------------------------
-// Xem tong quan o dau camera_node.hpp. File nay chua toan bo detector:
-// luoi BEV, mask vach, loc do vat, do vach theo goc gap, ghep cap, hieu chinh
-// goc cui, duong tam (mitre), pure pursuit va anh quan sat.
+// Muc luc (theo thu tu trong file):
+//   PHAN A - CAMERA
+//     A1. Giai ma MJPG bang libjpeg-turbo (nhanh, giai ma thang 1/2 kich thuoc)
+//     A2. Khoi tao / hinh hoc theo kich thuoc anh / bat - tat luong camera
+//     A3. Mo camera, khoa phoi sang (do sang san ~110), luong doc frame
+//   PHAN B - DETECTOR TREN MAT SAN (BEV)
+//     B1. Ham tien ich hinh hoc (polyline, goc, trung vi...)
+//     B2. Hinh hoc camera pinhole: diem mat san <-> pixel
+//     B3. Luoi BEV 1 cm: bang tra chieu anh xuong mat san
+//     B4. Mask vach TOI: CLAHE + "black-hat" (toi hon nen xung quanh)
+//     B5. Loc do vat: vet day, vet hinh nem chia ve camera (chan ban/ghe)
+//     B6. Do vach: di doc vach bang cua so truot, theo duoc goc gap
+//     B7. Chuyen dong xe giua 2 frame (du doan vi tri vach)
+//     B8. Ghep cap / nhan vach moi (xe phai nam GIUA 2 vach)
+//     B9. Hieu chinh online: be rong lan, nguong toi
+//     B10. Duong tam (doi vach nua lan theo phap tuyen), pure pursuit -> dev_px
+//     B11. detect(): toan bo quy trinh cho 1 frame
+// Cac buoc chinh cua detect() duoc danh so "---- 1. ... ----" trong code.
 // ============================================================================
 
-#include "camera_node.hpp"
+#include "lane_detector.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
-#include <numeric>
 #include <string>
+#include <utility>
+#include <csetjmp>
+#include <array>
+#include <numeric>
+
+#include <jpeglib.h>
+
+// ############################################################################
+// PHAN A - CAMERA: mo camera, giai ma, phoi sang, luong doc frame
+// ############################################################################
+
+// ============================================================================
+// GIAI MA MJPG BANG LIBJPEG-TURBO
+
+
+namespace {
+
+struct JpegError {
+  jpeg_error_mgr pub;
+  std::jmp_buf jump;
+};
+
+// libjpeg bao loi -> nhay ve diem setjmp trong decode_mjpg (khong thoat chuong trinh)
+void jpeg_on_error(j_common_ptr cinfo) {
+  std::longjmp(reinterpret_cast<JpegError *>(cinfo->err)->jump, 1);
+}
+
+// Bo qua canh bao libjpeg (vd "Corrupt JPEG data" cua cam MJPG) cho log gon
+void jpeg_silent(j_common_ptr) {}
+
+// Giai ma goi MJPG `buf` ra BGR. Thu nho 2^k lan sao cho be ngang van
+// >= min_width. full_w/full_h = kich thuoc goc ghi trong header JPEG.
+bool decode_mjpg(const cv::Mat &buf, int min_width, cv::Mat &out, int &full_w,
+                 int &full_h) {
+  if (buf.empty()) {
+    return false;
+  }
+
+  jpeg_decompress_struct cinfo;
+  JpegError err;
+  cinfo.err = jpeg_std_error(&err.pub);
+  err.pub.error_exit = jpeg_on_error;
+  err.pub.output_message = jpeg_silent;
+
+  if (setjmp(err.jump)) {
+    // Khung hong (cap USB nhieu, mat goi): bo khung nay
+    jpeg_destroy_decompress(&cinfo);
+    return false;
+  }
+
+  jpeg_create_decompress(&cinfo);
+  jpeg_mem_src(&cinfo, buf.ptr<unsigned char>(),
+               static_cast<unsigned long>(buf.total() * buf.elemSize()));
+  if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+    jpeg_destroy_decompress(&cinfo);
+    return false;
+  }
+
+  full_w = static_cast<int>(cinfo.image_width);
+  full_h = static_cast<int>(cinfo.image_height);
+
+  unsigned int denom = 1;
+  while (denom < 8 &&
+         static_cast<int>(cinfo.image_width / (denom * 2)) >= min_width) {
+    denom *= 2;
+  }
+  cinfo.scale_num = 1;
+  cinfo.scale_denom = denom;
+  cinfo.out_color_space = JCS_EXT_BGR; // ra thang thu tu kenh cua OpenCV
+  cinfo.dct_method = JDCT_ISLOW;
+
+  jpeg_start_decompress(&cinfo);
+  out.create(static_cast<int>(cinfo.output_height),
+             static_cast<int>(cinfo.output_width), CV_8UC3);
+  while (cinfo.output_scanline < cinfo.output_height) {
+    JSAMPROW row = out.ptr<unsigned char>(static_cast<int>(cinfo.output_scanline));
+    jpeg_read_scanlines(&cinfo, &row, 1);
+  }
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+  return true;
+}
+
+} // namespace
+
+// ============================================================================
+// CONSTRUCTOR / DESTRUCTOR
+// ============================================================================
+
+CameraLane::CameraLane(int camera_index, int target_fps, int width, int height,
+                       const CameraProfile &profile)
+    : camera_index_(camera_index),
+      target_fps_(target_fps > 0 ? target_fps : 30),
+      req_w_(width > 0 ? width : 1920), req_h_(height > 0 ? height : 1080),
+      profile_(profile),
+      roi_top_frac_(std::clamp(profile.roi_top_frac, 0.0f, 0.90f)) {
+  h_ = std::max(0.05f, profile_.height_m);
+  roi_bottom_frac_ = std::clamp(profile_.roi_bottom_frac, 0.1f, 1.0f);
+  lane_w_m_ = std::clamp(profile_.lane_width_m, 0.2f, 1.0f);
+  lane_w_local_ = lane_w_m_;
+  pitch_ = std::clamp(static_cast<double>(profile_.pitch_deg), 1.0, 85.0) *
+           CV_PI / 180.0;
+
+  // Tinh truoc theo do phan giai yeu cau; khi doc duoc frame that se tinh
+  // lai neu camera tra kich thuoc khac
+  update_geometry(req_w_, req_h_);
+}
+
+CameraLane::~CameraLane() { stop(); }
+
+// ============================================================================
+// HINH HOC THEO KICH THUOC ANH
+// ============================================================================
+
+void CameraLane::update_geometry(int frame_w, int frame_h) {
+  if (frame_w <= 0 || frame_h <= 0 ||
+      (frame_w == geom_w_ && frame_h == geom_h_)) {
+    return;
+  }
+  geom_w_ = frame_w;
+  geom_h_ = frame_h;
+
+  // Giu dung ti le anh goc: 16:9 -> 320x180, 4:3 -> 320x240. Nho vay 1 px
+  // ngang = 1 px doc tren mat cam va cong thuc pinhole van dung.
+  work_h_ = std::clamp(
+      static_cast<int>(std::lround(static_cast<double>(WORK_W) * frame_h /
+                                   frame_w)),
+      40, 4 * WORK_W);
+
+  // Goc DOC giong nhau o moi do phan giai cua cam nay -> tieu cu theo chieu cao
+  const double vfov =
+      std::clamp(static_cast<double>(profile_.vfov_deg), 10.0, 150.0);
+  f_px_ = (work_h_ / 2.0) / std::tan(vfov * CV_PI / 360.0);
+  cy_ = work_h_ / 2.0;
+
+  set_pitch(pitch_ * 180.0 / CV_PI);
+  logged_geometry_ = false;
+}
+
+// Dat goc cui camera (do) va tinh lai luoi BEV
+void CameraLane::set_pitch(double pitch_deg) {
+  pitch_ = pitch_deg * CV_PI / 180.0;
+  horizon_y_ = cy_ - f_px_ * std::tan(pitch_);
+  build_bev();
+}
+
+// ============================================================================
+// BAT / TAT
+// ============================================================================
+
+bool CameraLane::start() {
+  if (running_.load()) {
+    return true;
+  }
+
+  // Luong cu da tu thoat (mat camera) nhung chua join: gan thread moi len
+  // thread con joinable se goi std::terminate
+  if (worker_.joinable()) {
+    worker_.join();
+  }
+
+  // Thu mo ngay de bao loi som. Mo khong duoc (camera dang cam lai, bi app
+  // khac giu...) thi luong camera VAN chay va tu thu mo lai moi
+  // REOPEN_PERIOD_MS, khong bo cuoc nhu truoc.
+  const bool opened = open_camera();
+
+  running_.store(true);
+  worker_ = std::thread(&CameraLane::capture_loop, this);
+  return opened;
+}
+
+// Dung luong doc camera va bo ghi anh, dong camera
+void CameraLane::stop() {
+  running_.store(false);
+
+  if (worker_.joinable()) {
+    worker_.join();
+  }
+
+  cap_.release();
+}
+
+// Luong camera con dang chay?
+bool CameraLane::is_running() const { return running_.load(); }
+
+// Bo qua phan tren anh (ti le chieu cao, 0 = dung ca anh)
+void CameraLane::set_roi_top_frac(float frac) {
+  roi_top_frac_.store(std::clamp(frac, 0.0f, 0.90f));
+}
+
+// ============================================================================
+// MO CAMERA
+// ============================================================================
+
+bool CameraLane::open_camera() {
+  const int kProbeCount = 4;
+  const int kFirstIndex = camera_index_ >= 0 ? camera_index_ : 0;
+  const int kLastIndex = camera_index_ >= 0 ? camera_index_ : kProbeCount - 1;
+
+  for (int idx = kFirstIndex; idx <= kLastIndex; ++idx) {
+    if (!cap_.open(idx, cv::CAP_V4L2)) {
+      cap_.release();
+      continue;
+    }
+
+    // MJPG: YUYV khong ho tro 1080p va an het bang thong USB
+    cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+    cap_.set(cv::CAP_PROP_FRAME_WIDTH, req_w_);
+    cap_.set(cv::CAP_PROP_FRAME_HEIGHT, req_h_);
+    cap_.set(cv::CAP_PROP_FPS, target_fps_);
+
+    // Hang doi V4L2 mac dinh ~4 frame = tre 130 ms o 30 fps
+    cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
+
+    // Xin goi MJPG nguyen (khong de OpenCV giai ma) -> tu giai ma 1/2
+    cap_.set(cv::CAP_PROP_CONVERT_RGB, 0);
+
+    // Doc thu mot frame de chan loi "mo ra nhung khong co hinh"
+    cv::Mat probe_raw;
+    cv::Mat probe;
+    raw_mjpg_ = true;
+    if (!cap_.read(probe_raw) || probe_raw.empty()) {
+      cap_.release();
+      continue;
+    }
+    // Driver tra anh da giai ma (nhieu hang, 3 kenh) -> khong phai goi nen
+    raw_mjpg_ = probe_raw.rows == 1 && probe_raw.type() == CV_8UC1;
+    if (raw_mjpg_ && !decode_mjpg(probe_raw, VIS_W, probe, cam_w_, cam_h_)) {
+      // Khong giai ma duoc -> tra lai cho OpenCV tu giai ma
+      raw_mjpg_ = false;
+      cap_.set(cv::CAP_PROP_CONVERT_RGB, 1);
+      if (!cap_.read(probe) || probe.empty()) {
+        cap_.release();
+        continue;
+      }
+    }
+    if (!raw_mjpg_) {
+      if (probe.empty()) {
+        probe = probe_raw;
+      }
+      cam_w_ = probe.cols;
+      cam_h_ = probe.rows;
+    }
+
+    // Doc lai fourcc driver that su dang dung: set() co the bi bo qua
+    const int fcc = static_cast<int>(cap_.get(cv::CAP_PROP_FOURCC));
+    const char fcc_name[5] = {static_cast<char>(fcc & 0xFF),
+                              static_cast<char>((fcc >> 8) & 0xFF),
+                              static_cast<char>((fcc >> 16) & 0xFF),
+                              static_cast<char>((fcc >> 24) & 0xFF), 0};
+
+    quiet_open_ = false;
+    update_geometry(probe.cols, probe.rows);
+    if (exposure_ >= 0) {
+      lock_exposure();
+    }
+
+    std::cout << "[CameraLane] Camera opened at index " << idx << ", real size "
+              << cam_w_ << "x" << cam_h_ << ", format " << fcc_name
+              << ", driver fps " << cap_.get(cv::CAP_PROP_FPS) << ", decode "
+              << (raw_mjpg_ ? "libjpeg " : "opencv ") << probe.cols << "x"
+              << probe.rows << ", work frame " << WORK_W << "x" << work_h_
+              << ", exposure "
+              << (exposure_ >= 0 ? std::to_string(locked_exposure_) + " (khoa)"
+                                 : std::string("auto"))
+              << "\n";
+
+    if (std::string(fcc_name) != "MJPG") {
+      std::cout << "[CameraLane] Camera did not accept MJPG (got " << fcc_name
+                << "): fps may be limited by USB bandwidth.\n";
+    }
+    if (cam_w_ != req_w_ || cam_h_ != req_h_) {
+      std::cout << "[CameraLane] Requested " << req_w_ << "x" << req_h_
+                << " but camera gives " << cam_w_ << "x" << cam_h_
+                << ". Geometry was recomputed for the real size.\n";
+    }
+
+    return true;
+  }
+
+  if (!quiet_open_) {
+    std::cerr << "[CameraLane] No camera found, retrying every "
+              << REOPEN_PERIOD_MS << " ms\n";
+  }
+  quiet_open_ = true; // chi bao 1 lan cho toi khi mo duoc lai
+  cap_.release();
+  return false;
+}
+
+// ============================================================================
+// KHOA PHOI SANG (giong camera_node.py: CAMERA_LOCK_EXPOSURE)
+// ----------------------------------------------------------------------------
+// Phoi sang tu dong cua cam nay keo dai thoi gian chup khi phong toi (do: 25.8
+// thay vi 30 fps) va "bom" sang/toi moi khi vet loa den tran lot vao khung ->
+// do tuong phan vach doi theo frame. Do 1 lan luc mo camera: chinh exposure
+// toi khi do sang san (trung vi nua duoi anh) ~ EXPOSURE_TARGET roi giu co
+// dinh. Mo lai camera (rut cap) thi dung lai gia tri da khoa.
+// ============================================================================
+
+double CameraLane::floor_brightness() {
+  cv::Mat raw;
+  cv::Mat bgr;
+  bool ok = false;
+  // Bo vai frame cho exposure moi co hieu luc
+  for (int i = 0; i < 4; ++i) {
+    ok = grab_frame(raw, bgr) && !bgr.empty();
+  }
+  if (!ok) {
+    return -1.0;
+  }
+  cv::Mat gray;
+  cv::cvtColor(bgr.rowRange(bgr.rows / 2, bgr.rows), gray, cv::COLOR_BGR2GRAY);
+  int hist[256] = {0};
+  for (int y = 0; y < gray.rows; ++y) {
+    const uchar *g = gray.ptr<uchar>(y);
+    for (int x = 0; x < gray.cols; ++x) {
+      ++hist[g[x]];
+    }
+  }
+  const long half = static_cast<long>(gray.total()) / 2;
+  long acc = 0;
+  for (int v = 0; v < 256; ++v) {
+    acc += hist[v];
+    if (acc >= half) {
+      return v;
+    }
+  }
+  return 255.0;
+}
+
+// Chinh exposure toi khi do sang san ~ EXPOSURE_TARGET roi giu co dinh
+void CameraLane::lock_exposure() {
+  cap_.set(cv::CAP_PROP_AUTO_EXPOSURE, 1); // V4L2: 1 = phoi sang tay
+  int e = exposure_ > 0 ? exposure_ : locked_exposure_;
+  if (e > 0) {
+    cap_.set(cv::CAP_PROP_EXPOSURE, e);
+    locked_exposure_ = e;
+    return;
+  }
+  e = EXPOSURE_START;
+  double b = -1.0;
+  for (int it = 0; it < 8; ++it) {
+    cap_.set(cv::CAP_PROP_EXPOSURE, e);
+    b = floor_brightness();
+    if (b < 0.0 || std::fabs(b - EXPOSURE_TARGET) <= 8.0) {
+      break;
+    }
+    // Do sang tang cham hon tuyen tinh theo exposure
+    const double ratio =
+        std::clamp(std::pow(EXPOSURE_TARGET / std::max(b, 5.0), 1.5), 0.33, 3.0);
+    const int ne = std::clamp(static_cast<int>(std::lround(e * ratio)), EXPOSURE_MIN,
+                              EXPOSURE_MAX);
+    if (ne == e) {
+      break;
+    }
+    e = ne;
+  }
+  locked_exposure_ = e;
+  std::cout << "[CameraLane] Khoa phoi sang: exposure=" << e << " (do sang san " << b
+            << ", muc tieu " << EXPOSURE_TARGET << ")\n";
+}
+
+// ============================================================================
+// LUONG DOC FRAME
+// ============================================================================
+
+bool CameraLane::grab_frame(cv::Mat &raw, cv::Mat &bgr) {
+  if (!cap_.read(raw) || raw.empty()) {
+    return false;
+  }
+  if (!raw_mjpg_) {
+    bgr = raw;
+    return true;
+  }
+  return decode_mjpg(raw, VIS_W, bgr, cam_w_, cam_h_);
+}
+
+// Luong camera: doc frame -> detect() -> cap nhat ket qua moi nhat (latest_)
+void CameraLane::capture_loop() {
+  cv::Mat raw;
+  cv::Mat frame;
+  int fail_count = 0;
+  auto last_open_try = std::chrono::steady_clock::now();
+
+  while (running_.load()) {
+    // ---- Chua mo duoc / vua mat camera: thu mo lai dinh ky ----
+    // Trong luc nay khong co frame moi -> age_ms tang -> stale -> node dieu
+    // khien tu gui EMG. Cam lai camera la xe co hinh tro lai, khong can
+    // khoi dong lai node.
+    if (!cap_.isOpened()) {
+      const auto t = std::chrono::steady_clock::now();
+      if (t - last_open_try >= std::chrono::milliseconds(REOPEN_PERIOD_MS)) {
+        last_open_try = t;
+        if (open_camera()) {
+          std::cout << "[CameraLane] Camera reconnected\n";
+          fail_count = 0;
+        }
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      continue;
+    }
+
+    if (!grab_frame(raw, frame) || frame.empty()) {
+      if (++fail_count >= MAX_READ_FAIL) {
+        std::cerr << "[CameraLane] Camera stopped delivering frames, "
+                     "reopening...\n";
+        cap_.release();
+        fail_count = 0;
+        last_open_try = std::chrono::steady_clock::now();
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+
+    // Moc thoi gian la luc nhan frame, de age_ms gom ca thoi gian xu ly
+    const auto t_grab = std::chrono::steady_clock::now();
+    fail_count = 0;
+
+    update_geometry(frame.cols, frame.rows);
+
+    // Chi ve anh quan sat khi da co nguoi lay anh truoc do (viz_tick)
+    const bool draw = vis_wanted_.exchange(false);
+
+    LaneOutput out;
+    out.frame_id = ++frame_id_;
+    detect(frame, out, draw);
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (draw) {
+        latest_vis_.vis = std::move(out.vis);
+        latest_vis_.raw = std::move(out.raw);
+        latest_vis_.roi = std::move(out.roi);
+        latest_vis_.bin = std::move(out.bin);
+        latest_vis_.vis_frame_id = out.frame_id;
+      }
+      latest_ = std::move(out);
+      last_frame_time_ = t_grab;
+    }
+  }
+
+  running_.store(false);
+}
+
+// Xu ly 1 anh co san (phat lai anh da ghi / mo phong), khong can camera
+bool CameraLane::process(const cv::Mat &bgr, LaneOutput &out, bool draw,
+                         std::chrono::steady_clock::time_point stamp) {
+  if (bgr.empty()) {
+    return false;
+  }
+  if (cam_w_ == 0) {
+    cam_w_ = bgr.cols;
+    cam_h_ = bgr.rows;
+  }
+  update_geometry(bgr.cols, bgr.rows);
+  out = LaneOutput{};
+  out.frame_id = ++frame_id_;
+  return detect(bgr, out, draw, stamp);
+}
+
+// Lay ket qua frame moi nhat (an toan da luong); copy_vis = kem anh quan sat
+void CameraLane::get_latest(LaneOutput &out, bool copy_vis) const {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  if (copy_vis) {
+    // cv::Mat chi copy header (dem tham chieu). Luong camera luon gan Mat
+    // MOI cho latest_vis_ chu khong ghi de tai cho, nen chia se an toan.
+    out.vis = latest_vis_.vis;
+    out.raw = latest_vis_.raw;
+    out.roi = latest_vis_.roi;
+    out.bin = latest_vis_.bin;
+    out.vis_frame_id = latest_vis_.vis_frame_id;
+    vis_wanted_.store(true);
+  } else {
+    out.vis.release();
+    out.raw.release();
+    out.roi.release();
+    out.bin.release();
+  }
+
+  out.left_pts = latest_.left_pts;
+  out.right_pts = latest_.right_pts;
+  out.two_lanes = latest_.two_lanes;
+  out.state = latest_.state;
+  out.dev_px = latest_.dev_px;
+  out.dev_cm = latest_.dev_cm;
+  out.lane_width_cm = latest_.lane_width_cm;
+  out.path_dx_cm = latest_.path_dx_cm;
+  out.curvature = latest_.curvature;
+  out.speed_scale = latest_.speed_scale;
+  out.kink_dist_m = latest_.kink_dist_m;
+  out.kink_dir = latest_.kink_dir;
+  out.kink_deg = latest_.kink_deg;
+  out.pitch_deg = latest_.pitch_deg;
+  out.pitch_confirmed = latest_.pitch_confirmed;
+  out.near_z_m = latest_.near_z_m;
+  out.dark_ratio = latest_.dark_ratio;
+  out.fit_ok = latest_.fit_ok;
+  out.centre_g = latest_.centre_g;
+  out.left_g = latest_.left_g;
+  out.right_g = latest_.right_g;
+  out.stamp = latest_.stamp;
+  out.gated = latest_.gated;
+  out.horizon_frac = latest_.horizon_frac;
+  out.frame_w = latest_.frame_w;
+  out.frame_h = latest_.frame_h;
+  out.proc_ms = latest_.proc_ms;
+  out.frame_id = latest_.frame_id;
+
+  if (last_frame_time_ == std::chrono::steady_clock::time_point{}) {
+    out.age_ms = static_cast<unsigned long>(-1);
+    out.stale = true;
+    return;
+  }
+
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - last_frame_time_)
+                      .count();
+
+  out.age_ms = (ms < 0) ? 0ul : static_cast<unsigned long>(ms);
+  out.stale = out.age_ms > static_cast<unsigned long>(STALE_AGE_MS);
+}
+
+// ############################################################################
+// PHAN B - DETECTOR: nhan lan tren mat san (BEV)
+// ############################################################################
 
 namespace {
 
@@ -22,6 +564,7 @@ using Poly = std::vector<cv::Point2f>;
 
 constexpr float kDeg = static_cast<float>(CV_PI) / 180.0f;
 
+// Do dai vector 2D
 inline float norm2(const cv::Point2f &v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
 // > 0: b nam ben TRAI a (nhin theo huong a); < 0: ben PHAI
@@ -29,6 +572,7 @@ inline float cross2(const cv::Point2f &a, const cv::Point2f &b) {
   return a.x * b.y - a.y * b.x;
 }
 
+// Vector don vi (vector 0 -> huong thang phia truoc)
 inline cv::Point2f unit(const cv::Point2f &v) {
   const float n = norm2(v);
   return n > 1e-6f ? v * (1.0f / n) : cv::Point2f(0.0f, 1.0f);
@@ -49,6 +593,7 @@ inline cv::Point2f rotate(const cv::Point2f &d, float deg) {
   return cv::Point2f(d.x * c - d.y * s, d.x * s + d.y * c);
 }
 
+// Tong chieu dai polyline (m)
 float poly_len(const Poly &g) {
   float s = 0.0f;
   for (size_t i = 1; i < g.size(); ++i) {
@@ -130,49 +675,6 @@ Poly offset_mitre(const Poly &p, float dist, int side, float eps) {
     m *= 1.0f / mn;
     out[i] = v[i] + k * m * (1.0f / std::max(0.35f, m.dot(nrm[i - 1])));
   }
-  // Doi vao PHIA TRONG goc gap: doan vach ngan hon k*tan(goc/2) (vd doan vach
-  // ngoai gan xe ngay truoc goc cua, chi 15-20 cm) cho doan doi NGUOC chieu ->
-  // duong tam thanh vong "duoi en", diem dau nhay ra ngoai -> xe be lai SAI
-  // HUONG dung luc vao cua (log 10/10 15:25, cua trai 163.9-164.3 s). Sua:
-  // doan dau nguoc -> lui diem dau ve sau dinh goc theo huong doan do; doan
-  // giua nguoc -> bo doan, noi 2 doan ke nhau tai giao diem.
-  std::vector<cv::Point2f> sd(n - 1);
-  std::vector<float> sl(n - 1);
-  for (size_t i = 0; i + 1 < n; ++i) {
-    sl[i] = norm2(v[i + 1] - v[i]);
-    sd[i] = unit(v[i + 1] - v[i]);
-  }
-  for (bool changed = true; changed && out.size() >= 2;) {
-    changed = false;
-    for (size_t i = 0; i + 1 < out.size(); ++i) {
-      if ((out[i + 1] - out[i]).dot(sd[i]) > 0.0f) {
-        continue;
-      }
-      changed = true;
-      if (out.size() == 2) {
-        return {};
-      }
-      if (i == 0) {
-        out[0] = out[1] - sd[0] * sl[0];
-      } else if (i + 2 == out.size()) {
-        out[i + 1] = out[i] + sd[i] * sl[i];
-      } else {
-        // Giao duong (out[i-1], sd[i-1]) voi duong (out[i+2], sd[i+1])
-        const cv::Point2f a = out[i - 1];
-        const cv::Point2f b = out[i + 2];
-        const float den = cross2(sd[i - 1], sd[i + 1]);
-        cv::Point2f x = 0.5f * (out[i] + out[i + 1]);
-        if (std::fabs(den) > 1e-4f) {
-          x = a + sd[i - 1] * (cross2(b - a, sd[i + 1]) / den);
-        }
-        out[i] = x;
-        out.erase(out.begin() + static_cast<long>(i) + 1);
-        sd.erase(sd.begin() + static_cast<long>(i));
-        sl.erase(sl.begin() + static_cast<long>(i));
-      }
-      break;
-    }
-  }
   // Doan vach ngan + gap gat (vach bi mep tam nhin cat) lam duong doi tu cat
   // chinh no thanh vong "tam giac": diem nao gan vach hon 0.7 * dist la diem
   // cua vong do -> bo
@@ -212,6 +714,7 @@ float arc_pos(const cv::Point2f &p, const Poly &poly) {
   return pos;
 }
 
+// Trung vi (0 neu rong)
 float median_of(std::vector<float> v) {
   if (v.empty()) {
     return std::numeric_limits<float>::quiet_NaN();
@@ -220,35 +723,13 @@ float median_of(std::vector<float> v) {
   return v[v.size() / 2];
 }
 
-// Anh cho GUI: keo gian do sang phan vi 1% -> 10, 99% -> 235
-// (camera trong phong toi cho anh xam, nhat). CHI de nguoi xem, detector va
-// anh ghi lai dung anh goc.
-void stretch_for_display(cv::Mat &bgr) {
-  cv::Mat small, gray;
-  cv::resize(bgr, small, cv::Size(), 0.25, 0.25, cv::INTER_NEAREST);
-  cv::cvtColor(small, gray, cv::COLOR_BGR2GRAY);
-  int hist[256] = {0};
-  for (int y = 0; y < gray.rows; ++y) {
-    const uchar *g = gray.ptr<uchar>(y);
-    for (int x = 0; x < gray.cols; ++x) {
-      ++hist[g[x]];
-    }
-  }
-  const long n = static_cast<long>(gray.total());
-  int lo = 0, hi = 255;
-  for (long acc = 0; lo < 255 && (acc += hist[lo]) < n / 100; ++lo) {
-  }
-  for (long acc = 0; hi > 0 && (acc += hist[hi]) < n / 100; --hi) {
-  }
-  if (hi - lo < 40) {
-    return;
-  }
-  cv::Mat lut(1, 256, CV_8U);
-  for (int i = 0; i < 256; ++i) {
-    const double t = std::clamp((i - lo) / static_cast<double>(hi - lo), 0.0, 1.0);
-    lut.at<uchar>(i) = cv::saturate_cast<uchar>(10.0 + 225.0 * t);
-  }
-  cv::LUT(bgr, lut, bgr);
+// Phan vi q (0..1), noi suy tuyen tinh nhu numpy
+float percentile(std::vector<float> v, float q) {
+  std::sort(v.begin(), v.end());
+  const float pos = q * static_cast<float>(v.size() - 1);
+  const size_t lo = static_cast<size_t>(pos);
+  const size_t hi = std::min(lo + 1, v.size() - 1);
+  return v[lo] + (v[hi] - v[lo]) * (pos - static_cast<float>(lo));
 }
 
 } // namespace
@@ -271,6 +752,20 @@ bool CameraLane::to_image(double pitch, double f, double h, double cx,
   return true;
 }
 
+// Pixel (u, v) -> diem mat san (X phai, Z truoc) theo camera pinhole cao h, cui pitch
+cv::Point2f CameraLane::to_ground(double pitch, double f, double h, double cx,
+                                  double cy, double u, double v) {
+  const double rx = (u - cx) / f;
+  const double ry = (v - cy) / f;
+  const double c = std::cos(pitch);
+  const double s = std::sin(pitch);
+  const double du = -ry * c - s;
+  const double dz = -ry * s + c;
+  const double t = h / std::max(-du, 1e-6);
+  return cv::Point2f(static_cast<float>(rx * t), static_cast<float>(dz * t));
+}
+
+// Khoang cach mat san (m) truoc chan camera ung voi hang anh y
 double CameraLane::ground_dist_m(double y) const {
   // goc nhin xuong so voi phuong ngang cua tia qua hang y
   const double psi = pitch_ + std::atan((y - cy_) / f_px_);
@@ -278,6 +773,7 @@ double CameraLane::ground_dist_m(double y) const {
                     : std::numeric_limits<double>::infinity();
 }
 
+// Diem mat san -> pixel khung lam viec (false neu sau camera / tren chan troi)
 bool CameraLane::ground_to_img(const cv::Point2f &g, cv::Point2d &p) const {
   double u = 0.0;
   double v = 0.0;
@@ -354,16 +850,19 @@ void CameraLane::build_bev() {
   }
 }
 
+// Diem mat san -> o luoi BEV (cot c, hang r)
 void CameraLane::px_of(const cv::Point2f &g, float &c, float &r) const {
   c = (g.x - x_min_) / BEV_RES_M - 0.5f;
   r = (z_max_ - g.y) / BEV_RES_M - 0.5f;
 }
 
+// O luoi BEV (cot c, hang r) -> diem mat san
 cv::Point2f CameraLane::ground_of(float c, float r) const {
   return cv::Point2f(x_min_ + (c + 0.5f) * BEV_RES_M,
                      z_max_ - (r + 0.5f) * BEV_RES_M);
 }
 
+// Diem mat san nam trong vung camera nhin thay tren luoi BEV?
 bool CameraLane::inside(const cv::Point2f &g) const {
   float c = 0.0f;
   float r = 0.0f;
@@ -446,10 +945,17 @@ cv::Mat CameraLane::floor_level(const cv::Mat &gray) const {
   return out;
 }
 
+// Mask pixel vach TOI tren anh BEV (+ do toi tuong doi rel, vung loa glare)
 void CameraLane::line_mask(const cv::Mat &bev_bgr, cv::Mat &mask,
                            cv::Mat &rel, cv::Mat &glare) const {
   cv::Mat gray;
   cv::cvtColor(bev_bgr, gray, cv::COLOR_BGR2GRAY);
+  // CLAHE (can bang tuong phan cuc bo): phong toi, exposure kep o 1500, mep
+  // anh / phia xa toi (vignetting) -> vach mo. Phat lai 4 lan chay 13/10:
+  // mat lan 18 -> 12 %, du 2 vach 43 -> 47 %. Clip 3 / luoi 4x4 bat them vach
+  // nhung gan sai phia nhieu hon -> giu 2.0 / 8x8.
+  static const cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(CLAHE_CLIP, cv::Size(CLAHE_GRID, CLAHE_GRID));
+  clahe->apply(gray, gray);
   cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0);
 
   const int k = std::max(5, static_cast<int>(std::lround(BG_KERNEL_M / BEV_RES_M))) | 1;
@@ -480,45 +986,6 @@ void CameraLane::line_mask(const cv::Mat &bev_bgr, cv::Mat &mask,
   cv::compare(gray, GLARE_MIN_V, g_abs, cv::CMP_GE);
   cv::bitwise_or(g_rel, g_abs, glare);
   cv::bitwise_and(glare, valid_, glare);
-
-  // TO DEN LAI VACH BI LOA: trong vet den tran (san quanh do sang hon muc san
-  // cua khoi >= GLARE_ZONE_GAIN), bang keo bong chi con toi ngang muc san
-  // (log 10/10 172-175 s: vach 150-160 tren nen 205-225, muc san ~157) -> bi
-  // buoc "toi hon muc san" loai, vach dut/mat. O do chi doi toi hon NEN cuc bo
-  // (rel), va CHI GIU phan noi lien voi vach chac chan (mask o tren) - nguong
-  // tre: khe san giua 2 vet den cung toi hon nen nhung khong noi vao vach that.
-  {
-    cv::Mat zone_thr, zone, weak;
-    level.convertTo(zone_thr, CV_8U, GLARE_ZONE_GAIN);
-    cv::compare(bg, zone_thr, zone, cv::CMP_GT);
-    cv::bitwise_and(m_rel, m_abs, weak);
-    cv::bitwise_and(weak, zone, weak);
-    cv::bitwise_and(weak, valid_, weak);
-    if (cv::countNonZero(weak) > 0) {
-      cv::Mat both, lab;
-      cv::bitwise_or(mask, weak, both);
-      const int n = cv::connectedComponents(both, lab, 8, CV_32S);
-      std::vector<uchar> seed(static_cast<size_t>(n), 0);
-      for (int y = 0; y < lab.rows; ++y) {
-        const int *l = lab.ptr<int>(y);
-        const uchar *s = mask.ptr<uchar>(y);
-        for (int x = 0; x < lab.cols; ++x) {
-          if (s[x]) {
-            seed[static_cast<size_t>(l[x])] = 1;
-          }
-        }
-      }
-      for (int y = 0; y < lab.rows; ++y) {
-        const int *l = lab.ptr<int>(y);
-        uchar *m = mask.ptr<uchar>(y);
-        for (int x = 0; x < lab.cols; ++x) {
-          if (l[x] > 0 && seed[static_cast<size_t>(l[x])]) {
-            m[x] = 255;
-          }
-        }
-      }
-    }
-  }
 
   // Pixel co MAU ro (ghe cam, vat mau...) khong phai bang keo den
   cv::Mat colored = cv::Mat::zeros(bev_bgr.size(), CV_8U);
@@ -650,57 +1117,6 @@ void CameraLane::filter_clutter(const cv::Mat &mask_in, const cv::Mat &rel,
     }
   }
 
-  // DAI DU DOAN cua 2 vach dang bam (vi tri frame truoc + odometry). Vach
-  // trong vet loa bi bac mau chi con vet manh / nhat (log 10/10 16:43: rong
-  // 1-2 cm, toi 0.31) -> giong khe gach; doan xa vach cong ve phia camera
-  // giong chan ban. Khoi nam gon trong dai du doan (>= CORRIDOR_FRAC) la
-  // chinh vach do -> giu ("ve lai" vach). Khe gach / chan ban o cho khac van
-  // bi loai.
-  cv::Mat corridor = cv::Mat::zeros(mask.size(), CV_8U);
-  bool have_corridor = false;
-  auto draw_corridor = [&](const Poly &pts, float half) {
-    if (pts.size() < 2) {
-      return;
-    }
-    std::vector<cv::Point> px;
-    for (const auto &g : pts) {
-      float c = 0.0f, r = 0.0f;
-      px_of(g, c, r);
-      px.emplace_back(static_cast<int>(std::lround(c)), static_cast<int>(std::lround(r)));
-    }
-    const int line_px = 2 * static_cast<int>(std::lround(half / BEV_RES_M)) + 1;
-    cv::polylines(corridor, px, false, cv::Scalar(255), line_px);
-    have_corridor = true;
-  };
-  auto live = [](const Track &t) {
-    return t.valid && t.pts.size() >= 2 && t.missed <= COAST_SEC;
-  };
-  if (live(left_)) {
-    draw_corridor(left_.pts, CORRIDOR_HALF_M);
-  }
-  if (live(right_)) {
-    draw_corridor(right_.pts, CORRIDOR_HALF_M);
-  }
-  // Chi con bam 1 vach: vach kia du doan cach dung be rong lan vua do (dai
-  // rong hon vi be rong lan doi theo doan)
-  if (live(left_) != live(right_) && have_width_) {
-    const Track &t = live(left_) ? left_ : right_;
-    draw_corridor(offset_mitre(t.pts, lane_w_local_, &t == &left_ ? +1 : -1, RDP_EPS_M),
-                  CORRIDOR_OTHER_HALF_M);
-  }
-  std::vector<int> in_corr(N, 0);
-  if (have_corridor) {
-    for (int y = 0; y < lab.rows; ++y) {
-      const int *l = lab.ptr<int>(y);
-      const uchar *k = corridor.ptr<uchar>(y);
-      for (int x = 0; x < lab.cols; ++x) {
-        if (l[x] > 0 && k[x]) {
-          ++in_corr[static_cast<size_t>(l[x])];
-        }
-      }
-    }
-  }
-
   const double cos_radial = std::cos(RADIAL_DEG * CV_PI / 180.0);
   std::vector<uchar> keep(N, 0);
   for (int l = 1; l < n; ++l) {
@@ -739,8 +1155,7 @@ void CameraLane::filter_clutter(const cv::Mat &mask_in, const cv::Mat &rel,
                       (thick[i] > std::max(4.0, 0.15 * a) && length < 6.0 * width);
     const bool faint_thin = median_of(ridge[i]) < STROKE_MIN_HALF_PX &&
                             median_of(relv[i]) < STROKE_THIN_REL * 255.0f;
-    const bool on_track = in_corr[i] >= CORRIDOR_FRAC * a;
-    keep[i] = !blob && (on_track || (!upright && !faint_thin));
+    keep[i] = !upright && !blob && !faint_thin;
   }
 
   for (int y = 0; y < lab.rows; ++y) {
@@ -808,6 +1223,7 @@ bool CameraLane::in_glare(const cv::Point2f &g) const {
          cv::countNonZero(glare_(cv::Range(r0, r1), cv::Range(c0, c1))) > 0;
 }
 
+// Xoa pixel quanh p tren anh lam viec (vach da duoc nhan, khong dung lai)
 void CameraLane::consume(cv::Mat &work, const cv::Point2f &p, int r) const {
   float c = 0.0f;
   float rr = 0.0f;
@@ -962,6 +1378,7 @@ CameraLane::Poly CameraLane::walk(cv::Mat &work, cv::Point2f p, cv::Point2f d,
   return pts;
 }
 
+// Do 1 vach tu diem hat giong: di lui ve phia xe roi di toi (qua goc gap)
 CameraLane::Poly CameraLane::trace_from(cv::Mat &work, const cv::Point2f &seed,
                                         const cv::Point2f &d) const {
   // Di lui ve phia xe: KHONG re o goc gap (re sang doan vach ngang -> thu tu
@@ -1098,15 +1515,45 @@ std::vector<CameraLane::Poly> CameraLane::candidates(cv::Mat &work, int max_n) c
     if (pts.size() >= 2 && norm2(pts.back() - axle) < norm2(pts.front() - axle)) {
       std::reverse(pts.begin(), pts.end());
     }
-    if (trim_upright(pts) && poly_len(pts) >= 0.12f) {
+    trim_zigzag(pts);
+    if (trim_upright(pts) && poly_len(pts) >= 0.12f && dark_enough(pts)) {
       out.push_back(std::move(pts));
     }
   }
   return out;
 }
 
-// Doan vach chia thang ve chan camera = chan ban / ghe (xem camera_node.hpp).
-// Tra false = bo ca vach; true = giu (co the da cat duoi).
+// Vi du log that 08/10: vach trai di thang roi re ngoat vao hop giay o xa
+// (2 goc gap nguoc chieu cach 7 cm) -> "goc cua" gia, duong tam queo trai.
+// Giu doan truoc rang cua, bo phan duoi.
+bool CameraLane::trim_zigzag(Poly &pts) {
+  const Poly v = simplify(pts, RDP_EPS_M);
+  float prev = 0.0f;
+  for (size_t i = 1; i + 1 < v.size(); ++i) {
+    const cv::Point2f a = v[i] - v[i - 1];
+    const cv::Point2f b = v[i + 1] - v[i];
+    const float turn = std::atan2(cross2(a, b), a.dot(b)) / kDeg;
+    if (std::fabs(turn) >= ZIGZAG_DEG && std::fabs(prev) >= ZIGZAG_DEG &&
+        turn * prev < 0.0f && norm2(a) < ZIGZAG_GAP_M) {
+      // Cat tai dinh dau cua rang cua (v[i - 1])
+      size_t cut = 0;
+      float best = std::numeric_limits<float>::max();
+      for (size_t k = 0; k < pts.size(); ++k) {
+        const float d = norm2(pts[k] - v[i - 1]);
+        if (d < best) {
+          best = d;
+          cut = k;
+        }
+      }
+      pts.resize(cut + 1);
+      return true;
+    }
+    prev = turn;
+  }
+  return false;
+}
+
+// Doan vach chia thang ve chan camera = chan ban / ghe (xem lane_detector.hpp)
 bool CameraLane::trim_upright(Poly &pts) const {
   const Poly p = resample_lin(pts, WALK_STEP_M);
   if (p.size() < 3) {
@@ -1114,11 +1561,11 @@ bool CameraLane::trim_upright(Poly &pts) const {
   }
   const float cos_lim = std::cos(RADIAL_LINE_DEG * kDeg);
   const float cos_kink = std::cos(RADIAL_KINK_DEG * kDeg);
-  auto radial = [&](size_t k) {
-    return std::fabs(unit(p[k] - p[k - 1]).dot(unit(0.5f * (p[k] + p[k - 1])))) >= cos_lim;
-  };
   size_t i = 1;
   while (i < p.size()) {
+    auto radial = [&](size_t k) {
+      return std::fabs(unit(p[k] - p[k - 1]).dot(unit(0.5f * (p[k] + p[k - 1])))) >= cos_lim;
+    };
     if (!radial(i)) {
       ++i;
       continue;
@@ -1134,7 +1581,6 @@ bool CameraLane::trim_upright(Poly &pts) const {
       continue;
     }
     if (start == 1) {
-      // Vach bat dau bang doan tia, cach mep duoi tam nhin = chan ban dung rieng
       float c = 0.0f, r = 0.0f;
       px_of(p[0], c, r);
       const int col = std::clamp(static_cast<int>(std::lround(c)), 0, nx_ - 1);
@@ -1143,7 +1589,7 @@ bool CameraLane::trim_upright(Poly &pts) const {
       }
       continue;
     }
-    // Goc gap ngay truoc doan tia (di doc bang keo roi re vao chan ban) -> cat
+    // Co goc gap ngay truoc doan tia?
     const cv::Point2f d_in = unit(p[start - 1] - p[start >= 3 ? start - 3 : 0]);
     const cv::Point2f d_out = unit(p[std::min(start + 1, p.size() - 1)] - p[start - 1]);
     if (d_in.dot(d_out) < cos_kink) {
@@ -1161,6 +1607,48 @@ bool CameraLane::trim_upright(Poly &pts) const {
     }
   }
   return true;
+}
+
+// Do toi trung vi doc vach (max o 3x3 quanh moi diem, giong
+// adapt_threshold; bo diem loa den), thang 0..255. < 0 = khong du diem.
+float CameraLane::line_dark(const Poly &pts) const {
+  if (rel_.empty()) {
+    return -1.0f;
+  }
+  std::vector<float> vals;
+  for (const auto &q : pts) {
+    float c = 0.0f, r = 0.0f;
+    px_of(q, c, r);
+    const int ci = static_cast<int>(std::lround(c));
+    const int ri = static_cast<int>(std::lround(r));
+    if (ci >= 1 && ci < nx_ - 1 && ri >= 1 && ri < nz_ - 1 && !in_glare(q)) {
+      double mx = 0.0;
+      cv::minMaxLoc(rel_(cv::Range(ri - 1, ri + 2), cv::Range(ci - 1, ci + 2)), nullptr, &mx);
+      vals.push_back(static_cast<float>(mx));
+    }
+  }
+  return vals.size() < 3 ? -1.0f : median_of(vals);
+}
+
+// Vach du toi nhu bang keo? Vet bong chan ban / ghe mo nhat hon nhieu.
+bool CameraLane::dark_enough(const Poly &pts, float ref) const {
+  if (ref <= 0.0f) {
+    // Vach moi: so voi vach dang thay NHAT hon; khong co thi voi do tuong
+    // phan chung (neu con moi)
+    for (const Track *t : {&left_, &right_}) {
+      if (t->valid && t->observed && t->dark > 0.0f) {
+        ref = ref <= 0.0f ? t->dark : std::min(ref, t->dark);
+      }
+    }
+    if (ref <= 0.0f && contrast_ > 0.0f && contrast_age_ <= CONTRAST_STALE_SEC) {
+      ref = contrast_ * 255.0f;
+    }
+  }
+  if (ref <= 0.0f) {
+    return true;
+  }
+  const float d = line_dark(pts);
+  return d < 0.0f || d >= LINE_MIN_CONTRAST_FRAC * ref;
 }
 
 // ============================================================================
@@ -1210,6 +1698,7 @@ void CameraLane::pair_geom(const Poly &a, const Poly &b, float &dist,
   ang = std::acos(c) / kDeg;
 }
 
+// Vi tri ngang (m) cua doan dau vach keo dai toi hang chan camera (Z = 0)
 float CameraLane::x_at_car(const Poly &p) {
   if (p.empty()) {
     return 0.0f;
@@ -1218,17 +1707,31 @@ float CameraLane::x_at_car(const Poly &p) {
   return cross2(init_dir(p), cv::Point2f(0.0f, 0.0f) - p[0]);
 }
 
+// Vach a nam ben TRAI vach b (so tai doan gan xe)?
+bool CameraLane::left_of(const Poly &a, const Poly &b) const {
+  if (a.size() < 2 || b.size() < 2) {
+    return true;
+  }
+  float dist = 0.0f, ang = 0.0f;
+  bool right = false;
+  pair_geom(a, b, dist, ang, right);
+  return right && dist >= 0.5f * LANE_W_MIN_M;
+}
+
+// Nhan vach moi tu ung vien: tim vach con thieu, hoac 1 cap moi (xe o giua), hoac 1 vach don
 void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
                          bool have_right, bool allow_single) {
-  // Be rong lan KHONG co dinh (bang keo dan tay, moi doan rong / hep khac
-  // nhau): ghep cap chi doi khoang tuyet doi LANE_W_MIN_M..LANE_W_MAX_M; W
-  // (be rong vua do gan day) chi dung de uu tien cap gan dung nhat
-  const float max_ang = 40.0f;
+  // Be rong cap chi can nam trong khoang tuyet doi (lan rong / hep tung
+  // doan); diem uu tien gan be rong tai cho
+  const float lo = LANE_W_MIN_M;
+  const float hi = LANE_W_MAX_M;
+  const float max_ang = pitch_confirmed_ ? 25.0f : 40.0f;
   const float W = lane_w_local_;
-  auto make = [](const Poly &p, bool verified) {
+  auto make = [this](const Poly &p, bool verified) {
     Track t;
     t.valid = true;
     t.pts = p;
+    t.dark = line_dark(p);
     t.observed = true;
     t.verified = verified;
     t.seen = 1;
@@ -1247,7 +1750,7 @@ void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
       float dist = 0.0f, ang = 0.0f;
       bool right = false;
       pair_geom(ref.pts, cands[i], dist, ang, right);
-      if (right != want_right || dist < LANE_W_MIN_M || dist > LANE_W_MAX_M || ang > max_ang + 5.0f) {
+      if (right != want_right || dist < lo || dist > hi || ang > max_ang + 5.0f) {
         continue;
       }
       const float xc = x_at_car(cands[i]);
@@ -1281,7 +1784,7 @@ void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
       float dist = 0.0f, ang = 0.0f;
       bool right = false;
       pair_geom(cands[i], cands[j], dist, ang, right);
-      if (!right || dist < LANE_W_MIN_M || dist > LANE_W_MAX_M || ang > max_ang) {
+      if (!right || dist < lo || dist > hi || ang > max_ang) {
         continue;
       }
       // Xe phai nam GIUA 2 vach (vach trai ben trai, vach phai ben phai chan
@@ -1289,7 +1792,7 @@ void CameraLane::acquire(const std::vector<Poly> &cands, bool have_left,
       // cam / to giay ben ngoai lan -> danh lai het co sang phai.
       const float xl = x_at_car(cands[i]);
       const float xr = x_at_car(cands[j]);
-      if (xl > CAR_SIDE_SLACK_M || xr < -CAR_SIDE_SLACK_M || xl < -LANE_W_MAX_M || xr > LANE_W_MAX_M) {
+      if (xl > CAR_SIDE_SLACK_M || xr < -CAR_SIDE_SLACK_M || xl < -hi || xr > hi) {
         continue;
       }
       const float score = poly_len(cands[i]) + poly_len(cands[j]) - 2.0f * std::fabs(dist - W) -
@@ -1367,12 +1870,124 @@ void CameraLane::learn_width(const Poly &left, const Poly &right) {
   const float w = 0.5f * (std::fabs(cross2(ab, ra - la)) + std::fabs(cross2(ab, rb - la))) / n;
   if (w >= LANE_W_MIN_M && w <= LANE_W_MAX_M) {
     width_samples_.push_back(w);
-    if (width_samples_.size() > 100) {
+    if (width_samples_.size() > WIDTH_WINDOW) {
       width_samples_.pop_front();
     }
-    if (width_samples_.size() >= 15) {
+    if (width_samples_.size() >= WIDTH_MIN_SAMPLES) {
       lane_w_m_ = median_of(std::vector<float>(width_samples_.begin(), width_samples_.end()));
     }
+  }
+}
+
+// Goc cui camera suy tu 2 doan vach thang (gia thiet song song tren san).
+// Diem tu cua 2 duong song song tren san nam tren duong chan troi -> ra goc
+// cui. Kiem tra cheo: o goc do 2 vach phai cach nhau dung ~1 lan va nam 2 ben
+// xe -> loai cap nhieu / 2 mau cua cung 1 vach.
+bool CameraLane::pitch_from_pair(const cv::Point2f ha[2], const cv::Point2f hb[2],
+                                 double &pitch) const {
+  const double cx = WORK_W / 2.0;
+  cv::Vec3d img[4];
+  const cv::Point2f g4[4] = {ha[0], ha[1], hb[0], hb[1]};
+  double v_min = std::numeric_limits<double>::max();
+  for (int i = 0; i < 4; ++i) {
+    double u = 0.0, v = 0.0;
+    if (!to_image(pitch_, f_px_, h_, cx, cy_, g4[i].x, g4[i].y, u, v)) {
+      return false;
+    }
+    img[i] = cv::Vec3d(u, v, 1.0);
+    v_min = std::min(v_min, v);
+  }
+  const cv::Vec3d la = img[0].cross(img[1]);
+  const cv::Vec3d lb = img[2].cross(img[3]);
+  const cv::Vec3d vp = la.cross(lb);
+  if (std::fabs(vp[2]) < 1e-9) {
+    return false;
+  }
+  const double u_h = vp[0] / vp[2];
+  const double v_h = vp[1] / vp[2];
+  if (!(u_h > -2.0 * WORK_W && u_h < 3.0 * WORK_W) || v_h > v_min - 5.0) {
+    return false;
+  }
+  const double p_deg = std::atan2(cy_ - v_h, f_px_) * 180.0 / CV_PI;
+  if (std::fabs(p_deg - profile_.pitch_deg) > profile_.pitch_max_dev_deg) {
+    return false;
+  }
+  const double p_rad = p_deg * CV_PI / 180.0;
+  cv::Point2f g[4];
+  for (int i = 0; i < 4; ++i) {
+    g[i] = to_ground(p_rad, f_px_, h_, cx, cy_, img[i][0], img[i][1]);
+  }
+  const cv::Point2f ab = g[1] - g[0];
+  const float n = std::max(1e-9f, norm2(ab));
+  const float s2 = cross2(ab, g[2] - g[0]) / n;
+  const float s3 = cross2(ab, g[3] - g[0]) / n;
+  const float w = 0.5f * std::fabs(s2 + s3);
+  const float cfg = profile_.lane_width_m;
+  if (w < 0.75f * cfg || w > 1.3f * cfg) {
+    return false;
+  }
+  // Xe (diem duoi camera) phai nam GIUA 2 vach
+  const float car = cross2(ab, cv::Point2f(0.0f, 0.0f) - g[0]) / n;
+  if (car * s2 < 0.0f || std::fabs(car) > std::fabs(s2) + 0.05f) {
+    return false;
+  }
+  pitch = p_deg;
+  return true;
+}
+
+// (Mac dinh TAT) tu chinh goc cui tu 2 vach thang song song - khong on dinh tren duong gap khuc
+void CameraLane::calibrate_pitch(const std::vector<const Poly *> &lines) {
+  std::vector<std::array<cv::Point2f, 2>> heads;
+  for (size_t i = 0; i < lines.size() && i < 8; ++i) {
+    cv::Point2f a, b;
+    if (straight_head(*lines[i], 0.35f, a, b)) {
+      heads.push_back({a, b});
+    }
+  }
+  std::vector<float> found;
+  for (size_t i = 0; i < heads.size(); ++i) {
+    for (size_t j = i + 1; j < heads.size(); ++j) {
+      if (norm2(heads[i][0] - heads[j][0]) < 0.1f) {
+        continue;
+      }
+      double p = 0.0;
+      if (pitch_from_pair(heads[i].data(), heads[j].data(), p)) {
+        found.push_back(static_cast<float>(p));
+      }
+    }
+  }
+  if (found.empty()) {
+    return;
+  }
+  pitch_samples_.push_back(median_of(found)); // 1 mau / frame
+  if (pitch_samples_.size() > 40) {
+    pitch_samples_.pop_front();
+  }
+  if (pitch_samples_.size() < 10) {
+    return;
+  }
+  const std::vector<float> recent(
+      pitch_samples_.end() - std::min<long>(15, static_cast<long>(pitch_samples_.size())),
+      pitch_samples_.end());
+  const float q1 = percentile(recent, 0.25f);
+  const float med = percentile(recent, 0.50f);
+  const float q3 = percentile(recent, 0.75f);
+  if (q3 - q1 > 2.0f) {
+    return;
+  }
+  pitch_confirmed_ = true;
+  const double old = pitch_ * 180.0 / CV_PI;
+  const double diff = std::fabs(med - old);
+  if (diff > 0.7) {
+    // Ap dung o dau frame sau: luoi BEV doi kich thuoc, phan con lai cua frame
+    // nay van dung anh BEV cu
+    pending_pitch_ = med;
+    pending_reset_ = diff > 2.0; // vach dang bam tinh theo goc cu sai nhieu -> do lai
+    pitch_samples_.clear();
+    width_samples_.clear();
+    std::cout << "[CameraLane] Tu hieu chinh goc cui camera: " << old << " -> "
+              << med << " do (dat camera_pitch_deg:=" << med
+              << " de lan sau khoi dong dung ngay)\n";
   }
 }
 
@@ -1397,8 +2012,10 @@ void CameraLane::adapt_threshold(const cv::Mat &rel,
     }
   }
   float ratio = dark_ratio_;
+  contrast_age_ += dt_;
   if (vals.size() >= 8) {
     contrast_ = median_of(vals) / 255.0f;
+    contrast_age_ = 0.0f;
     const float target = std::min(CONTRAST_THR_MAX, CONTRAST_FRAC * contrast_);
     ratio += 0.1f * (target - ratio);
   } else if (obs.empty()) {
@@ -1457,6 +2074,7 @@ bool CameraLane::target_on(const Poly &path, float L, cv::Point2f &target,
   return true;
 }
 
+// Tim goc gap dau tien tren duong tam phia truoc: khoang cach, huong, do gap
 bool CameraLane::kink_ahead(const Poly &path, float &dist, int &dir, float &deg,
                             cv::Point2f &pt) const {
   const Poly v = simplify(path, RDP_EPS_M * 1.5f);
@@ -1561,7 +2179,14 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
                         std::chrono::steady_clock::time_point stamp) {
   const auto t_wall = std::chrono::steady_clock::now();
   const auto t_begin = stamp == std::chrono::steady_clock::time_point{} ? t_wall : stamp;
-  if (roi_top_frac_.load() != roi_top_used_) {
+  if (pending_pitch_ > 0.0) {
+    set_pitch(pending_pitch_);
+    pending_pitch_ = -1.0;
+    if (pending_reset_) {
+      left_ = Track{};
+      right_ = Track{};
+    }
+  } else if (roi_top_frac_.load() != roi_top_used_) {
     build_bev();
   }
 
@@ -1600,6 +2225,7 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
   // ---- 2-3. Mask vach + loc do vat ---------------------------------------
   cv::Mat mask, rel, clean, rejected;
   line_mask(bev, mask, rel, glare_);
+  rel_ = rel;
   filter_clutter(mask, rel, clean, rejected);
   last_fill_ = static_cast<float>(cv::countNonZero(mask)) / static_cast<float>(n_valid_);
   cv::Mat work = clean.clone();
@@ -1621,15 +2247,39 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
   for (Track *t : order) {
     Poly pts;
     float e = 0.0f;
-    // Duoi vach re vao chan ban -> cat; ca vach la chan ban -> bo va tra lai
-    // pixel cho vach kia
+    // Vach bam duoc phai van nam dung phia vach con lai: truoc day vach trai
+    // gia (vet bong) bam lan sang bang keo PHAI -> 2 vach trung nhau, bo nham
+    // vach phai that -> vach phai thanh "vach trai", tam lan lech ra ngoai.
+    Track &other = t == &left_ ? right_ : left_;
+    auto side_ok = [&](const Poly &p) {
+      if (!other.valid || (t == &left_ ? left_of(p, other.pts) : left_of(other.pts, p))) {
+        return true;
+      }
+      // Mau thuan phia: tin vach da bam LAU hon. Vach kia moi bam vai frame
+      // (vd chan ghe vua bi nhan lam vach) thi bo vach kia, giu vach nay.
+      if (t->seen > other.seen + 2 && (t->verified || !other.verified)) {
+        other = Track{};
+        return true;
+      }
+      return false;
+    };
     cv::Mat backup = work.clone();
-    bool ok = follow(work, t->pts, gate, pts, e);
-    if (ok && (!trim_upright(pts) || poly_len(pts) < 0.08f)) {
-      backup.copyTo(work);
-      ok = false;
+    // ... va du toi nhu chinh no o frame truoc: vach that ra khoi khung thi
+    // khong bam sang mep vet bong ben canh. Duoi rang cua (re vao do vat)
+    // bi cat bo.
+    if (follow(work, t->pts, gate, pts, e)) {
+      trim_zigzag(pts);
+      if (!trim_upright(pts) || poly_len(pts) < 0.08f || !side_ok(pts) ||
+          !dark_enough(pts, t->dark)) {
+        backup.copyTo(work); // tra lai pixel cho vach kia
+        pts.clear();
+      }
     }
-    if (ok) {
+    if (!pts.empty()) {
+      const float d = line_dark(pts);
+      if (d > 0.0f) {
+        t->dark = t->dark > 0.0f ? 0.7f * t->dark + 0.3f * d : d;
+      }
       t->pts = std::move(pts);
       t->gate_err = e;
       t->observed = true;
@@ -1645,13 +2295,80 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
     }
   }
 
-  // 2 vach trung / bat cheo nhau -> bo vach khop kem hon
-  if (left_.valid && right_.valid && left_.observed && right_.observed) {
-    float dist = 0.0f, ang = 0.0f;
-    bool right = false;
-    pair_geom(left_.pts, right_.pts, dist, ang, right);
-    if (dist < 0.5f * LANE_W_MIN_M || !right) {
-      (left_.gate_err > right_.gate_err ? left_ : right_) = Track{};
+  // 2 vach trung / bat cheo nhau -> bo vach SAI PHIA xe truoc (vach trai ma
+  // nam ben phai chan camera...), roi toi vach moi hon / chua xac minh / khop
+  // kem hon. Truoc day chi so do khop -> co luc bo nham vach that.
+  if (left_.valid && right_.valid && left_.observed && right_.observed &&
+      !left_of(left_.pts, right_.pts)) {
+    const bool l_bad = x_at_car(left_.pts) > CAR_SIDE_SLACK_M;
+    const bool r_bad = x_at_car(right_.pts) < -CAR_SIDE_SLACK_M;
+    bool drop_left = left_.gate_err > right_.gate_err;
+    if (l_bad != r_bad) {
+      drop_left = l_bad;
+    } else if (left_.verified != right_.verified) {
+      drop_left = !left_.verified;
+    } else if (left_.seen != right_.seen) {
+      drop_left = left_.seen < right_.seen;
+    }
+    (drop_left ? left_ : right_) = Track{};
+  }
+
+  // ---- 4b. Nhan lech 1 vach -----------------------------------------------
+  // Vach trai dang bam lai nam ben PHAI chan camera (hoac nguoc lai) VA phia
+  // ben kia xe co vach chua dung ghep cap hop le voi no (xe nam giua) -> nhan
+  // bi lech 1 vach, doi nhan. 13/10 17:18: dat xe canh xe may, lop xe = vach
+  // phai, vach phai that = vach trai, vach trai that bo khong -> tam lan nam
+  // ngoai duong, xe lao vao xe may / chan tuong. Khong co vach ghep (xe vua
+  // de qua vach) thi giu nguyen: lai ve dung phia.
+  for (int side = 0; side < 2; ++side) {
+    Track &wrong = side == 0 ? left_ : right_;
+    if (!wrong.valid || !wrong.observed) {
+      continue;
+    }
+    const float xw = x_at_car(wrong.pts);
+    if (side == 0 ? xw <= CAR_SIDE_SLACK_M : xw >= -CAR_SIDE_SLACK_M) {
+      continue;
+    }
+    cv::Mat probe = work.clone();
+    const std::vector<Poly> others = candidates(probe);
+    int best = -1;
+    float best_len = 0.0f;
+    for (size_t i = 0; i < others.size(); ++i) {
+      const Poly &c = others[i];
+      const float xc = x_at_car(c);
+      const float len = poly_len(c);
+      if (init_dir(c).y < std::cos(60.0f * kDeg) || c[0].y > 1.0f || len < 0.3f ||
+          (side == 0 ? xc > CAR_SIDE_SLACK_M : xc < -CAR_SIDE_SLACK_M)) {
+        continue;
+      }
+      float dist = 0.0f, ang = 0.0f;
+      bool right = false;
+      // side 0: vach moi ben trai, vach cu thanh vach phai (va nguoc lai)
+      if (side == 0) {
+        pair_geom(c, wrong.pts, dist, ang, right);
+      } else {
+        pair_geom(wrong.pts, c, dist, ang, right);
+      }
+      if (right && dist >= LANE_W_MIN_M && dist <= LANE_W_MAX_M && ang < 40.0f && len > best_len) {
+        best_len = len;
+        best = static_cast<int>(i);
+      }
+    }
+    if (best >= 0) {
+      Track fresh;
+      fresh.valid = true;
+      fresh.pts = others[static_cast<size_t>(best)];
+      fresh.observed = true;
+      fresh.verified = true;
+      fresh.seen = 1;
+      Track moved = wrong;
+      moved.verified = true;
+      left_ = side == 0 ? fresh : moved;
+      right_ = side == 0 ? moved : fresh;
+      for (const auto &q : fresh.pts) {
+        consume(work, q, WIN_PX + 1);
+      }
+      break;
     }
   }
 
@@ -1677,6 +2394,11 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
         const float xc = x_at_car(c);
         const bool side_ok = t == &left_ ? xc < CAR_SIDE_SLACK_M : xc > -CAR_SIDE_SLACK_M;
         if (!side_ok) {
+          continue;
+        }
+        // ... va dung phia vach con lai (neu vach do dang thay)
+        const Track &o = t == &left_ ? right_ : left_;
+        if (o.valid && o.observed && !(t == &left_ ? left_of(c, o.pts) : left_of(o.pts, c))) {
           continue;
         }
         const float cosang = init_dir(c).dot(init_dir(t->pts));
@@ -1712,6 +2434,7 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
       }
       if (best >= 0) {
         t->pts = cands[static_cast<size_t>(best)];
+        t->dark = line_dark(t->pts);
         t->observed = true;
         t->missed = 0.0f;
         t->seen = 1;
@@ -1747,18 +2470,18 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
     if (both_ok) {
       left_.verified = right_.verified = true;
       learn_width(left_.pts, right_.pts);
-      // Be rong TAI CHO: lan dau thay du 2 vach lay ngay, sau do EMA nhanh
-      if (!have_width_) {
-        lane_w_m_ = width;
+      // Chua du mau doan thang (duong gap khuc: 13/10 phai toi giay 66 moi
+      // du) -> be rong dai han EMA cham theo moi frame du 2 vach. Truoc day
+      // giu 0.42 (duong cu) trong khi lan that ~0.6 m: 1 vach > 3 s thi tam
+      // dat cach vach 21 cm -> xe om sat vach do / cat qua o cua.
+      if (width_samples_.size() < WIDTH_MIN_SAMPLES) {
+        lane_w_m_ += LANE_W_SEED_ALPHA * (width - lane_w_m_);
       }
-      lane_w_local_ = have_width_ ? lane_w_local_ + LANE_W_LOCAL_ALPHA * (width - lane_w_local_)
-                                  : width;
-      have_width_ = true;
+      lane_w_local_ += LANE_W_LOCAL_ALPHA * (width - lane_w_local_);
       lane_w_local_age_ = 0.0f;
     }
   }
   if (!both_ok) {
-    // Lau khong thay du 2 vach: tro dan ve be rong hoc dai han
     lane_w_local_age_ += dt;
     if (lane_w_local_age_ > LANE_W_LOCAL_HOLD_SEC) {
       lane_w_local_ += 0.05f * (lane_w_m_ - lane_w_local_);
@@ -1770,6 +2493,13 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
   }
   if (obs_r) {
     seen.push_back(&right_.pts);
+  }
+  if (profile_.auto_pitch) {
+    std::vector<const Poly *> all = seen;
+    for (const auto &c : cands) {
+      all.push_back(&c);
+    }
+    calibrate_pitch(all);
   }
   adapt_threshold(rel, seen);
 
@@ -1788,11 +2518,32 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
     out.lane_width_cm = width * 100.0f;
   }
 
+  // Chi thay 1 vach: vach kia co nam trong vung camera nhin thay khong? Du
+  // doan o be rong lan RONG NHAT con hop ly (OTHER_VIEW_WIDTH x be rong da
+  // hoc): ca vi tri do cung trong khung ma khong nhan duoc = vach mo / loa /
+  // dut -> xe dang o dung cho, dung di tim. Nam ngoai khung = xe lech ve
+  // phia vach dang thay, hoac lan doan nay rong hon (log that 08/10: vach
+  // kia khong co o vi tri lan 0.42 m) -> phai lai ve phia vach kia tim lai.
+  if (state == LaneState::ONE_LINE) {
+    const Poly pred = resample_lin(offset_mitre(use_l ? left_.pts : right_.pts,
+                                                OTHER_VIEW_WIDTH * lane_w_local_,
+                                                use_l ? +1 : -1, RDP_EPS_M),
+                                   OTHER_VIEW_STEP_M);
+    const cv::Point2f margin(OTHER_VIEW_MARGIN_M, 0.0f);
+    int n_in = 0;
+    for (const auto &p : pred) {
+      if (p.y <= OTHER_VIEW_MAX_Z_M && inside(p - margin) && inside(p + margin)) {
+        ++n_in;
+      }
+    }
+    out.other_view_m = n_in * OTHER_VIEW_STEP_M;
+  }
+
   // ---- 7. Tam lan tu tung vach (doi nua lan theo phap tuyen, mitre) ------
   // Du 2 vach: doi nua be rong DO O FRAME NAY -> 2 duong tam trung nhau =
-  // dung GIUA 2 vach du lan rong / hep bao nhieu. (Truoc day doi nua be rong
-  // da hoc, khoi dau 0.42 m: lan 0.52 m thi tam lech 5 cm ve 1 vach.) Chi 1
-  // vach: doi nua be rong vua do gan nhat (lane_w_local_).
+  // dung giua 2 vach du lan rong / hep hon be rong da hoc. (Truoc day luon
+  // doi nua be rong da hoc: lan rong hon 10 cm thi 2 duong tam lech nhau
+  // 10 cm, diem ngam nhay qua lai giua 2 duong, xe lac +-10 cm.)
   const float half = 0.5f * (both_ok ? width : lane_w_local_);
   const Poly c_left = use_l ? offset_mitre(left_.pts, half, +1, RDP_EPS_M) : Poly{};
   const Poly c_right = use_r ? offset_mitre(right_.pts, half, -1, RDP_EPS_M) : Poly{};
@@ -2043,6 +2794,7 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
 
   out.horizon_frac = static_cast<float>(horizon_y_ / WH);
   out.pitch_deg = static_cast<float>(pitch_ * 180.0 / CV_PI);
+  out.pitch_confirmed = pitch_confirmed_;
   out.near_z_m = z_min_ + 0.03f;
   out.dark_ratio = dark_ratio_;
   out.proc_ms = std::chrono::duration<double, std::milli>(
@@ -2058,7 +2810,6 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
       1, static_cast<int>(std::lround(static_cast<double>(VIS_W) * frame.rows / frame.cols)));
   cv::Mat vis;
   cv::resize(frame, vis, cv::Size(VIS_W, vis_h), 0, 0, cv::INTER_AREA);
-  stretch_for_display(vis);
   out.raw = vis.clone();
   const double vx = static_cast<double>(VIS_W) / WORK_W;
   const double vy = static_cast<double>(vis_h) / WH;
@@ -2193,9 +2944,9 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
                 flag_color, 1, cv::LINE_AA);
     char info[220];
     std::snprintf(info, sizeof(info),
-                  "dev %+dpx  w %.0fcm  v %.0f%%  pitch %.1f  thr %.2f%s",
+                  "dev %+dpx  w %.0fcm  v %.0f%%  pitch %.1f%s  thr %.2f%s",
                   out.dev_px, lane_w_local_ * 100.0f, out.speed_scale * 100.0f,
-                  out.pitch_deg, dark_ratio_,
+                  out.pitch_deg, pitch_confirmed_ ? "" : "?", dark_ratio_,
                   have_kink ? (kink_dir > 0 ? "  CUA >>" : "  CUA <<") : "");
     cv::putText(vis, info, cv::Point(118, 18), cv::FONT_HERSHEY_SIMPLEX, 0.40,
                 cv::Scalar(235, 235, 235), 1, cv::LINE_AA);

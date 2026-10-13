@@ -1,4 +1,18 @@
-#include "path_tracker.hpp"
+// ============================================================================
+// lane_keeping.cpp - GIU LAN (cai dat cua lane_keeping.hpp)
+// ----------------------------------------------------------------------------
+// Muc luc:
+//   1. Ham tien ich (polyline, cung duong, huong duong theo do sau)
+//   2. Odometry: mo hinh xe dap tai truc sau, lich su vi tri (bu tre camera),
+//      uoc luong goc banh dang co (tre + loc) cho MPC / oracle
+//   3. Bo nho duong: ghep frame camera vao duong da nho, bo diem cu
+//   4. Oracle: do do cong THAT cua xe tu 2 frame cach ~0.5 s -> hoc g, b
+//   5. compute(): MPC (pure pursuit + lech ngang khi MPC khong chay duoc),
+//      rao chan vach, do cong / khoang cach toi cua phia truoc
+//   6. mpc_steer(): trang thai e_y, e_psi tai truc sau + do cong phia truoc
+// ============================================================================
+
+#include "lane_keeping.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -36,15 +50,11 @@ constexpr double GUARD_MAX_DEG = 15.0;
 constexpr double CORNER_CHORD_M = 0.25;
 constexpr double CORNER_TURN_DEG = 15.0;
 constexpr double CORNER_STEP_M = 0.05;
-// Do lech ngang: duong tam bat dau truoc chan camera toi bay nhieu thi keo
-// dai thang doan dau ve sau (camera thay mat dat tu ~0.47 m truoc chan cam)
-constexpr float XTE_EXTEND_M = 0.50f;
-// Lech ngang lon hon muc nay = bo nho sai, bo phan hoi xte. Truoc day 0.30:
-// xe lech that 30-35 cm (de len vach, log 10/10 18:05) lai MAT khau keo ve.
-constexpr float XTE_MAX_M = 0.45f;
 
+// Do dai vector 2D
 inline float norm2(const cv::Point2f &v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
+// Vector don vi (vector 0 -> huong thang phia truoc)
 inline cv::Point2f unit(const cv::Point2f &v) {
   const float n = norm2(v);
   return n > 1e-6f ? v * (1.0f / n) : cv::Point2f(0.0f, 1.0f);
@@ -79,44 +89,6 @@ cv::Point2f closest_on(const cv::Point2f &p, const std::vector<cv::Point2f> &pol
   return best;
 }
 
-// Khop duong thang x = a + b * y (binh phuong toi thieu) qua cac diem duong
-// tam trong [y0 - 0.1, y0 + len] (duong bat dau xa hon: lay doan len dau
-// tien). e = lech ngang tai y0 (m, > 0 = ben phai), psi = huong (do, > 0 =
-// duong re phai so voi xe). Can >= 4 diem trai >= 0.25 m.
-bool fit_line(const std::vector<cv::Point2f> &c, float y0, float len, double &e, double &psi) {
-  float lo = y0 - 0.1f;
-  if (!c.empty() && c.front().y > lo) {
-    lo = c.front().y;
-  }
-  const float hi = std::max(y0, lo) + len;
-  double n = 0, sy = 0, sx = 0, syy = 0, sxy = 0;
-  float ymin = 1e9f, ymax = -1e9f;
-  for (const auto &q : c) {
-    if (q.y < lo || q.y > hi) {
-      continue;
-    }
-    n += 1;
-    sy += q.y;
-    sx += q.x;
-    syy += static_cast<double>(q.y) * q.y;
-    sxy += static_cast<double>(q.x) * q.y;
-    ymin = std::min(ymin, q.y);
-    ymax = std::max(ymax, q.y);
-  }
-  if (n < 4 || ymax - ymin < 0.25f || lo > y0 + 0.5f) {
-    return false;
-  }
-  const double den = n * syy - sy * sy;
-  if (std::fabs(den) < 1e-9) {
-    return false;
-  }
-  const double b = (n * sxy - sy * sx) / den;
-  const double a = (sx - b * sy) / n;
-  e = a + b * y0;
-  psi = std::atan(b) * 180.0 / CV_PI;
-  return true;
-}
-
 // Huong duong tai doan i, lay tren cung ~+/-0.10 m
 cv::Point2f dir_at(const std::vector<cv::Point2f> &g, size_t i) {
   size_t a = i;
@@ -130,86 +102,84 @@ cv::Point2f dir_at(const std::vector<cv::Point2f> &g, size_t i) {
   return unit(g[b] - g[a]);
 }
 
+// Doi khoang thoi gian sang giay
 double seconds(Clock::duration d) {
   return std::chrono::duration<double>(d).count();
 }
 
-// GOC GAP: huong duong truoc / sau diem s (day cung KINK_CHORD_M) lech >=
-// KINK_MIN_DEG. Duong dua that la cac doan thang noi goc gap 30-90 do.
-constexpr double KINK_CHORD_M = 0.12;
-constexpr double KINK_MIN_DEG = 20.0;
-constexpr double KINK_STEP_M = 0.02;
-// Chi giu thang khi THAN XE dang song song doan truoc goc (lech < bay nhieu).
-// Cua da giac = nhieu goc gap noi tiep: xe dang quay qua goc truoc thi KHONG
-// tra lai thang vi goc sau.
-constexpr double KINK_ALIGN_DEG = 12.0;
-
-// Goc gap dau tien tren duong c (toa do xe, sau -> truoc) trong khoang
-// [0, s_max] m tinh tu ngang truc sau. s_k: quang duong toi dinh, th: goc
-// quay (rad, > 0 = re phai), vtx: dinh, h_in: huong doan truoc dinh.
-bool find_kink(const std::vector<cv::Point2f> &c, double s_max, double &s_k,
-               double &th, cv::Point2f &vtx, cv::Point2f &h_in) {
+// ---- Duong theo chieu dai cung (cho MPC / oracle) ----
+struct Arc {
   std::vector<cv::Point2f> p;
-  for (size_t i = 0; i < c.size(); ++i) {
-    if (c[i].y < 0.0f) {
-      continue;
-    }
-    if (p.empty() && i > 0 && c[i - 1].y < 0.0f) {
-      const float t = -c[i - 1].y / std::max(1e-6f, c[i].y - c[i - 1].y);
-      p.push_back(c[i - 1] + (c[i] - c[i - 1]) * t); // diem ngang truc sau
-    }
-    p.push_back(c[i]);
-  }
-  if (p.size() < 3) {
-    return false;
-  }
-  std::vector<double> acc(p.size(), 0.0);
-  for (size_t i = 1; i < p.size(); ++i) {
-    acc[i] = acc[i - 1] + norm2(p[i] - p[i - 1]);
-  }
-  auto at = [&](double s) {
+  std::vector<double> s;
+  double len() const { return s.empty() ? 0.0 : s.back(); }
+  cv::Point2f at(double q) const {
     size_t j = 1;
-    while (j + 1 < p.size() && acc[j] < s) {
+    while (j + 1 < s.size() && s[j] < q) {
       ++j;
     }
-    const double span = std::max(1e-6, acc[j] - acc[j - 1]);
-    const float r = static_cast<float>(std::clamp((s - acc[j - 1]) / span, 0.0, 1.0));
+    const double span = std::max(1e-6, s[j] - s[j - 1]);
+    const float r = static_cast<float>(std::clamp((q - s[j - 1]) / span, 0.0, 1.0));
     return p[j - 1] + (p[j] - p[j - 1]) * r;
-  };
-  auto turn = [&](double s) {
-    const cv::Point2f a = unit(at(s) - at(s - KINK_CHORD_M));
-    const cv::Point2f b = unit(at(s + KINK_CHORD_M) - at(s));
-    return std::atan2(static_cast<double>(a.y * b.x - a.x * b.y),
-                      static_cast<double>(a.dot(b)));
-  };
-  const double end = std::min(s_max, acc.back() - KINK_CHORD_M);
-  for (double s = KINK_CHORD_M; s <= end + 1e-9; s += KINK_STEP_M) {
-    double t = turn(s);
-    if (std::fabs(t) < KINK_MIN_DEG * kDeg) {
+  }
+  // Huong (rad, > 0 = sang phai) cua day cung [q, q + 5 cm]
+  double heading(double q) const {
+    const cv::Point2f d = at(q + 0.05) - at(q);
+    return std::atan2(static_cast<double>(d.x), static_cast<double>(d.y));
+  }
+};
+
+// Duong tu diem start noi tiep poly[from..] (bo diem trung), kem chieu dai cung
+Arc make_arc(const cv::Point2f &start, const std::vector<cv::Point2f> &poly, size_t from) {
+  Arc a;
+  a.p.push_back(start);
+  a.s.push_back(0.0);
+  for (size_t i = from; i < poly.size(); ++i) {
+    const double d = norm2(poly[i] - a.p.back());
+    if (d < 1e-4) {
       continue;
     }
-    // Dinh = noi goc quay lon nhat trong ~1 day cung tiep theo
-    s_k = s;
-    for (double u = s + KINK_STEP_M; u <= std::min(s + KINK_CHORD_M, end) + 1e-9;
-         u += KINK_STEP_M) {
-      const double tu = turn(u);
-      if (std::fabs(tu) > std::fabs(t)) {
-        t = tu;
-        s_k = u;
+    a.s.push_back(a.s.back() + d);
+    a.p.push_back(poly[i]);
+  }
+  return a;
+}
+
+// Huong duong (rad) tai do sau z (toa do camera, z tang dan): day cung
+// [z, z + 6 cm]. false neu duong khong phu / di ngang.
+bool heading_at_z(const std::vector<cv::Point2f> &g, double z, double &h) {
+  auto x_at = [&](double zz, float &x) {
+    for (size_t i = 0; i + 1 < g.size(); ++i) {
+      const cv::Point2f a = g[i], b = g[i + 1];
+      if ((a.y - zz) * (b.y - zz) <= 0.0 && std::fabs(b.y - a.y) > 1e-5f) {
+        x = a.x + static_cast<float>((zz - a.y) / (b.y - a.y)) * (b.x - a.x);
+        return true;
       }
     }
-    th = t;
-    vtx = at(s_k);
-    h_in = unit(vtx - at(std::max(0.0, s_k - 2.0 * KINK_CHORD_M)));
-    return true;
+    return false;
+  };
+  float x0 = 0.0f, x1 = 0.0f;
+  if (!x_at(z, x0) || !x_at(z + 0.06, x1)) {
+    return false;
   }
-  return false;
+  h = std::atan2(static_cast<double>(x1 - x0), 0.06);
+  return std::fabs(h) < 50.0 * kDeg;
 }
+
+// Oracle: cua so do cong that (s) va do sau tham chieu tren anh (m)
+constexpr double LEARN_WIN_MIN_S = 0.40;
+constexpr double LEARN_WIN_MAX_S = 0.70;
+constexpr double LEARN_Z_REF_M = 0.30;
+// MPC chi chay khi duong tam bat dau khong qua xa truc sau (ngoai suy)
+constexpr float MPC_MAX_EXTRAP_M = 0.60f;
 
 } // namespace
 
-PathTracker::PathTracker(const VehicleParams &p) : p_(p) {}
+// Khoi tao: oracle bat dau tu g0, b0 khai bao
+PathTracker::PathTracker(const VehicleParams &p) : p_(p) {
+  oracle_.reset(p_.mpc_g0, p_.mpc_b0_deg * kDeg);
+}
 
+// Xoa bo nho duong + odometry (giu g, b da hoc)
 void PathTracker::reset() {
   pose_ = Pose{};
   hist_.clear();
@@ -220,9 +190,11 @@ void PathTracker::reset() {
   turn_ = 0;
   curv_prev_ = 0.0;
   xte_i_deg_ = 0.0;
-  pid_primed_ = false;
-  pid_i_deg_ = 0.0;
   last_compute_ = {};
+  // Giu g, b da hoc (dac tinh xe, khong doi khi mat duong)
+  d_est_rad_ = 0.0;
+  cmd_hist_.clear();
+  obs_hist_.clear();
 }
 
 // ============================================================================
@@ -241,6 +213,7 @@ PathTracker::Pose PathTracker::step(const Pose &p, double v, double steer_rad,
   return o;
 }
 
+// Odometry 100 Hz: tich phan vi tri xe theo toc do that va goc banh dang lenh
 void PathTracker::predict(double v, double steer_deg, Clock::time_point now) {
   const double lim = p_.max_steer_deg * kDeg;
   const double steer = std::clamp(steer_deg * kDeg, -lim, lim);
@@ -249,6 +222,17 @@ void PathTracker::predict(double v, double steer_deg, Clock::time_point now) {
   } else {
     const double dt = std::clamp(seconds(now - now_), 0.0, 0.1);
     pose_ = step(pose_, v, steer, p_.wheelbase_m, dt);
+  }
+  // Goc banh dang co (uoc luong): lenh tre actuator_latency_s roi loc bac 1
+  // mpc_tau_s. Dung lam trang thai MPC va de oracle hoc.
+  cmd_hist_.emplace_back(now, steer);
+  while (cmd_hist_.size() > 2 && seconds(now - cmd_hist_[1].first) > p_.actuator_latency_s) {
+    cmd_hist_.pop_front();
+  }
+  if (started_ && now_ != Clock::time_point{}) {
+    const double dt = std::clamp(seconds(now - now_), 0.0, 0.1);
+    d_est_rad_ += (cmd_hist_.front().second - d_est_rad_) *
+                  std::min(1.0, dt / std::max(1e-3, p_.mpc_tau_s));
   }
   now_ = now;
   last_v_ = v;
@@ -260,6 +244,7 @@ void PathTracker::predict(double v, double steer_deg, Clock::time_point now) {
   }
 }
 
+// Vi tri xe tai thoi diem t (noi suy lich su 2 s) - dat frame camera dung luc chup
 PathTracker::Pose PathTracker::pose_at(Clock::time_point t) const {
   if (hist_.empty() || t >= hist_.back().first) {
     return pose_;
@@ -283,6 +268,7 @@ PathTracker::Pose PathTracker::pose_at(Clock::time_point t) const {
   return pose_;
 }
 
+// Toa do xe (tai vi tri p) -> toa do the gioi
 cv::Point2f PathTracker::to_world(const Pose &p, const cv::Point2f &v) {
   const double c = std::cos(p.th);
   const double s = std::sin(p.th);
@@ -290,6 +276,7 @@ cv::Point2f PathTracker::to_world(const Pose &p, const cv::Point2f &v) {
                      static_cast<float>(p.z - v.x * s + v.y * c));
 }
 
+// Toa do the gioi -> toa do xe (tai vi tri p)
 cv::Point2f PathTracker::to_vehicle(const Pose &p, const cv::Point2f &w) {
   const double c = std::cos(p.th);
   const double s = std::sin(p.th);
@@ -410,6 +397,7 @@ void PathTracker::merge(Memory &mem, const std::vector<cv::Point2f> &cam,
   mem.reject = 0;
 }
 
+// Bo duong da nho qua cu (MEMORY_TTL_S) hoac da o xa phia sau xe
 void PathTracker::prune(Memory &mem) const {
   if (mem.pts.empty()) {
     return;
@@ -428,6 +416,7 @@ void PathTracker::prune(Memory &mem) const {
   }
 }
 
+// Duong da nho doi sang toa do xe tai vi tri p
 std::vector<cv::Point2f> PathTracker::in_vehicle(const Memory &mem,
                                                  const Pose &p) const {
   std::vector<cv::Point2f> out;
@@ -438,6 +427,7 @@ std::vector<cv::Point2f> PathTracker::in_vehicle(const Memory &mem,
   return out;
 }
 
+// Them 1 frame camera: dat dung vi tri xe luc chup, ghep vao bo nho, cho oracle hoc
 void PathTracker::add_observation(const std::vector<cv::Point2f> &centre_cam,
                                   const std::vector<cv::Point2f> &left_cam,
                                   const std::vector<cv::Point2f> &right_cam,
@@ -449,6 +439,48 @@ void PathTracker::add_observation(const std::vector<cv::Point2f> &centre_cam,
   merge(centre_, centre_cam, pc, stamp);
   merge(left_, left_cam, pc, stamp);
   merge(right_, right_cam, pc, stamp);
+  if (p_.mpc_enable && p_.mpc_learn) {
+    learn_from(centre_cam, stamp);
+  }
+}
+
+// Oracle: do cong THAT cua xe tu 2 frame cach nhau ~0.5 s. Diem duong o
+// z_ref + ds trong frame cu la diem o z_ref trong frame moi (chan camera di
+// ds) -> xe quay duoc  h_cu(z_ref + ds) - h_moi(z_ref). L * kappa = g d + b.
+void PathTracker::learn_from(const std::vector<cv::Point2f> &centre_cam, Clock::time_point stamp) {
+  if (centre_cam.size() < 3) {
+    obs_hist_.clear();
+    return;
+  }
+  obs_hist_.push_back({stamp, centre_cam, d_est_rad_, last_v_});
+  while (!obs_hist_.empty() && seconds(stamp - obs_hist_.front().t) > LEARN_WIN_MAX_S) {
+    obs_hist_.pop_front();
+  }
+  const ObsRec &old = obs_hist_.front();
+  const double win = seconds(stamp - old.t);
+  if (win < LEARN_WIN_MIN_S) {
+    return;
+  }
+  double d_mean = 0.0, v_mean = 0.0;
+  for (const auto &r : obs_hist_) {
+    d_mean += r.d;
+    v_mean += r.v;
+  }
+  d_mean /= static_cast<double>(obs_hist_.size());
+  v_mean /= static_cast<double>(obs_hist_.size());
+  const double ds = v_mean * win;
+  if (v_mean < 0.15 || ds < 0.08) {
+    return;
+  }
+  double h_old = 0.0, h_new = 0.0;
+  if (!heading_at_z(old.centre, LEARN_Z_REF_M + ds, h_old) ||
+      !heading_at_z(centre_cam, LEARN_Z_REF_M, h_new)) {
+    return;
+  }
+  const double dpsi = std::remainder(h_old - h_new, 2.0 * kPi);
+  oracle_.update(d_mean, p_.wheelbase_m * dpsi / ds);
+  // Mau tiep theo dung cua so moi (khong dem 1 doan 2 lan qua nhieu)
+  obs_hist_.pop_front();
 }
 
 // ============================================================================
@@ -482,6 +514,7 @@ double PathTracker::line_clearance(const std::vector<cv::Point2f> &line_v,
   return best;
 }
 
+// Tinh goc lai cho chu ky nay (MPC; du phong pure pursuit + lech ngang) + du doan cua
 PathTracker::Output PathTracker::compute(double v, double bias_m) {
   Output o;
   prune(centre_);
@@ -492,11 +525,10 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
                           : std::clamp(seconds(now_ - last_compute_), 0.0, 0.1);
   last_compute_ = now_;
 
-  // Du doan vi tri xe khi lenh lai nay toi duoc servo (toc do odometry =
-  // toc do THAT uoc luong, khong phai v lenh dung cho Ld / xte)
+  // Du doan vi tri xe khi lenh lai nay toi duoc servo
   Pose pp = pose_;
   for (double t = 0.0; t < p_.actuator_latency_s - 1e-9; t += 0.01) {
-    pp = step(pp, last_v_, last_steer_rad_, p_.wheelbase_m, 0.01);
+    pp = step(pp, v, last_steer_rad_, p_.wheelbase_m, 0.01);
   }
 
   o.centre_v = in_vehicle(centre_, pp);
@@ -515,12 +547,13 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   o.virt_left = !left_.pts.empty() && seconds(now_ - left_.seen) > VIRTUAL_AFTER_S;
   o.virt_right = !right_.pts.empty() && seconds(now_ - right_.seen) > VIRTUAL_AFTER_S;
 
+  o.mpc_g = oracle_.g;
+  o.mpc_b_deg = oracle_.b / kDeg;
+  o.mpc_learn_n = oracle_.used;
   const std::vector<cv::Point2f> &c = o.centre_v;
   if (c.size() < 2) {
     // Khong con duong: xa dan khau I (khong giu sai lech cu qua lau)
     xte_i_deg_ *= std::exp(-dt_c / 2.0);
-    pid_i_deg_ *= std::exp(-dt_c / 2.0);
-    pid_primed_ = false;
     return o;
   }
   const double L = p_.wheelbase_m;
@@ -533,37 +566,9 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   }
 
   // ---- Pure pursuit tu truc sau ----
-  double Ld = std::clamp(p_.lookahead_min_m + p_.lookahead_gain_s * v,
-                         p_.lookahead_min_m, p_.lookahead_max_m);
-  // TRONG CUA nhin GAN hon: diem ngam xa ~0.7 m giua cua da nam tren doan
-  // thang sau cua -> xe lai thang toi do, cat goc, de vach trong. Duong
-  // thang giu Ld (khong lac). Ramp theo do cong phia truoc 0.4 -> 1.0 1/m.
-  if (p_.lookahead_corner_scale < 1.0) {
-    const double r = std::clamp((std::fabs(curv_prev_) - 0.4) / 0.6, 0.0, 1.0);
-    const double lc = std::max(Ld * p_.lookahead_corner_scale, p_.lookahead_min_m);
-    Ld += (lc - Ld) * r;
-  }
+  const double Ld = std::clamp(p_.lookahead_min_m + p_.lookahead_gain_s * v,
+                               p_.lookahead_min_m, p_.lookahead_max_m);
   o.lookahead_m = Ld;
-  // GOC GAP phia truoc: xe re theo cung ban kinh kink_radius_m chi can bat
-  // dau be lai khi truc sau con cach dinh d_in = R * tan(goc / 2) (30 do:
-  // 0.27 m, 45: 0.41, 60: 0.58). Pure pursuit thuan ngam diem cach Ld ~0.65
-  // m nen thay dinh trong Ld la be lai NGAY -> vao cua som, cat goc, de vach
-  // trong (chay that 10/10). Chua toi diem vao cua: diem ngam di THANG theo
-  // doan truoc dinh (khong vuot qua dinh).
-  bool kink_hold = false;
-  cv::Point2f kink_vtx, kink_hin;
-  if (p_.kink_radius_m > 0.0) {
-    double s_k = 0.0, th = 0.0;
-    if (find_kink(c, Ld + 0.3, s_k, th, kink_vtx, kink_hin)) {
-      o.kink_dist_m = s_k;
-      o.kink_deg = th / kDeg;
-      const double d_in = p_.kink_radius_m * std::tan(0.5 * std::min(std::fabs(th), 100.0 * kDeg));
-      const double ang_in = std::atan2(static_cast<double>(kink_hin.x),
-                                       static_cast<double>(kink_hin.y));
-      kink_hold = s_k > d_in && s_k < Ld && std::fabs(ang_in) < KINK_ALIGN_DEG * kDeg;
-      o.kink_hold = kink_hold;
-    }
-  }
   bool have = false;
   cv::Point2f prev(0.0f, 0.0f);
   bool have_prev = false;
@@ -594,18 +599,9 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
     }
     o.target_v = c.back();
   }
-  if (kink_hold) {
-    o.target_v = kink_vtx + kink_hin * static_cast<float>(Ld - o.kink_dist_m);
-  }
   const double Le = std::max(0.20, static_cast<double>(norm2(o.target_v)));
   const double kappa = 2.0 * o.target_v.x / (Le * Le);
   double steer = std::atan(L * kappa) / kDeg;
-  // Trong so DUONG THANG cho PID: 1 = thang, 0 = cua (do cong phia truoc
-  // 0.4 -> 1.0 1/m nhu corner_gain, hoac thay goc gap phia truoc)
-  double straight_w = 1.0 - std::clamp((std::fabs(curv_prev_) - 0.4) / 0.6, 0.0, 1.0);
-  if (o.kink_dist_m >= 0.0) {
-    straight_w = 0.0;
-  }
   // Trong cua (do cong phia truoc lan tinh truoc): danh lai manh hon
   if (p_.corner_gain != 1.0) {
     const double r = std::clamp((std::fabs(curv_prev_) - 0.4) / 0.6, 0.0, 1.0);
@@ -621,39 +617,16 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
     float d = 0.0f;
     size_t seg = 0;
     const cv::Point2f fa(0.0f, static_cast<float>(p_.cam_to_rear_m));
-    cv::Point2f q = closest_on(fa, c, d, &seg);
-    // Duong tam chua phu toi chan camera: KEO DAI THANG doan dau duong ve
-    // sau toi da XTE_EXTEND_M. Bo nho bi thay bang frame moi (dau duong o
-    // ~0.3 m truoc chan camera) ~14% frame (log 10/10 18:05) -> truoc day
-    // mat ca P + I cua frame do (I bao hoa 6 do roi ve 0) -> lai giat
-    // +-8 do moi vai frame, xe lech 15-20 cm ve tam rat cham.
-    bool covered = c.front().y <= fa.y + 0.05;
-    if (!covered && c.front().y <= fa.y + XTE_EXTEND_M) {
-      const cv::Point2f t0 = dir_at(c, 0);
-      if (t0.y > 0.5f) {
-        const float s = (c.front().y - fa.y) / t0.y;
-        const cv::Point2f a = c.front() - t0 * s;
-        q = a + t0 * (fa - a).dot(t0);
-        d = norm2(fa - q);
-        seg = 0;
-        covered = true;
-      }
-    }
-    if (covered && d < XTE_MAX_M) {
+    const cv::Point2f q = closest_on(fa, c, d, &seg);
+    // Chi khi duong tam phu toi banh truoc (khong ngoai suy qua dau duong)
+    const bool covered = c.front().y <= fa.y + 0.05;
+    if (covered && d < 0.30f) {
       const cv::Point2f t = dir_at(c, seg);
       // > 0: duong tam nam ben PHAI banh truoc
       o.xte_m = (fa.x - q.x) * t.y - (fa.y - q.y) * t.x < 0.0f ? d : -d;
-      // Lech xa hon xte_far_m: phan vuot nhan them xte_far_gain -> ve tam
-      // nhanh hon; lech nho giu nguyen (khong lac tren duong thang)
-      const double far = std::max(0.0, std::fabs(o.xte_m) - p_.xte_far_m);
-      const double e = o.xte_m + std::copysign(p_.xte_far_gain / std::max(1e-6, p_.xte_gain) * far, o.xte_m);
-      o.xte_deg = std::atan(p_.xte_gain * e / (std::max(0.0, v) + p_.xte_soft_mps)) / kDeg;
-      // Tich phan chi khi xe dang chay (dung yen thi lech khong doi duoc).
-      // Duong thang do PID lo -> I nay chi tich trong cua, ra thang xa dan
-      // (log 19:44: bao hoa -6 do suot 40 s, day xe lech 1 ben)
-      if (straight_w > 0.5 && p_.pid_kp_deg_per_m > 0.0) {
-        xte_i_deg_ *= std::exp(-dt_c / 1.0);
-      } else if (p_.xte_ki > 0.0 && v > 0.2) {
+      o.xte_deg = std::atan(p_.xte_gain * o.xte_m / (std::max(0.0, v) + p_.xte_soft_mps)) / kDeg;
+      // Tich phan chi khi xe dang chay (dung yen thi lech khong doi duoc)
+      if (p_.xte_ki > 0.0 && v > 0.2) {
         xte_i_deg_ = std::clamp(xte_i_deg_ + p_.xte_ki * o.xte_m * dt_c,
                                 -p_.xte_i_max_deg, p_.xte_i_max_deg);
       }
@@ -663,47 +636,18 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
     }
   }
 
-  // ---- PID duong thang (xem VehicleParams::pid_*) ----
-  if (p_.pid_kp_deg_per_m > 0.0) {
-    const float y0 = static_cast<float>(p_.cam_to_rear_m);
-    double e = 0.0, psi = 0.0;
-    const bool ok = fit_line(c, y0, static_cast<float>(p_.pid_fit_m), e, psi);
-    if (ok) {
-      if (!pid_primed_) {
-        pid_e_f_ = e;
-        pid_psi_f_ = psi;
-        pid_primed_ = true;
-      } else {
-        const double a = p_.pid_filter_s > 0.0 ? std::min(1.0, dt_c / p_.pid_filter_s) : 1.0;
-        pid_e_f_ += a * (e - pid_e_f_);
-        pid_psi_f_ += a * (psi - pid_psi_f_);
-      }
-      // Xe lech huong nhieu so voi duong = dang trong cua gap (giua cua do
-      // cong phia truoc ~0 vi doan ke tiep nam cheo, xem sharp mode) -> tra ve
-      // pure pursuit: <= 10 do PID het, >= 20 do pure pursuit het. Replay
-      // 16:43: 28% frame "thang" theo do cong co |psi| > 30 do, 59% het lai.
-      const double w = straight_w * std::clamp((20.0 - std::fabs(pid_psi_f_)) / 10.0, 0.0, 1.0);
-      // Tich phan chi tren duong thang, xe gan tam va gan song song (khong
-      // tich khi dang ve tam sau cua -> khong bao hoa nhu xte_ki)
-      if (p_.pid_ki > 0.0 && v > 0.2 && w > 0.8 &&
-          std::fabs(pid_e_f_) < 0.06 && std::fabs(pid_psi_f_) < 8.0) {
-        pid_i_deg_ = std::clamp(pid_i_deg_ + p_.pid_ki * pid_e_f_ * dt_c,
-                                -p_.pid_i_max_deg, p_.pid_i_max_deg);
-      } else if (w < 0.5) {
-        pid_i_deg_ *= std::exp(-dt_c / 2.0);
-      }
-      const double u = std::clamp(p_.pid_kp_deg_per_m * pid_e_f_ + p_.pid_kd * pid_psi_f_ + pid_i_deg_,
-                                  -p_.pid_max_deg, p_.pid_max_deg);
-      o.pid_w = w;
-      o.pid_e_m = pid_e_f_;
-      o.pid_psi_deg = pid_psi_f_;
-      o.pid_i_deg = pid_i_deg_;
-      o.pid_deg = u;
-      steer = w * u + (1.0 - w) * steer;
-    } else {
-      pid_primed_ = false;
+  // ---- MPC giu lan (thay pure pursuit + lech ngang) ----
+  if (p_.mpc_enable) {
+    double ms = 0.0;
+    if (mpc_steer(c, v, o, ms)) {
+      steer = ms;
+      xte_i_deg_ = 0.0;
+      o.xte_i_deg = 0.0;
     }
   }
+  o.mpc_g = oracle_.g;
+  o.mpc_b_deg = oracle_.b / kDeg;
+  o.mpc_learn_n = oracle_.used;
 
   // ---- Rao chan vach (ke ca vach ao) tai banh truoc va 0.25 m truoc do ----
   double guard = 0.0;
@@ -739,10 +683,7 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
     const size_t k = std::max<size_t>(1, n / 3);
     const cv::Point2f t_near = unit(fw[k] - fw[0]);
     const cv::Point2f t_far = unit(fw[n - 1] - fw[n - 1 - k]);
-    // Quan ve [-pi, pi]: duong quay qua huong +-180 do (cua chu U) khong
-    // duoc nhay thanh +-2pi
-    const double dth = std::remainder(std::atan2(t_far.x, t_far.y) - std::atan2(t_near.x, t_near.y),
-                                      2.0 * kPi);
+    double dth = std::atan2(t_far.x, t_far.y) - std::atan2(t_near.x, t_near.y);
     double arc = 0.0;
     for (size_t i = 1; i < n; ++i) {
       arc += norm2(fw[i] - fw[i - 1]);
@@ -814,4 +755,63 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   o.turn = turn_;
   o.valid = true;
   return o;
+}
+
+// ============================================================================
+// MPC (lk_mpc_solve, lane_keeping.hpp): trang thai tuong doi voi duong tam tai TRUC SAU, do cong
+// duong theo quang duong xe se di trong tam du doan.
+// ============================================================================
+bool PathTracker::mpc_steer(const std::vector<cv::Point2f> &c, double v, Output &o,
+                            double &steer_deg) const {
+  if (c.size() < 2) {
+    return false;
+  }
+  float dq = 0.0f;
+  size_t seg = 0;
+  const cv::Point2f origin(0.0f, 0.0f);
+  cv::Point2f q = closest_on(origin, c, dq, &seg);
+  cv::Point2f t = dir_at(c, seg);
+  if (seg == 0 && c.front().y > 0.0f) {
+    // Duong bat dau truoc truc sau: keo dai doan dau
+    if (c.front().y > MPC_MAX_EXTRAP_M) {
+      return false;
+    }
+    q = c.front();
+    t = unit(c[1] - c[0]);
+  }
+  if (dq > 0.40f && !(seg == 0 && c.front().y > 0.0f)) {
+    return false;
+  }
+  // e_y > 0: xe ben PHAI duong tam; e_psi > 0: mui xe lech PHAI so voi duong
+  const double ey = -q.x * t.y + q.y * t.x;
+  const double epsi = -std::atan2(static_cast<double>(t.x), static_cast<double>(t.y));
+  const Arc arc = make_arc(q, c, seg + 1);
+  if (arc.len() < 0.15) {
+    return false;
+  }
+  LkMpcCfg cfg;
+  cfg.wheelbase = p_.wheelbase_m;
+  cfg.tau = p_.mpc_tau_s;
+  cfg.n = std::max(4, static_cast<int>(std::lround(p_.mpc_horizon_s / cfg.dt)));
+  cfg.max_steer = p_.max_steer_deg * kDeg;
+  cfg.zone_m = p_.mpc_zone_m;
+  cfg.rd = p_.mpc_rd;
+  const double vm = std::max(0.15, v);
+  std::vector<double> rho(static_cast<size_t>(cfg.n), 0.0);
+  for (int k = 0; k < cfg.n; ++k) {
+    const double sk = vm * cfg.dt * k;
+    if (sk + 0.20 > arc.len()) {
+      break; // het duong da biet: coi nhu thang
+    }
+    rho[static_cast<size_t>(k)] = std::remainder(arc.heading(sk + 0.15) - arc.heading(sk), 2.0 * kPi) / 0.15;
+  }
+  // Goc banh luc lenh nay toi servo (sau actuator_latency_s)
+  const double dact = d_est_rad_ + (last_steer_rad_ - d_est_rad_) *
+                                       (1.0 - std::exp(-p_.actuator_latency_s / std::max(1e-3, p_.mpc_tau_s)));
+  const double u = lk_mpc_solve(ey, epsi, dact, last_steer_rad_, vm, rho, oracle_.g, oracle_.b, cfg);
+  steer_deg = u / kDeg;
+  o.mpc = true;
+  o.mpc_ey_m = ey;
+  o.mpc_epsi_deg = epsi / kDeg;
+  return true;
 }

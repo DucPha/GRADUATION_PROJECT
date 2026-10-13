@@ -15,11 +15,12 @@ find_package(OpenCV REQUIRED)
 # libjpeg-turbo: tu giai ma MJPG o 1/2 kich thuoc (nhanh gap doi, im canh bao)
 find_package(JPEG REQUIRED)
 
-# Thu vien detector, khong phu thuoc rclcpp
+# Thu vien khong phu thuoc rclcpp (node ROS nam o fusion_node):
+#   lane_detector.cpp - camera + nhan dien lan (perception)
+#   lane_keeping.cpp  - nho duong + MPC giu lan (control)
 add_library(camera_lane STATIC
-  camera_node.cpp
-  lane_bev.cpp
-  path_tracker.cpp
+  lane_detector.cpp
+  lane_keeping.cpp
 )
 
 # OpenCV_INCLUDE_DIRS bat buoc: OpenCV 4.6 tren Ubuntu khong export include tu ${OpenCV_LIBS}
@@ -37,7 +38,7 @@ ament_export_include_directories(include)
 ament_export_libraries(camera_lane)
 ament_export_dependencies(OpenCV JPEG)
 
-install(FILES camera_node.hpp path_tracker.hpp
+install(FILES lane_detector.hpp lane_keeping.hpp
   DESTINATION include
 )
 

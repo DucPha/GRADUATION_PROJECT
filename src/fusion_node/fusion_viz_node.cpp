@@ -30,10 +30,10 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgcodecs.hpp>
 
-#include "camera_node.hpp"
+#include "lane_detector.hpp"
 #include "esp32s3_node.hpp"
 #include "lidar_node.hpp"
-#include "path_tracker.hpp"
+#include "lane_keeping.hpp"
 
 #include <opencv2/imgproc.hpp>
 
@@ -44,8 +44,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
-#include <ctime>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -80,7 +78,7 @@ bool encode_image(const cv::Mat& img, const std::string& ext,
     }
     std::vector<int> params;
     if (ext == ".jpg") {
-        params = {cv::IMWRITE_JPEG_QUALITY, 90};   // 80 -> 90: anh GUI bot nhoe
+        params = {cv::IMWRITE_JPEG_QUALITY, 90};
     } else {
         params = {cv::IMWRITE_PNG_COMPRESSION, 1};   // nhanh, mask nen da nho
     }
@@ -99,9 +97,9 @@ bool encode_image(const cv::Mat& img, const std::string& ext,
 // ESP32 khong gui goc servo len nen GUI hien gia tri uoc luong nay.
 // ----------------------------------------------------------------------------
 constexpr float FW_STEER_CENTER = 90.0f;
-// 55..125 do (= firmware STEER_MIN/MAX). 10/10: ve lai +-35 nhu lan chay
-// 09/10 15:47 (2 vong dau gan nhu khong de vach); +-30 xe kich lai van khong
-// om kip cua gap (R nho nhat ~1.15 m). Do doc dev -> goc giu 30 do / 41 px.
+// 55..125 do (2026-10-09, truoc 60..120): danh lai rong hon trong cua. Do
+// doc dev -> goc GIU NGUYEN (30 do / 41 px) nen node nay chay dung ca voi
+// firmware cu (chi bao hoa som hon o 30 do).
 constexpr float FW_STEER_RANGE = 35.0f;
 constexpr float FW_CAM_DEADZONE = 4.0f;   // px anh tham chieu 640
 constexpr float FW_CAM_MAX_DEV = FW_CAM_DEADZONE + 41.0f * FW_STEER_RANGE / 30.0f;
@@ -199,29 +197,29 @@ public:
             "camera_pitch_deg", cam_def.pitch_deg);
         const auto camera_vfov_deg = declare_parameter<double>(
             "camera_vfov_deg", cam_def.vfov_deg);
+        const auto camera_auto_pitch = declare_parameter<bool>(
+            "camera_auto_pitch", cam_def.auto_pitch);
+        const auto lane_width_m = declare_parameter<double>(
+            "lane_width_m", cam_def.lane_width_m);
         const auto roi_top_frac = declare_parameter<double>(
             "roi_top_frac", cam_def.roi_top_frac);
-        // Toc do LENH (km/h x10). Firmware ghi ESC theo us: 1543 + (v - 3.58) /
-        // 2.98 * 19.5 us, san 1550 us (+3 us khi het lai): 52 -> ~1554 us,
-        // 65 -> ~1562 us. Toc do THAT do tu anh 09/10 chi ~0.42 m/s o lenh 48
-        // (x0.32) va giam dan khi pin yeu -> du cham cho xu ly anh (1.7 cm /
-        // frame); san thap hon thi BLDC keu / dung.
-        // speed_x10: du 2 vach + duong thang; vao cua 2 vach noi suy ve
-        // speed_corner_x10 theo speed_scale cua camera.
-        const auto speed_x10 = declare_parameter<int>("speed_x10", 75);
-        // Chi thay 1 vach tren duong thang + xe giua lan (vach kia mo / loa);
-        // cua hoac xe lech -> ve speed_corner_x10
-        const auto speed_one_x10 = declare_parameter<int>("speed_one_x10", 64);
-        const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 62);
-        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 62);
-        // Tang toc khi het cua: x10 km/h moi giay (12: 62 -> 75 deu trong ~1 s)
-        const auto speed_ramp_x10 = declare_parameter<int>("speed_ramp_x10", 12);
-        // Giam toc vao cua: x10 km/h moi giay (20: 75 -> 62 trong ~0.65 s, deu)
-        speed_down_x10_ = static_cast<float>(declare_parameter<int>("speed_down_x10", 20));
-        // Toc do nho nhat khi xe CHAY (km/h x10). Xung thap (1543 us) BLDC keu
-        // cot ket; 10/10 cua gat 52 (~1554 us) van keu ket -> 58 (~1557.5 us);
-        // 13/10 58 van co tieng dong co -> 62 (~1560 us).
-        const auto speed_min_x10 = declare_parameter<int>("speed_min_x10", 62);
+        // Toc do (km/h x10). Bang ESC firmware: 101 ~ 5.1, 102 ~ 6.6, 104 ~ 7.8,
+        // 105 ~ 8.3 km/h. Firmware ghi ESC theo DO NGUYEN: moi lenh < ~6.1 km/h
+        // deu ra ESC 101 (san cua BLDC).
+        // speed_x10 = 70 -> ESC 103 (~7.2 km/h): CHI khi du 2 vach, duong thang
+        // va xe dang giua lan (lech <= 3 cm, xem lane_speed); cua / xe lech 7 cm
+        // noi suy ve speed_corner_x10 (50 -> ESC 101). 09/10: 85 (ESC 105) vot
+        // cua, 78 (ESC 104) van chua on dinh -> 70.
+        const auto speed_x10 = declare_parameter<int>("speed_x10", 70);
+        // Chi thay 1 vach tren duong thang, xe giua lan: 60 -> ESC 102 (~6.6;
+        // thap hon 59 la ESC 101 = toc do cua)
+        const auto speed_one_x10 = declare_parameter<int>("speed_one_x10", 60);
+        const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 50);
+        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 52);
+        const auto speed_ramp_x10 = declare_parameter<int>("speed_ramp_x10", 30);
+        // Toc do nho nhat khi xe CHAY (km/h x10). Dong co BLDC chay cham (ESC
+        // 100, ~3.6 km/h) keu cot ket -> san 5.0 km/h (ESC 101).
+        const auto speed_min_x10 = declare_parameter<int>("speed_min_x10", 50);
         const auto dev_sign = declare_parameter<int>("dev_sign", 1);
         // Mat ca 2 vach bay lau moi dung (Python: bo cham giu goc lai, chi dung
         // khi ra khoi duong ~3 s). Ban truoc 400 ms: 1 frame toi / loa den la
@@ -237,20 +235,17 @@ public:
         const auto require_start = declare_parameter<bool>("require_start", true);
         const auto start_timeout_ms = declare_parameter<int>("start_timeout_ms", 600);
         const auto log_level = declare_parameter<std::string>("log_level", "info");
-        // Ghi anh camera khi xe CHAY (de chinh xu ly anh bang anh duong dua
-        // that): ~/lane_logs/run_YYYYmmdd_HHMMSS/*.jpg + frames.csv
-        const auto record_frames = declare_parameter<bool>("record_frames", true);
-        const auto record_root = declare_parameter<std::string>("record_dir", "auto");
 
-        // ---- Lai theo duong da nho (PathTracker): pure pursuit tu truc sau
-        // tren duong nho + odometry. Camera mat duong nho -> lai theo dev_px.
+        // ---- Lai theo duong da nho (PathTracker) ----
+        // "track": pure pursuit tu truc sau tren duong nho + odometry (mac dinh)
+        // "camera": lai thang theo dev_px cua camera (cach cu)
+        const auto steer_mode = declare_parameter<std::string>("steer_mode", "track");
         VehicleParams vp;
         vp.wheelbase_m = declare_parameter<double>("wheelbase_m", vp.wheelbase_m);
         vp.cam_to_rear_m = declare_parameter<double>("cam_to_rear_axle_m", vp.cam_to_rear_m);
         vp.lookahead_min_m = declare_parameter<double>("lookahead_min_m", vp.lookahead_min_m);
         vp.lookahead_max_m = declare_parameter<double>("lookahead_max_m", vp.lookahead_max_m);
         vp.lookahead_gain_s = declare_parameter<double>("lookahead_gain_s", vp.lookahead_gain_s);
-        vp.lookahead_corner_scale = declare_parameter<double>("lookahead_corner_scale", vp.lookahead_corner_scale);
         vp.camera_latency_s = declare_parameter<double>("camera_latency_s", vp.camera_latency_s);
         vp.actuator_latency_s = declare_parameter<double>("actuator_latency_s", vp.actuator_latency_s);
         vp.car_half_width_m = declare_parameter<double>("car_half_width_m", vp.car_half_width_m);
@@ -258,45 +253,29 @@ public:
         vp.line_margin_m = declare_parameter<double>("line_margin_m", vp.line_margin_m);
         // Danh lai manh hon trong cua (nhan phan pure pursuit), 1 = tat
         vp.corner_gain = declare_parameter<double>("corner_gain", vp.corner_gain);
-        // Goc gap: chi be lai khi truc sau con cach dinh R * tan(goc / 2)
-        vp.kink_radius_m = declare_parameter<double>("kink_radius_m", vp.kink_radius_m);
-        // Phan hoi lech ngang (P + I) tai chan camera, xem path_tracker.hpp
+        // Phan hoi lech ngang (P + I) tai chan camera, xem lane_keeping.hpp
         vp.xte_gain = declare_parameter<double>("xte_gain", vp.xte_gain);
         vp.xte_ki = declare_parameter<double>("xte_ki", vp.xte_ki);
         vp.xte_i_max_deg = declare_parameter<double>("xte_i_max_deg", vp.xte_i_max_deg);
-        vp.xte_far_m = declare_parameter<double>("xte_far_m", vp.xte_far_m);
-        vp.xte_far_gain = declare_parameter<double>("xte_far_gain", vp.xte_far_gain);
-        // PID duong thang (kp * lech + kd * goc huong + I), xem path_tracker.hpp
-        vp.pid_kp_deg_per_m = declare_parameter<double>("pid_kp", vp.pid_kp_deg_per_m);
-        vp.pid_kd = declare_parameter<double>("pid_kd", vp.pid_kd);
-        vp.pid_ki = declare_parameter<double>("pid_ki", vp.pid_ki);
-        vp.pid_i_max_deg = declare_parameter<double>("pid_i_max_deg", vp.pid_i_max_deg);
-        vp.pid_max_deg = declare_parameter<double>("pid_max_deg", vp.pid_max_deg);
-        vp.pid_filter_s = declare_parameter<double>("pid_filter_s", vp.pid_filter_s);
+        // MPC giu lan + hoc ti so / do lech lai that (lane_keeping.hpp, Bian et al.)
+        vp.mpc_enable = declare_parameter<bool>("mpc_enable", vp.mpc_enable);
+        vp.mpc_tau_s = declare_parameter<double>("mpc_tau_s", vp.mpc_tau_s);
+        vp.mpc_horizon_s = declare_parameter<double>("mpc_horizon_s", vp.mpc_horizon_s);
+        vp.mpc_zone_m = declare_parameter<double>("mpc_zone_m", vp.mpc_zone_m);
+        vp.mpc_rd = declare_parameter<double>("mpc_rd", vp.mpc_rd);
+        vp.mpc_g0 = declare_parameter<double>("mpc_g0", vp.mpc_g0);
+        vp.mpc_b0_deg = declare_parameter<double>("mpc_b0_deg", vp.mpc_b0_deg);
+        vp.mpc_learn = declare_parameter<bool>("mpc_learn", vp.mpc_learn);
         // do banh / do servo: servo quay 30 do ma banh chi quay ~20 do -> 0.65.
         // Chay that 08/10 voi 0.8: xe bat ve phia ngoai cua, cua nho be lai
         // khong du (banh quay it hon khai bao). Thu vong kin: khai bao 0.65 ben
         // nhat khi ty so that 0.55-0.8 (khai bao cao hon that -> lech ra ngoai).
         // 08/10 voi 0.65 van be lai thieu o cua nhe -> 0.6
         steer_ratio_ = declare_parameter<double>("steer_ratio", 0.6);
-        // Toc do THAT / toc do lenh, CHI cho odometry (bo nho duong, du doan
-        // vach giua 2 frame, bu tre servo). Ld / phan hoi xte van theo toc do
-        // lenh nhu cu. Do tu anh 10/10 18:05 (khoang cach toi goc gap giam
-        // dan): lenh 5.8 km/h (1.61 m/s) -> that ~0.44 m/s (x0.27; 09/10:
-        // x0.32). Truoc day 1.0: bo nho troi nhanh gap ~3.5 lan -> diem goc
-        // gap trong vung mu toi "som" -> be lai SOM, lech ngang moi frame nhay
-        // 8 cm luc camera chot lai, lai giat > 8 do/frame 11% frame (con 2%).
-        odom_speed_scale_ = declare_parameter<double>("odom_speed_scale", 0.30);
-        // GOC SERVO MA BANH DI THANG. 10/10 18:05 chay 2 chieu cung 1 duong:
-        // goc banh TB chieu nguoc kim -10.4, chieu kim dong ho -0.2 (doi xung
-        // phai la +-x) -> lenh 0 (servo 90) xe da re PHAI ~4.5-5 do banh. Chieu
-        // kim dong ho (cua phai) xe be som, de vach trong 28% frame (chieu kia
-        // 2%), duong thang lech phai 7 cm; khau I bao hoa 6 do de bu. Uoc luong
-        // tu toc do quay dau tren duong thang cung ra ~4.5 do banh = 7.5 do
-        // servo. NHUNG ke xe len, servo 90 banh van thang (nguoi dung kiem
-        // tra 10/10) -> mac dinh 90 = KHONG bu, chi de thu.
-        servo_straight_deg_ = declare_parameter<double>("servo_straight_deg", 90.0);
         vp.max_steer_deg = FW_STEER_RANGE * FW_STEER_KP * steer_ratio_;
+        // Odometry dung toc do LENH (firmware khong do toc do that): xe chay
+        // nhanh/cham hon lenh thi chinh he so nay
+        odom_speed_scale_ = declare_parameter<double>("odom_speed_scale", 0.30);
         // GIAM TOC TRUOC CUA: ESC chi nha ga (khong phanh) nen xe troi cham
         // dan voi gia toc ~coast_decel_mps2. Thay cua cach d (m) phia truoc
         // (PathTracker::corner_dist_m) -> toc do cho phep
@@ -304,7 +283,7 @@ public:
         // de toi diem cach cua corner_margin_m da xuong toc do cua. Gia toc
         // nay cung dung cho odometry khi giam toc (lenh giam ngay nhung xe con
         // troi). Xe van vot cua -> giam coast_decel_mps2 (giam toc som hon).
-        coast_decel_mps2_ = declare_parameter<double>("coast_decel_mps2", 0.45);
+        coast_decel_mps2_ = declare_parameter<double>("coast_decel_mps2", 0.7);
         corner_margin_m_ = declare_parameter<double>("corner_margin_m", 0.20);
         // Mat ca 2 vach: van chay theo duong da nho toi da bay nhieu ms
         lost_memory_ms_ = static_cast<int>(declare_parameter<int>("lost_memory_ms", 1500));
@@ -314,30 +293,15 @@ public:
         //    (va TU chay lai sau khi mat lan dung xe) khi thay lan (2 vach hoac
         //    1 vach da bam on dinh) bay nhieu frame camera lien tiep
         steer_filter_s_ = declare_parameter<double>("steer_filter_s", 0.08);
-        // Toc do danh lai toi da (do banh / s): duong thang cham -> khong
-        // chao (log 10/10 19:27: banh -20 -> +6 -> -16 do moi ~1.5 s tren
-        // thang, 150-270 do/s), trong cua nhanh vua. 0 = khong gioi han
-        steer_rate_dps_ = declare_parameter<double>("steer_rate_dps", 15.0);
-        steer_rate_corner_dps_ = declare_parameter<double>("steer_rate_corner_dps", 45.0);
-        // Lenh can doi LON (ne vach, dao lai vao cua): cong them steer_rate_gain
-        // (do/s moi do) x phan chenh vuot steer_rate_db_deg. Log 12/10 19:27:
-        // tracker doi +21 -> -21 do trong 0.25 s (vach trong hien ra) ma banh
-        // mat 1.05 s moi dao (45 do/s) -> xe de qua vach trong (173.5-174.9 s,
-        // 63.6-65.5 s). Chenh nho (nhieu tren duong thang) van cham nhu cu.
-        steer_rate_gain_ = declare_parameter<double>("steer_rate_gain", 8.0);
-        steer_rate_db_deg_ = declare_parameter<double>("steer_rate_db_deg", 4.0);
         lane_start_frames_ = static_cast<int>(declare_parameter<int>("lane_start_frames", 3));
-        // Chi thay 1 vach: doi tam bam ve phia vach mat toi da bay nhieu m,
-        // toc do doi (m/s)
+        // Chi thay 1 vach, vach kia NGOAI khung, duong thang: doi tam bam ve
+        // phia vach mat toi da bay nhieu m, toc do doi (m/s) (xem control_tick)
         single_search_m_ = declare_parameter<double>("single_search_m", 0.08);
         single_search_rate_ = declare_parameter<double>("single_search_rate", 0.30);
-        // Vao cua: giu mep xe cach mep bang keo vach NGOAI bay nhieu m (doi
-        // duong bam ra ngoai toi da corner_outer_max_m), < 0 = tat
-        corner_outer_gap_m_ = declare_parameter<double>("corner_outer_gap_m", 0.08);
-        corner_outer_max_m_ = declare_parameter<double>("corner_outer_max_m", 0.15);
-        // Cua gat: |do cong phia truoc| (1/m) tu muc nay moi bam vach ngoai.
-        // Log 16:43: cua lon (1.5-7 s, banh het lai) giu > 1.1; cua nhe < 1.0
-        corner_sharp_k_ = declare_parameter<double>("corner_sharp_k", 1.0);
+        // Vach kia (du doan) nam trong khung hinh it nhat bay nhieu m ma khong
+        // thay = vach mo / loa -> khong doi tam di tim
+        single_search_view_m_ = declare_parameter<double>("single_search_view_m", 0.25);
+        track_mode_ = steer_mode != "camera";
         tracker_ = PathTracker(vp);
 
         speed_x10_ = static_cast<int>(speed_x10);
@@ -370,6 +334,8 @@ public:
         profile.height_m = static_cast<float>(camera_height_m);
         profile.pitch_deg = static_cast<float>(camera_pitch_deg);
         profile.vfov_deg = static_cast<float>(camera_vfov_deg);
+        profile.auto_pitch = camera_auto_pitch;
+        profile.lane_width_m = static_cast<float>(lane_width_m);
         profile.cam_to_rear_m = static_cast<float>(vp.cam_to_rear_m);
         profile.wheelbase_m = static_cast<float>(vp.wheelbase_m);
         profile.roi_top_frac = static_cast<float>(roi_top_frac);
@@ -378,17 +344,6 @@ public:
             static_cast<int>(camera_width), static_cast<int>(camera_height), profile);
         camera_->set_roi_top_frac(static_cast<float>(roi_top_frac));
         camera_->set_manual_exposure(static_cast<int>(camera_exposure));
-        if (record_frames) {
-            std::string root = record_root;
-            if (root.empty() || root == "auto") {
-                const char* home = std::getenv("HOME");
-                root = std::string(home ? home : "/tmp") + "/lane_logs";
-            }
-            char stamp[32];
-            const std::time_t now = std::time(nullptr);
-            std::strftime(stamp, sizeof(stamp), "run_%Y%m%d_%H%M%S", std::localtime(&now));
-            camera_->set_record_dir(root + "/" + stamp);
-        }
 
         if (camera_->start()) {
             RCLCPP_INFO(get_logger(), "Camera started (%ldx%ld @ %ld fps requested)",
@@ -495,63 +450,23 @@ private:
     // VONG DIEU KHIEN 100 Hz
     // =========================================================================
 
-    // Khoang cach (m) tu diem tren duong tam cach goc toa do Ld (truc sau) toi
-    // vach `line`; < 0 khi khong co hoac vach khong phu toi ngang diem do
-    static double dist_at_lookahead(const std::vector<cv::Point2f>& centre, double Ld,
-                                    const std::vector<cv::Point2f>& line) {
-        if (centre.size() < 2 || line.size() < 2) {
-            return -1.0;
-        }
-        const cv::Point2f* p = nullptr;
-        for (const auto& q : centre) {
-            if (q.y > 0.05f && std::hypot(q.x, q.y) >= Ld) {
-                p = &q;
-                break;
-            }
-        }
-        if (p == nullptr) {
-            return -1.0;
-        }
-        double best = 1e9;
-        bool inside = false;
-        for (size_t i = 1; i < line.size(); ++i) {
-            const cv::Point2f ab = line[i] - line[i - 1];
-            const float u = (*p - line[i - 1]).dot(ab) / std::max(1e-9f, ab.dot(ab));
-            const float t = std::clamp(u, 0.0f, 1.0f);
-            const cv::Point2f e = *p - (line[i - 1] + ab * t);
-            const double d = std::hypot(e.x, e.y);
-            if (d < best) {
-                best = d;
-                // Hinh chieu roi ra ngoai 2 dau vach -> vach khong phu toi day
-                inside = !((i == 1 && u < 0.0f) || (i + 1 == line.size() && u > 1.0f));
-            }
-        }
-        return inside ? best : -1.0;
-    }
-
     // Toc do muc tieu khi thay lan: noi suy speed_corner_x10 -> v_max theo
     //  - speed_scale camera (do cong / goc gap doan nhin thay),
     //  - do cong duong da nho phia truoc (ke ca doan da vao vung mu),
     //  - xe co dang GIUA LAN khong: lech <= 3 cm -> 1, >= 7 cm -> 0 (xe 25 cm
     //    trong lan 0.42 m chi con ~5 cm moi ben, lech thi cham lai cho kip ve),
     //  - khoang cach toi cua phia truoc (corner_speed_x10): giam toc tu xa.
+    // CHI 2 MUC (13/10, nguoi dung): thang han + giua lan -> v_max (1562.5 us),
+    // con lai (cua, sap toi cua, xe lech) -> speed_corner_x10 (1543 us).
+    // Truoc day noi suy lien tuc: firmware 10 bit chi ra 1543 khi lenh <= 58
+    // -> cua vua van chay nac nhanh.
+    static constexpr float STRAIGHT_FRAC = 0.45f; // he so thang tu muc nay moi chay nhanh (0.7: 18:05 gan nhu toan cham)
     int lane_speed(int v_max, const CameraLane::LaneOutput& lane,
                    const PathTracker::Output& trk, bool use_trk) const {
+        const int corner = std::min(speed_corner_x10_, v_max);
         const int v = lane_speed_scaled(v_max, lane, trk, use_trk);
-        return use_trk ? std::min(v, corner_speed_x10(v_max, trk)) : v;
-    }
-
-    // Goc banh THAT mong muon (> 0 phai) -> dev gui firmware, bu servo lech
-    // tam (servo_straight_deg: goc servo ma banh di thang)
-    int dev_for_wheel(double wheel_deg) const {
-        const double trim = (servo_straight_deg_ - FW_STEER_CENTER) * steer_ratio_;
-        return dev_sign_ * dev_from_wheel_deg(wheel_deg - dev_sign_ * trim, steer_ratio_);
-    }
-
-    // dev cua camera (tinh nhu servo 90 la di thang) -> dev da bu lech tam
-    int camera_dev(int dev_px) const {
-        const int d = dev_sign_ * dev_px;
-        return dev_for_wheel((FW_STEER_CENTER - estimate_servo_deg(d)) * steer_ratio_ * dev_sign_);
+        const bool corner_ahead = use_trk && corner_speed_x10(v_max, trk) < v_max;
+        return (corner_ahead || v < corner + STRAIGHT_FRAC * (v_max - corner)) ? corner : v_max;
     }
 
     // Toc do cho phep de truot tu do (gia toc coast_decel_mps2) xuong toc do
@@ -594,10 +509,9 @@ private:
         {
             const auto fb = serial_->get_latest_feedback();
             const unsigned long fb_age = serial_->feedback_age_ms();
-            // Goc banh THAT: tinh tu goc servo ma banh di thang
             double wheel = wheel_cmd_deg_;
             if (fb.has_v2 && fb.steer_deg >= 0 && fb_age < 100) {
-                wheel = (servo_straight_deg_ - fb.steer_deg) * steer_ratio_ * dev_sign_;
+                wheel = (FW_STEER_CENTER - fb.steer_deg) * steer_ratio_ * dev_sign_;
             }
             // Toc do THAT uoc luong: lenh tang -> theo lenh (da ramp); lenh
             // giam -> xe troi cham dan (coast_decel_mps2), dung xe -> firmware
@@ -610,7 +524,6 @@ private:
                 v_odom_x10_ = cmd >= v_odom_x10_ ? cmd : std::max(cmd, v_odom_x10_ - dec);
             }
             const double v_mps = v_odom_x10_ / 36.0 * odom_speed_scale_;
-            wheel_now_deg_ = wheel;
             tracker_.predict(v_mps, wheel, t_now);
             // Camera du doan vi tri vach giua 2 frame theo cung odometry
             camera_->set_motion(static_cast<float>(v_mps), static_cast<float>(wheel));
@@ -622,94 +535,39 @@ private:
                 }
             }
         }
-        // Ld / phan hoi xte tinh theo toc do LENH (da chinh tren xe theo so
-        // nay); odometry o tren dung toc do that (odom_speed_scale)
-        const double v_now = v_odom_x10_ / 36.0;
-        // Chi thay 1 vach: doi dan tam bam ve phia vach bi mat (toi da
-        // single_search_m) -> xe lai vao trong tim lai vach kia, giu xe giua 2
-        // vach va om cua khi vach trong ra khoi khung (SINGLE_LINE_SEARCH_PX
-        // cua Python). Thay lai du 2 vach -> tra dan ve 0.
+        const double v_now = v_odom_x10_ / 36.0 * odom_speed_scale_;
+        // Chi thay 1 vach MA vach kia nam NGOAI khung hinh (xe lech ve phia
+        // vach dang thay): doi dan tam bam ve phia vach bi mat (toi da
+        // single_search_m) -> xe lai manh ve phia do toi khi vach kia lot vao
+        // khung (SINGLE_LINE_SEARCH_PX cua Python). Thay lai du 2 vach -> tra
+        // dan ve 0. KHONG doi khi:
+        //  - vach kia le ra phai thay (lane.other_view_m >= single_search_view_m):
+        //    vach mo / loa / dut, xe dang dung cho; doi 8 cm la keo xe lech
+        //    khoi giua lan (thu vong kin: lech 10 cm, de len vach).
+        //  - trong cua (do cong phia truoc 0.3 -> 0.7 1/m tat dan): vach trong
+        //    ra khoi khung vi goc nhin hep, tam suy tu vach ngoai da dung; doi
+        //    them vao trong lam banh sau cat len vach trong.
         {
             double want = 0.0;
+            const double straight = 1.0 - std::clamp((std::fabs(last_curv_ahead_) - 0.3) / 0.4, 0.0, 1.0);
             if (!camera_ok) {
                 want = 0.0;
             } else if (lane.state == LaneState::ONE_LINE) {
-                // Chi tren duong THANG: trong cua vach trong ra khoi khung la
-                // binh thuong, doi tam ve phia do = ep xe de len vach trong
-                // (chay that 09/10: bam vach ngoai nhung de vach trong). Tat
-                // dan theo do cong phia truoc 0.3 -> 0.7 1/m.
-                const double straight =
-                    1.0 - std::clamp((std::fabs(last_curv_ahead_) - 0.3) / 0.4, 0.0, 1.0);
-                want = (lane.left_g.empty() ? -1.0 : 1.0) * single_search_m_ * straight;
+                const bool out_of_view = lane.other_view_m < single_search_view_m_;
+                want = out_of_view
+                    ? (lane.left_g.empty() ? -1.0 : 1.0) * single_search_m_ * straight
+                    : 0.0;
             } else if (lane.state == LaneState::LOST) {
                 want = search_bias_m_;
             }
             const double step = single_search_rate_ * static_cast<double>(dt_control_s_);
             search_bias_m_ += std::clamp(want - search_bias_m_, -step, step);
         }
-        // CUA GAT: GIU KHOANG CACH TOI VACH NGOAI. Camera chi thay phia truoc;
-        // trong cua gap khuc thuong chi thay vach ngoai, vach trong ra khoi
-        // khung -> duong tam (suy tu vach ngoai + be rong lan uoc luong) co the
-        // lech. Nen o cua gat bam THANG theo vach ngoai: diem ngam cach vach
-        // ngoai sao cho mep xe cach mep bang keo corner_outer_gap_m (du xa de
-        // kip xu ly, khong de banh len vach ngoai; phia vach trong con rong).
-        // Bat: |do cong phia truoc| >= corner_sharp_k VA banh da be cung chieu
-        // >= CORNER_SHARP_IN_DEG, lien tuc CORNER_SHARP_HOLD_S (cua lon, xe da
-        // vao cua; cua nhe / moi thay cua phia truoc khong bat). Truoc day bat
-        // tu do cong 0.3 -> xe dat ra ngoai TRUOC khi vao cua, vot cham vach
-        // ngoai (chay that 16:43). Giu: suot luc banh con be cung chieu >=
-        // CORNER_SHARP_OUT_DEG. Khong dua vao do cong de giu: giua cua gap
-        // khuc doan thang ke tiep nam cheo phia truoc -> do cong ~0 du banh
-        // het lai (log 16:43: 2-5 s het lai, do cong 0-0.3). Tat: banh ve
-        // duoi nguong CORNER_SHARP_EXIT_S, hoac duong cong nguoc chieu.
-        {
-            const double k = last_curv_ahead_;
-            const double dt = static_cast<double>(dt_control_s_);
-            if (sharp_turn_ == 0) {
-                const int sk = k < 0.0 ? -1 : 1;
-                const bool in = std::fabs(k) >= corner_sharp_k_ &&
-                                wheel_now_deg_ * sk >= CORNER_SHARP_IN_DEG;
-                sharp_t_s_ = in ? sharp_t_s_ + dt : 0.0;
-                if (sharp_t_s_ >= CORNER_SHARP_HOLD_S) {
-                    sharp_turn_ = sk;
-                    sharp_t_s_ = 0.0;
-                }
-            } else {
-                sharp_t_s_ = wheel_now_deg_ * sharp_turn_ < CORNER_SHARP_OUT_DEG ? sharp_t_s_ + dt : 0.0;
-                if (sharp_t_s_ >= CORNER_SHARP_EXIT_S || k * sharp_turn_ <= -CORNER_SHARP_REV) {
-                    sharp_turn_ = 0;
-                    sharp_t_s_ = 0.0;
-                }
-            }
-            double want = 0.0;
-            if (camera_ok && corner_outer_gap_m_ >= 0.0 && sharp_turn_ != 0) {
-                const int dir = -sharp_turn_;   // re trai -> vach ngoai ben PHAI (+)
-                const double keep = tracker_.params().car_half_width_m +
-                                    tracker_.params().tape_half_m + corner_outer_gap_m_;
-                const double out_now = corner_bias_m_ * dir;
-                // Diem ngam -> vach ngoai do o chu ky truoc (da gom doi hien
-                // tai); khong do duoc -> coi duong tam o giua lan
-                const double d = outer_d_m_ > 0.0 ? outer_d_m_ : 0.5 * lane_w_m_ - out_now;
-                want = dir * std::clamp(out_now + d - keep, -CORNER_IN_MAX_M, corner_outer_max_m_);
-            }
-            const double step = corner_outer_rate_ * static_cast<double>(dt_control_s_);
-            corner_bias_m_ += std::clamp(want - corner_bias_m_, -step, step);
-        }
-        const PathTracker::Output trk = tracker_.compute(v_now, search_bias_m_ + corner_bias_m_);
+        const PathTracker::Output trk = tracker_.compute(v_now, search_bias_m_);
         if (trk.valid) {
             last_curv_ahead_ = trk.curv_ahead;
         }
-        // Khoang cach diem ngam (tren duong tam, cach truc sau lookahead) toi
-        // vach ngoai cua cua gat (loc nhe), cho chu ky sau
-        {
-            double d = -1.0;
-            if (trk.valid && sharp_turn_ != 0) {
-                d = dist_at_lookahead(trk.centre_v, trk.lookahead_m,
-                                      sharp_turn_ < 0 ? trk.right_v : trk.left_v);
-            }
-            outer_d_m_ = d <= 0.0 ? -1.0 : outer_d_m_ <= 0.0 ? d : outer_d_m_ + 0.3 * (d - outer_d_m_);
-        }
-        const bool use_trk = trk.valid;
+        const bool use_trk = track_mode_ && trk.valid;
         // Loc goc banh (STEER_FILTER_SEC cua Python): nhieu vi tri vach vai cm
         // moi frame khong lam servo giat
         if (use_trk) {
@@ -725,7 +583,7 @@ private:
         } else {
             steer_f_primed_ = false;
         }
-        const int trk_dev = dev_for_wheel(steer_f_);
+        const int trk_dev = dev_sign_ * dev_from_wheel_deg(steer_f_, steer_ratio_);
 
         // Dem so frame camera LIEN TIEP thay lan (dieu kien xuat phat). Ca 1
         // vach: camera chi bao ONE_LINE khi vach do bam on dinh vai frame. Truoc
@@ -756,7 +614,6 @@ private:
                         run_requested_ ? "mat heartbeat tu GUI" : "nguoi dung bam dung");
         }
         armed_ = armed;
-        camera_->set_recording(armed_);
 
         int dev = 0;
         int target = 0;
@@ -773,23 +630,21 @@ private:
         } else if (lane.state == LaneState::TWO_LINES) {
             // Du 2 vach: duong thang (speed_scale = 1) -> speed_x10 (ramp len),
             // vao cua noi suy ve speed_corner_x10 theo do cong (giam ngay)
-            last_dev_px_ = use_trk ? trk_dev : camera_dev(lane.dev_px);
+            last_dev_px_ = use_trk ? trk_dev : dev_sign_ * lane.dev_px;
             lane_lost_since_ = t_now;
             track_ = 2;
             dev = last_dev_px_;
             target = lane_speed(speed_x10_, lane, trk, use_trk);
             dev_cm = static_cast<float>(dev_sign_) * lane.dev_cm;
             width_cm = lane.lane_width_cm;
-            if (lane.lane_width_cm > 20.0f) {
-                lane_w_m_ += 0.3 * (lane.lane_width_cm / 100.0 - lane_w_m_);
-            }
         } else if (lane.state == LaneState::ONE_LINE) {
             // Chi thay 1 vach: lai theo duong tam suy tu vach do. Duong thang
             // + xe giua lan (vach kia mo / loa) -> toi speed_one_x10; cua hoac
-            // xe lech -> ve speed_corner_x10.
+            // xe lech -> ve speed_corner_x10. (Truoc day luon chay toc do cua:
+            // duong thang chi thay 1 vach xe bo cham theo vach do.)
             track_ = 1;
             lane_lost_since_ = t_now;
-            last_dev_px_ = use_trk ? trk_dev : camera_dev(lane.dev_px);
+            last_dev_px_ = use_trk ? trk_dev : dev_sign_ * lane.dev_px;
             dev = last_dev_px_;
             target = lane_speed(speed_one_x10_, lane, trk, use_trk);
             dev_cm = static_cast<float>(dev_sign_) * lane.dev_cm;
@@ -838,19 +693,12 @@ private:
             dev = 0;
         }
 
-        // Dang o cua gat: toc do cua (= toc do nho nhat); ra khoi cua moi tang
-        // lai theo speed_ramp_x10
-        if (sharp_turn_ != 0 && target > speed_corner_x10_) {
-            target = speed_corner_x10_;
-        }
         // Dang chay thi khong de lenh duoi speed_min_x10 (banh se khong quay)
         if (!emg && target > 0) {
             target = std::max(target, speed_min_x10_);
         }
 
-        // Toc do: tang dan (speed_ramp_x10_ don vi x10 moi giay) khi het cua,
-        // giam nhanh nhung DEU (speed_down_x10_ moi giay) khi vao cua -> khong
-        // giat (truoc day giam tuc thi).
+        // Toc do: tang dan (speed_ramp_x10_ don vi x10 moi giay), giam ngay.
         // Bat dau tu speed_min_x10 chu khong tu 0: duoi muc do xe dung yen.
         if (!emg && target > 0 && speed_cur_x10_f_ < speed_min_x10_) {
             speed_cur_x10_f_ = static_cast<float>(speed_min_x10_);
@@ -861,49 +709,13 @@ private:
             speed_cur_x10_f_ = std::min(static_cast<float>(target),
                                         speed_cur_x10_f_ + speed_ramp_x10_ * dt_control_s_);
         } else {
-            speed_cur_x10_f_ = std::max(static_cast<float>(target),
-                                        speed_cur_x10_f_ - speed_down_x10_ * dt_control_s_);
+            speed_cur_x10_f_ = static_cast<float>(target);
         }
         const int speed = static_cast<int>(speed_cur_x10_f_ + 0.5f);
 
-        // Gioi han toc do danh lai tren LENH CUOI (moi nhanh: tracker, dev
-        // camera, giu huong). Chay 10/10 19:37: gioi han dat sau bo loc tracker
-        // bi bo qua moi khi tracker mat 1 nhip / dung dev camera -> banh van
-        // nhay 10-15 do trong 1 frame. Cua = do cong phia truoc 0.4 -> 1.0 1/m
-        // (nhu lookahead/corner_gain), hoac thay goc gap phia truoc, dang o
-        // che do cua gat, rao chan vach dang day -> toc do cua. Xe dung (emg)
-        // -> khong gioi han (banh ve thang ngay).
-        {
-            const double dt = steer_lim_at_ == SteadyClock::time_point{}
-                ? static_cast<double>(dt_control_s_)
-                : std::clamp(std::chrono::duration<double>(t_now - steer_lim_at_).count(), 0.0, 0.05);
-            steer_lim_at_ = t_now;
-            const double want = (servo_straight_deg_ - estimate_servo_deg(dev)) * steer_ratio_ * dev_sign_;
-            if (emg || steer_rate_dps_ <= 0.0) {
-                steer_lim_deg_ = want;
-            } else {
-                double rc = std::clamp((std::fabs(last_curv_ahead_) - 0.4) / 0.6, 0.0, 1.0);
-                if (use_trk && (sharp_turn_ != 0 || trk.kink_dist_m >= 0.0 || trk.guard_deg != 0.0)) {
-                    rc = 1.0;
-                }
-                // PID duong thang dang lai (pid_w = 1) moi la "thang"; giua cua
-                // gap do cong ~0 nhung pid_w = 0 -> toc do cua
-                if (use_trk && tracker_.params().pid_kp_deg_per_m > 0.0) {
-                    rc = std::max(rc, 1.0 - trk.pid_w);
-                }
-                const double err = std::fabs(want - steer_lim_deg_);
-                const double rate = steer_rate_dps_ +
-                                    (std::max(steer_rate_corner_dps_, steer_rate_dps_) - steer_rate_dps_) * rc +
-                                    steer_rate_gain_ * std::max(0.0, err - steer_rate_db_deg_);
-                const double step = rate * dt;
-                steer_lim_deg_ += std::clamp(want - steer_lim_deg_, -step, step);
-                dev = dev_for_wheel(steer_lim_deg_);
-            }
-        }
-
         // Goc banh ung voi lenh nay (cho odometry chu ky sau)
         wheel_cmd_deg_ = emg && !armed_ ? 0.0
-            : (servo_straight_deg_ - estimate_servo_deg(dev)) * steer_ratio_ * dev_sign_;
+            : (FW_STEER_CENTER - estimate_servo_deg(dev)) * steer_ratio_ * dev_sign_;
 
         SerialCommand cmd;
         cmd.dev_final_px = static_cast<int16_t>(std::clamp(dev, -32768, 32767));
@@ -931,20 +743,12 @@ private:
         trk_valid_ = use_trk;
         trk_turn_ = trk.turn;
         trk_ahead_m_ = trk.ahead_m;
+        trk_corner_m_ = trk.corner_dist_m;
         trk_la_m_ = trk.lookahead_m;
         trk_wheel_deg_ = trk.steer_deg;
         trk_guard_deg_ = trk.guard_deg;
         trk_xte_m_ = trk.xte_m;
         trk_xte_i_deg_ = trk.xte_i_deg;
-        trk_pid_w_ = trk.pid_w;
-        trk_pid_e_m_ = trk.pid_e_m;
-        trk_pid_psi_deg_ = trk.pid_psi_deg;
-        trk_pid_i_deg_ = trk.pid_i_deg;
-        trk_pid_deg_ = trk.pid_deg;
-        trk_corner_m_ = trk.corner_dist_m;
-        trk_kink_m_ = trk.kink_dist_m;
-        trk_kink_deg_ = trk.kink_deg;
-        trk_kink_hold_ = trk.kink_hold;
 
         // ---- Gui xuong ESP32, tu mo lai cong khi mat ket noi ----
         const bool ok = serial_->is_open() && !serial_->is_broken() &&
@@ -992,7 +796,7 @@ private:
         last_viz_frame_ = lane.vis_frame_id;
 
         // Ve ban do nho len BAN SAO (lane.vis dung chung voi luong camera)
-        if (want_vis || want_jpg) {
+        if (track_mode_ && (want_vis || want_jpg)) {
             PathTracker::Output t;
             {
                 std::lock_guard<std::mutex> lock(trk_mtx_);
@@ -1087,8 +891,7 @@ private:
             "right=%.0fcm rear=%.0fcm alert=%s lofs=%.1f serial=%s w=%.0fcm "
             "devm=%.1fcm curv=%.3f scale=%.2f spd=%.1f kmh=%.2f fbage=%ld "
             "servo=%.1f hz=%.2f pitch=%.1f esc=%d fwemg=%d fwwd=%d fwcmd=%d "
-            "mode=%s turn=%c mem=%.2f la=%.2f wheel=%.1f guard=%.1f xte=%.1fcm xi=%.1f corner=%.2f vest=%.1f cob=%.1fcm sharp=%c od=%.0fcm kink=%.2f/%.0f%s "
-            "pidw=%.2f pide=%.1fcm pidpsi=%.1f pidi=%.1f pid=%.1f",
+            "mode=%s turn=%c mem=%.2f la=%.2f wheel=%.1f guard=%.1f xte=%.1fcm xi=%.1f corner=%.2f vest=%.1f",
             two_lanes_ ? 1 : 0,
             kTrack[(track_ >= 0 && track_ <= 2) ? track_ : 0],
             last_dev_px_,
@@ -1127,10 +930,7 @@ private:
             trk_valid_ ? "track" : "camera",
             trk_turn_ > 0 ? 'R' : (trk_turn_ < 0 ? 'L' : 'S'),
             trk_ahead_m_, trk_la_m_, trk_wheel_deg_, trk_guard_deg_,
-            trk_xte_m_ * 100.0, trk_xte_i_deg_, trk_corner_m_, v_odom_x10_ / 10.0, corner_bias_m_ * 100.0,
-            sharp_turn_ < 0 ? 'L' : sharp_turn_ > 0 ? 'R' : '-', outer_d_m_ * 100.0,
-            trk_kink_m_, trk_kink_deg_, trk_kink_hold_ ? "H" : "",
-            trk_pid_w_, trk_pid_e_m_ * 100.0, trk_pid_psi_deg_, trk_pid_i_deg_, trk_pid_deg_);
+            trk_xte_m_ * 100.0, trk_xte_i_deg_, trk_corner_m_, v_odom_x10_ / 10.0);
 
         std_msgs::msg::String msg;
         msg.data = buf;
@@ -1174,49 +974,24 @@ private:
     rclcpp::TimerBase::SharedPtr viz_timer_;
     rclcpp::TimerBase::SharedPtr status_timer_;
 
-    int speed_x10_ = 75;
-    int speed_hold_x10_ = 62;
-    int speed_corner_x10_ = 62;
-    double coast_decel_mps2_ = 0.45; // gia toc giam khi nha ga (m/s^2)
-    double corner_margin_m_ = 0.20;  // xuong toc do cua truoc cua bay nhieu m
-    double v_odom_x10_ = 0.0;        // toc do that uoc luong (km/h x10)
-    int speed_one_x10_ = 64;
-    float speed_ramp_x10_ = 12.0f;   // don vi x10 moi giay (12 = 1.2 km/h/s)
-    float speed_down_x10_ = 20.0f;   // giam toc vao cua, don vi x10 moi giay
-    int speed_min_x10_ = 62;         // toc do nho nhat khi dang chay
+    int speed_x10_ = 66;
+    int speed_one_x10_ = 66;
+    int speed_hold_x10_ = 50;
+    int speed_corner_x10_ = 52;
+    float speed_ramp_x10_ = 30.0f;   // don vi x10 moi giay (30 = 3 km/h/s)
+    int speed_min_x10_ = 50;         // toc do nho nhat khi dang chay
     float speed_cur_x10_f_ = 0.0f;   // lenh hien tai, tang dan khi ramp
     float dt_control_s_ = 0.01f;     // 1 / control_hz
     double steer_filter_s_ = 0.08;   // loc goc banh (s)
     double steer_f_ = 0.0;           // goc banh da loc (do)
     bool steer_f_primed_ = false;
-    double steer_lim_deg_ = 0.0;     // goc banh lenh sau gioi han toc do (do)
-    SteadyClock::time_point steer_lim_at_{};
-    double steer_rate_dps_ = 15.0;          // toc do danh lai duong thang (do banh / s)
-    double steer_rate_corner_dps_ = 45.0;   // toc do danh lai trong cua
-    double steer_rate_gain_ = 8.0;          // them do/s moi do chenh vuot steer_rate_db_deg_
-    double steer_rate_db_deg_ = 4.0;
     int lane_start_frames_ = 3;      // so frame thay lan lien tiep de xuat phat
     int lane_streak_ = 0;
     double single_search_m_ = 0.08;
-    double single_search_rate_ = 0.15;
+    double single_search_rate_ = 0.30;
+    double single_search_view_m_ = 0.25;
     double search_bias_m_ = 0.0;
-    double corner_outer_gap_m_ = 0.08; // mep xe -> mep vach ngoai trong cua gat (m), < 0 = tat
-    double corner_outer_max_m_ = 0.15; // doi ra ngoai toi da (m)
-    double corner_outer_rate_ = 0.40;  // toc do doi (m/s)
-    double corner_sharp_k_ = 1.0;      // do cong vao trang thai cua gat (1/m)
-    static constexpr double CORNER_SHARP_HOLD_S = 0.15; // giu tren nguong bay lau moi bat
-    static constexpr double CORNER_SHARP_IN_DEG = 8.0;  // goc banh cung chieu de bat (do)
-    static constexpr double CORNER_SHARP_OUT_DEG = 6.0; // banh duoi muc nay ...
-    static constexpr double CORNER_SHARP_EXIT_S = 0.2;  // ... bay lau thi tat
-    static constexpr double CORNER_SHARP_REV = 0.4;     // duong cong nguoc chieu (1/m) -> tat
-    static constexpr double CORNER_IN_MAX_M = 0.05;     // doi VAO trong toi da khi qua sat vach ngoai
-    int sharp_turn_ = 0;               // dang o cua gat: -1 trai, +1 phai
-    double sharp_t_s_ = 0.0;           // dem thoi gian dieu kien bat / tat
-    double wheel_now_deg_ = 0.0;       // goc banh dang ap dung (do, > 0 = phai)
-    double outer_d_m_ = -1.0;          // diem ngam -> vach ngoai (m), < 0 = chua do
-    double corner_bias_m_ = 0.0;       // dang doi duong bam (m, > 0 = sang phai)
-    double lane_w_m_ = 0.55;           // be rong lan do gan nhat (m, EMA)
-    double last_curv_ahead_ = 0.0;   // do cong phia truoc chu ky truoc (1/m)
+    double last_curv_ahead_ = 0.0;   // do cong phia truoc cua chu ky truoc (1/m)
     long last_start_frame_ = -1;
     bool lane_acquired_ = false;     // da thay du 2 vach tu luc bam chay
     int dev_sign_ = 1;
@@ -1247,9 +1022,12 @@ private:
 
     // ---- PathTracker ----
     PathTracker tracker_;
+    bool track_mode_ = true;
     double steer_ratio_ = 0.6;
     double odom_speed_scale_ = 0.30;
-    double servo_straight_deg_ = 90.0;   // goc servo ma banh di thang
+    double coast_decel_mps2_ = 0.7;  // gia toc giam khi nha ga (m/s^2)
+    double corner_margin_m_ = 0.20;  // xuong toc do cua truoc cua bay nhieu m
+    double v_odom_x10_ = 0.0;        // toc do that uoc luong (km/h x10)
     int lost_memory_ms_ = 1500;
     double wheel_cmd_deg_ = 0.0;   // goc banh cua lenh vua gui (> 0 phai)
     long last_obs_frame_ = -1;
@@ -1258,20 +1036,12 @@ private:
     bool trk_valid_ = false;
     int trk_turn_ = 0;
     double trk_ahead_m_ = 0.0;
+    double trk_corner_m_ = -1.0;
     double trk_la_m_ = 0.0;
     double trk_wheel_deg_ = 0.0;
     double trk_guard_deg_ = 0.0;
     double trk_xte_m_ = 0.0;
     double trk_xte_i_deg_ = 0.0;
-    double trk_pid_w_ = 0.0;
-    double trk_pid_e_m_ = 0.0;
-    double trk_pid_psi_deg_ = 0.0;
-    double trk_pid_i_deg_ = 0.0;
-    double trk_pid_deg_ = 0.0;
-    double trk_corner_m_ = -1.0;
-    double trk_kink_m_ = -1.0;
-    double trk_kink_deg_ = 0.0;
-    bool trk_kink_hold_ = false;
 
     double fps_ = 0.0;
     long fps_window_frame_ = 0;

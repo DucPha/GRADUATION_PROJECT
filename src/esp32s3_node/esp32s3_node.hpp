@@ -29,7 +29,7 @@
 // ============================================================================
 
 struct SerialCommand {
-    // Do lech tam lan, px anh tham chieu 640 (xem camera_node.hpp)
+    // Do lech tam lan, px anh tham chieu 640 (xem lane_detector.hpp)
     int16_t dev_final_px = 0;
 
     // Toc do dat = km/h x 10 (vd 5.5 km/h -> 55)

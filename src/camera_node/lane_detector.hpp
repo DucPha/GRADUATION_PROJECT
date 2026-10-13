@@ -1,10 +1,26 @@
 #pragma once
 
-#include <opencv2/opencv.hpp>
+// ============================================================================
+// lane_detector.hpp - NHAN DIEN LAN tu camera (khoi PERCEPTION cua xe)
+// ----------------------------------------------------------------------------
+// Vao : anh camera (MJPG 1920x1080, giai ma 960x540).
+// Ra  : CameraLane::LaneOutput - trang thai lan (0/1/2 vach), 2 vach va duong
+//       tam lan tren MAT SAN (met, goc = diem tren san ngay duoi camera, X sang
+//       PHAI, Z ve PHIA TRUOC), do cong, goc gap phia truoc, anh quan sat.
+//
+// Thanh phan (cai dat o lane_detector.cpp):
+//   CameraProfile  - thong so lap camera (cao, goc cui, goc nhin)
+//   LaneState      - LOST / ONE_LINE / TWO_LINES
+//   CameraLane     - luong doc camera + detector 1 frame (process / detect)
+//
+// Dung: CameraLane cam(index, fps, w, h, profile); cam.start();
+//       moi chu ky dieu khien: cam.set_motion(v, banh); cam.get_latest(out);
+//       chay lai anh da ghi: cam.process(anh, out)  (khong mo camera)
+// ============================================================================
 
+#include <opencv2/opencv.hpp>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -12,7 +28,7 @@
 #include <vector>
 
 // ============================================================================
-// CAMERA LANE - nhan lan tren MAT SAN (BEV, don vi met), port tu lane_bev.py
+// CAMERA LANE - chi tiet thuat toan (port tu lane_bev.py da chay tren xe)
 // ----------------------------------------------------------------------------
 // Camera doc MJPG (mac dinh 1920x1080), tu giai ma bang libjpeg-turbo o 1/2
 // kich thuoc, thu ve khung lam viec WORK_W = 320 cot (giu dung ti le anh).
@@ -38,7 +54,8 @@
 //      goc cua 90 do. Thieu vach -> tim vach moi, ghep cap dung be rong lan.
 //   5. Tam lan = vach doi nua lan theo PHAP TUYEN, noi goc kieu MITRE -> o goc
 //      gap 90 do duong tam di dung giua goc, khong cat qua vach trong.
-//   6. Pure pursuit tu truc sau -> dev_px (thang do firmware), phat hien goc
+//   6. Goc cui camera tu hieu chinh tu diem tu cua 2 vach thang.
+//   7. Pure pursuit tu truc sau -> dev_px (thang do firmware), phat hien goc
 //      gap phia truoc -> he so toc do.
 //
 // Toa do mat dat: X (m) sang PHAI, Z (m) ve PHIA TRUOC, goc = diem tren san
@@ -62,13 +79,20 @@ struct CameraProfile {
   // Do cao tam ong kinh so voi mat san (m)
   float height_m = 0.30f;
 
-  // Goc cui cua truc quang so voi phuong ngang (do), CO DINH. Do bang diem
-  // tu cua 2 dai thang song song tren anh that (doi goc camera -> do lai).
-  // (Ban tu hieu chinh khi chay da bo: tren duong that no nhay 38-46 do.)
-  float pitch_deg = 35.5f; // toi 09/10 camera ngua len (08/10: 42)
+  // Goc cui cua truc quang so voi phuong ngang (do). Do tren log that:
+  // 2 vach thang keo dai gap nhau o hang -106 cua anh 320x240 -> ~42 do.
+  // auto_pitch = true: tu chinh lai khi chay thang thay 2 vach. MAC DINH TAT:
+  // thu vong kin (goc that co dinh 42) no nhay 42 -> 44.5 -> 42.7 -> 44.5...
+  // moi lan doi > 2 do con xoa vach dang bam -> mat lan giua duong.
+  float pitch_deg = 42.0f;
+  bool auto_pitch = false;
+  float pitch_max_dev_deg = 8.0f; // chi nhan hieu chinh trong +- bay nhieu do
 
   // Goc nhin DOC (do). Tieu cu 250 px o anh 320x240 (lane_bev.py) = 51 do.
   float vfov_deg = 51.0f;
+
+  // Be rong lan, tam vach toi tam vach (m). Tu hoc lai khi chay.
+  float lane_width_m = 0.42f;
 
   // Hinh hoc xe (du doan vach giua 2 frame, pure pursuit tu truc sau)
   float cam_to_rear_m = 0.18f; // chan camera nam truoc truc sau (do lai tren xe 2026-10-08)
@@ -94,9 +118,7 @@ public:
   static constexpr float DEV_REF_DIST_M = 0.65f;
   static constexpr float DEV_M_PER_PX = 0.00155f;
 
-  // Anh quan sat gui cho GUI duoc thu ve be ngang nay. 960 = dung kich thuoc
-  // camera da giai ma (1920 / 2), khong ton them giai ma. 640 cu bi GUI phong
-  // to ra ca cua so -> anh trong rat mo (12/10). Detector khong dung so nay.
+  // Anh quan sat gui cho GUI duoc thu ve be ngang nay
   static constexpr int VIS_W = 960;
 
   // ------------------------------------------------------------------------
@@ -106,16 +128,6 @@ public:
   static constexpr float BEV_RES_M = 0.01f;   // 1 o luoi = 1 cm
   static constexpr float BEV_X_HALF_M = 0.80f;
   static constexpr float BEV_Z_MAX_M = 1.60f; // xa hon khong xet
-  // Be rong lan (tam vach - tam vach) KHONG cai dat: do moi frame thay du 2
-  // vach. Ghep cap chap nhan LANE_W_MIN_M..LANE_W_MAX_M. LANE_W_INIT_M chi dung
-  // truoc lan do dau tien (xe xuat phat thuong thay du 2 vach -> do ngay).
-  static constexpr float LANE_W_MIN_M = 0.28f;
-  static constexpr float LANE_W_MAX_M = 0.70f;
-  static constexpr float LANE_W_INIT_M = 0.45f;
-  // Be rong tai cho: EMA moi frame du 2 vach; khong thay du 2 vach qua
-  // LANE_W_LOCAL_HOLD_SEC thi tro dan ve be rong hoc dai han
-  static constexpr float LANE_W_LOCAL_ALPHA = 0.35f;
-  static constexpr float LANE_W_LOCAL_HOLD_SEC = 3.0f;
 
   // ------------------------------------------------------------------------
   // Mask vach toi (cung thong so voi Python)
@@ -124,8 +136,11 @@ public:
   static constexpr float BG_KERNEL_M = 0.13f;     // > be rong vach
   static constexpr float DARK_RATIO_INIT = 0.15f; // toi hon nen >= 15%
   static constexpr float DARK_RATIO_MIN = 0.10f;
-  static constexpr float DARK_RATIO_MAX = 0.35f;
+  static constexpr float DARK_RATIO_MAX = 0.42f;
   static constexpr int DARK_MIN_ABS = 10;         // va >= 10 muc xam
+  // CLAHE tren anh xam mat san truoc khi tim vach (xem line_mask)
+  static constexpr double CLAHE_CLIP = 2.0;
+  static constexpr int CLAHE_GRID = 8;
   // Bang keo den toi hon muc san ~60-75%; khe gach, vien sang quanh vet loa
   // den, mep bong vat chi toi hon 10-20% -> doi >= 25%. (Python dung 0.10;
   // thu tren log that 0.10 rung gap ~3 lan khi xe dung giua 2 vach)
@@ -134,9 +149,22 @@ public:
   static constexpr float FLOOR_BLOCK_W_M = 0.40f;
   static constexpr float FLOOR_BLOCK_H_M = 0.20f;
   static constexpr float NOISE_FILL = 0.10f;      // mask > 10% vung nhin = nhieu
-  // Nguong toi = CONTRAST_FRAC x do tuong phan cua chinh vach dang bam
-  static constexpr float CONTRAST_FRAC = 0.35f;
-  static constexpr float CONTRAST_THR_MAX = 0.25f;
+  // Nguong toi = CONTRAST_FRAC x do tuong phan cua chinh vach dang bam.
+  // Do tren log that 08/10: bang keo toi hon nen ~0.66 (5% thap nhat 0.53),
+  // deu tu 0.2 toi 1.0 m. BONG chan ban / ghe chi toi hon 0.25-0.40 -> ban
+  // cu (0.35 x, toi da 0.25) nhan ca bong: bong dinh vao bang keo thanh khoi
+  // day bi loai ca vach, hoac vet bong thanh "vach" gia. Nay 0.6 x (~0.40).
+  static constexpr float CONTRAST_FRAC = 0.60f;
+  static constexpr float CONTRAST_THR_MAX = 0.42f;
+  // Do toi TRUNG VI doc vach (bo diem loa den) phai >= bay nhieu lan:
+  //  - vach dang bam: do toi cua CHINH vach do o cac frame truoc (bang keo
+  //    khong doi do toi; nhay sang mep vet bong thi nhat han),
+  //  - vach moi: vach dang bam NHAT hon (2 vach co the sang khac nhau).
+  // Log that: trung vi 0.66, 5% thap nhat 0.53 (~0.8 x).
+  static constexpr float LINE_MIN_CONTRAST_FRAC = 0.75f;
+  // Do tuong phan chi dung de loc khi con moi: mat het vach lau hon (anh
+  // sang doi, vung anh toi hon) thi tam bo loc nay de bat lai vach that
+  static constexpr float CONTRAST_STALE_SEC = 1.0f;
 
   // LOC MAU: vach la bang keo DEN (bao hoa mau thap). Pixel du sang ma bao
   // hoa > COLOR_MAX_SAT (0..255) -> khong phai vach (ghe cam, vat mau).
@@ -159,16 +187,21 @@ public:
   // Doan vach chia thang ve chan camera (lech <= RADIAL_LINE_DEG) dai >=
   // RADIAL_LINE_MIN_M = chan ban / ghe (vat dung dung chieu xuong san thanh
   // tia ve camera). Bang keo chi chia ve camera khi xe nam tren duong keo dai
-  // cua no. Loc khoi (filter_clutter) khong bat duoc khi chan ban CHAM vach
-  // (dinh chung 1 khoi). 2 truong hop (ban 09/10 15:47):
+  // cua no. 2 truong hop:
   //  - doan dau vach, bat dau cach mep duoi tam nhin >= RADIAL_LINE_GAP_M
-  //    (chan ban dung rieng) -> bo ca vach,
+  //    (chan ghe dung rieng / dinh voi bong thanh chu V) -> bo ca vach,
   //  - doan sau 1 goc gap >= RADIAL_KINK_DEG (di doc bang keo roi re vao chan
-  //    ban dung sat vach) -> cat tu goc gap.
+  //    ghe dung sat vach) -> cat tu goc gap. Cung tron cua vach that khong
+  //    co goc gap nen khong bi cat.
   static constexpr float RADIAL_LINE_DEG = 12.0f;
   static constexpr float RADIAL_LINE_MIN_M = 0.12f;
   static constexpr float RADIAL_LINE_GAP_M = 0.06f;
   static constexpr float RADIAL_KINK_DEG = 30.0f;
+  // RANG CUA: 2 goc gap NGUOC chieu nhau (moi goc >= ZIGZAG_DEG) cach nhau
+  // < ZIGZAG_GAP_M = mep vet bong / do vat, khong phai bang keo (bang keo dan
+  // tay chi gap 1 chieu o goc cua)
+  static constexpr float ZIGZAG_DEG = 35.0f;
+  static constexpr float ZIGZAG_GAP_M = 0.12f;
   // TACH KHOI DAY: vung nao chua vua 1 hinh tron duong kinh BLOB_OPEN_M
   // (giay, o cam, ghe, tui...) la vat, khong phai bang keo -> xoa vung do
   // (kem vien BLOB_EAT_PX) truoc khi chia thanh phan. Nho vay vach dinh vao
@@ -190,13 +223,6 @@ public:
   static constexpr int GLARE_MIN_V = 245; // = LINE_GLARE_LEVEL cua Python (chay sang)
   static constexpr float GLARE_FLOOR_GAIN = 1.20f; // hoac sang hon muc san 20%
   static constexpr int GLARE_BRIDGE_STEPS = 8;     // 8 x 3 cm = 24 cm
-  // Vung loa de "to den lai" vach: nen cuc bo sang hon muc san cua khoi >= 10%
-  static constexpr float GLARE_ZONE_GAIN = 1.10f;
-  // Khoi mask nam trong dai +-CORRIDOR_HALF_M quanh vach dang bam (du doan)
-  // it nhat CORRIDOR_FRAC dien tich -> giu du manh / nhat / chia ve camera
-  static constexpr float CORRIDOR_HALF_M = 0.04f;
-  static constexpr float CORRIDOR_FRAC = 0.7f;
-  static constexpr float CORRIDOR_OTHER_HALF_M = 0.07f; // vach kia (du doan tu be rong lan)
   // Cho dut binh thuong noi toi da 2 buoc (6 cm). Ban truoc 3 buoc (9 cm):
   // dau vach nhay sang bui day cap / to giay nam gan -> vach cong queo.
   static constexpr int GAP_STEPS = 2;
@@ -225,6 +251,26 @@ public:
   static constexpr float SEED_SEARCH_M = 0.60f;
   static constexpr float MAX_LINE_M = 2.5f;
   static constexpr float TRACK_GATE_M = 0.07f; // vach moi lech xa hon du doan -> vat khac
+  // Be rong lan hoc = trung vi WIDTH_WINDOW mau gan nhat (doan thang du 2
+  // vach, ~25 mau / s), dung khi co >= WIDTH_MIN_SAMPLES mau. Ban truoc 100
+  // mau: lan doi be rong (bang keo dan tay) thi ~3 s sau moi theo kip, trong
+  // luc do cua chi thay 1 vach tinh tam lech vai cm.
+  static constexpr size_t WIDTH_WINDOW = 30;
+  static constexpr size_t WIDTH_MIN_SAMPLES = 8;
+  // Be rong lan KHONG co dinh: bang keo dan tay, moi doan rong / hep khac
+  // nhau. Ghep cap / kiem tra cap chi doi be rong trong khoang tuyet doi nay
+  // (khong theo be rong da hoc: hoc 0.36 m o doan hep roi toi doan 0.52 m la
+  // loai ca cap dung). lane_width_m chi la gia tri ban dau.
+  static constexpr float LANE_W_MIN_M = 0.28f;
+  static constexpr float LANE_W_MAX_M = 0.70f;
+  // Be rong lan TAI CHO: do moi frame thay du 2 vach (EMA), dung khi chi
+  // thay 1 vach (doi tam nua be rong nay). Lau khong thay 2 vach thi tro ve
+  // be rong hoc dai han.
+  static constexpr float LANE_W_LOCAL_ALPHA = 0.35f;
+  static constexpr float LANE_W_LOCAL_HOLD_SEC = 3.0f;
+  // Chua du WIDTH_MIN_SAMPLES mau doan thang: be rong dai han EMA (moi frame
+  // du 2 vach) voi he so nay
+  static constexpr float LANE_W_SEED_ALPHA = 0.05f;
   // Ghep cap moi: vach trai duoc lan sang phai chan camera toi da bay nhieu
   // (va nguoc lai) - xe phai nam giua 2 vach
   static constexpr float CAR_SIDE_SLACK_M = 0.05f;
@@ -241,6 +287,13 @@ public:
   // ngay). Truoc day 1 vach chua tung ghep cap = LOST -> xe dung han, khong
   // bao gio tu chay lai.
   static constexpr int SINGLE_CONFIRM_FRAMES = 3;
+  // Chi thay 1 vach: do dai vach con lai (du doan cach vach dang thay
+  // OTHER_VIEW_WIDTH x be rong lan) nam trong vung nhin thay (cach mep tam
+  // nhin >= OTHER_VIEW_MARGIN_M, Z <= OTHER_VIEW_MAX_Z_M)
+  static constexpr float OTHER_VIEW_WIDTH = 1.3f;
+  static constexpr float OTHER_VIEW_STEP_M = 0.02f;
+  static constexpr float OTHER_VIEW_MARGIN_M = 0.05f;
+  static constexpr float OTHER_VIEW_MAX_Z_M = 0.90f;
   static constexpr float RDP_EPS_M = 0.015f;
   // Doan vach sau goc gap phai dai it nhat bay nhieu moi la goc cua that
   static constexpr float MIN_KINK_TAIL_M = 0.10f;
@@ -307,8 +360,6 @@ public:
   static constexpr double EXPOSURE_TARGET = 110.0;
   static constexpr int EXPOSURE_START = 300;
   static constexpr int EXPOSURE_MIN = 80;
-  // 12/10 thu 3000: chay 19:27 anh chay sang (134 > muc tieu 110), giua mieng
-  // cao su loa mat, mat lan 6% -> 21% -> giu 1500.
   static constexpr int EXPOSURE_MAX = 1500;
 
   // Mat lan: giu dev_px cuoi toi da bay nhieu ms
@@ -352,6 +403,12 @@ public:
     int kink_dir = 0;
     float kink_deg = 0.0f;
 
+    // Chi khi ONE_LINE: chieu dai (m) vach CON LAI (du doan tu vach dang thay
+    // + 1.3 x be rong lan) nam trong vung camera nhin thay. Lon (>= ~0.25 m) =
+    // vach do le ra phai thay -> vach mo / bi loa, xe dang o giua; ~0 = vach
+    // nam ngoai khung (xe lech ve phia vach dang thay, hoac lan rong hon).
+    float other_view_m = 0.0f;
+
     // Toa do MAT DAT (m, goc = chan camera, X phai, Z truoc), gan -> xa.
     // PathTracker dung de nho duong qua vung mu truoc xe. Rong = khong thay.
     std::vector<cv::Point2f> centre_g; // duong tam lan, lay mau 5 cm
@@ -364,6 +421,7 @@ public:
 
     float horizon_frac = 0.0f; // chan troi (ti le chieu cao anh, < 0 = tren mep anh)
     float pitch_deg = 0.0f;    // goc cui camera dang dung
+    bool pitch_confirmed = false;
     float near_z_m = 0.0f;     // mep gan nhat camera thay duoc (m truoc chan camera)
     float dark_ratio = 0.0f;   // nguong toi dang dung
 
@@ -411,14 +469,6 @@ public:
 
   void set_roi_top_frac(float frac);
 
-  // GHI ANH khi chay (de chinh detector bang anh duong dua that): moi frame
-  // da giai ma (rong VIS_W, dung anh detector xu ly) luu JPEG vao dir, kem
-  // frames.csv (thoi gian, trang thai lan, be rong, toc do, goc banh) de phat
-  // lai offline. Ghi o luong rieng, day hang doi thi bo frame (khong lam
-  // cham detector). dir rong = tat. set_recording(true) chi khi xe dang chay.
-  void set_record_dir(const std::string &dir);
-  void set_recording(bool on) { rec_on_.store(on); }
-
   // Toc do xe (m/s) va goc banh (do, > 0 = phai) hien tai: de du doan vi tri
   // vach giua 2 frame. Goi tu vong dieu khien, an toan da luong.
   void set_motion(float v_mps, float wheel_deg) {
@@ -449,6 +499,7 @@ private:
     bool verified = false; // da tung la 1 cap lan hop le (khong phai nhieu)
     int seen = 0;          // so frame LIEN TIEP thay vach nay
     float gate_err = 0.0f;
+    float dark = -1.0f;    // do toi trung vi doc vach (EMA), < 0 = chua do
   };
 
   bool open_camera();
@@ -467,7 +518,7 @@ private:
   bool detect(const cv::Mat &frame, LaneOutput &out, bool draw,
               std::chrono::steady_clock::time_point stamp = {});
 
-  // ---- BEV (lane_bev.cpp) ----
+  // ---- BEV (lane_detector.cpp, phan B) ----
   void line_mask(const cv::Mat &bev_bgr, cv::Mat &mask, cv::Mat &rel,
                  cv::Mat &glare) const;
   cv::Mat floor_level(const cv::Mat &gray) const;
@@ -491,7 +542,15 @@ private:
   bool follow(cv::Mat &work, const Poly &pred, float gate, Poly &pts,
               float &err) const;
   std::vector<Poly> candidates(cv::Mat &work, int max_n = 8) const;
+  // ref > 0: so voi do toi nay; <= 0: so voi vach dang bam nhat hon
+  bool dark_enough(const Poly &pts, float ref = -1.0f) const;
+  // Cat doan chan ban / ghe; false = ca vach la chan ban / ghe
   bool trim_upright(Poly &pts) const;
+  // Cat vach tai cho bat dau RANG CUA; true neu da cat
+  static bool trim_zigzag(Poly &pts);
+  float line_dark(const Poly &pts) const;
+  // a nam ben TRAI b, cach >= 1/2 be rong lan toi thieu (khong phai cung 1 vach)
+  bool left_of(const Poly &a, const Poly &b) const;
 
   void predict_tracks(float dt);
   void pair_geom(const Poly &a, const Poly &b, float &dist, float &ang,
@@ -502,6 +561,9 @@ private:
   bool straight_head(const Poly &pts, float length, cv::Point2f &a,
                      cv::Point2f &b) const;
   void learn_width(const Poly &left, const Poly &right);
+  bool pitch_from_pair(const cv::Point2f ha[2], const cv::Point2f hb[2],
+                       double &pitch) const;
+  void calibrate_pitch(const std::vector<const Poly *> &lines);
   void adapt_threshold(const cv::Mat &rel, const std::vector<const Poly *> &obs);
 
   bool target_on(const Poly &path, float L, cv::Point2f &target,
@@ -513,6 +575,8 @@ private:
   bool ground_to_img(const cv::Point2f &g, cv::Point2d &p) const;
   static bool to_image(double pitch, double f, double h, double cx, double cy,
                        double X, double Z, double &u, double &v);
+  static cv::Point2f to_ground(double pitch, double f, double h, double cx,
+                               double cy, double u, double v);
   double ground_dist_m(double y) const;
 
   static float dist_to_polyline(const cv::Point2f &p, const Poly &poly,
@@ -559,6 +623,7 @@ private:
   cv::Mat mapx_, mapy_; // CV_32F, toa do khung lam viec
   cv::Mat valid_;       // CV_8U 0/255
   cv::Mat glare_;       // CV_8U 0/255, vung loa den cua frame dang xu ly
+  cv::Mat rel_;         // CV_8U, do toi tuong doi cua frame dang xu ly
   int n_valid_ = 1;
   std::vector<float> z_near_col_; // Z gan nhat nhin thay theo tung cot
 
@@ -570,23 +635,6 @@ private:
 
   std::atomic<bool> running_{false};
   std::thread worker_;
-
-  // ---- Ghi anh (xem set_record_dir) ----
-  struct RecItem {
-    cv::Mat img;
-    std::string name;
-    std::string csv;
-  };
-  void record_loop();
-  void stop_recorder();
-  std::string rec_dir_;
-  std::atomic<bool> rec_on_{false};
-  bool rec_running_ = false;
-  std::thread rec_thread_;
-  std::mutex rec_mtx_;
-  std::condition_variable rec_cv_;
-  std::deque<RecItem> rec_q_;
-  static constexpr size_t REC_QUEUE_MAX = 60;
 
   mutable std::atomic<bool> vis_wanted_{true};
 
@@ -608,13 +656,17 @@ private:
 
   Track left_;
   Track right_;
-  float lane_w_m_ = LANE_W_INIT_M;      // be rong hoc dai han (trung vi)
-  float lane_w_local_ = LANE_W_INIT_M;  // be rong vua do (EMA), dung khi 1 vach
-  float lane_w_local_age_ = 0.0f;       // s tu lan cuoi do duoc be rong
-  bool have_width_ = false;             // da do duoc be rong lan nao chua
+  float lane_w_m_ = 0.42f;     // be rong hoc dai han (trung vi doan thang)
+  float lane_w_local_ = 0.42f; // be rong tai cho (frame 2 vach gan nhat)
+  float lane_w_local_age_ = 0.0f;
   std::deque<float> width_samples_;
+  std::deque<float> pitch_samples_;
+  bool pitch_confirmed_ = false;
+  double pending_pitch_ = -1.0; // goc cui moi, ap dung o frame sau
+  bool pending_reset_ = false;
   float dark_ratio_ = DARK_RATIO_INIT;
   float contrast_ = -1.0f;
+  float contrast_age_ = 0.0f; // giay tu lan cuoi do duoc contrast_
   float last_fill_ = 0.0f;
   float speed_est_ = 0.0f;
   float dt_ = 0.04f;

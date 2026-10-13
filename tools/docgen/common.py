@@ -11,8 +11,8 @@ from docx.oxml import OxmlElement
 
 # <repo>/tools/docgen/common.py -> <repo>
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-HPP_PATH = os.path.join(BASE, "src", "camera_node", "camera_node.hpp")
-CPP_PATH = os.path.join(BASE, "src", "camera_node", "camera_node.cpp")
+HPP_PATH = os.path.join(BASE, "src", "camera_node", "lane_detector.hpp")
+CPP_PATH = os.path.join(BASE, "src", "camera_node", "lane_detector.cpp")
 FUSION_PATH = os.path.join(BASE, "src", "fusion_node", "fusion_viz_node.cpp")
 OUT = os.path.join(BASE, "docs", "camera_lane_phan_tich.docx")
 
