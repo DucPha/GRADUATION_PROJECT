@@ -14,6 +14,7 @@ fusion.launch.py <tên>=<giá trị>` hoặc `./run.sh <tên>:=<giá trị>`).
 - **Đường vàng** = đường tâm làn (vạch dời vào trong nửa bề rộng làn)
 - **Vòng tròn vàng** = điểm ngắm pure pursuit (cách xe 0.70 m), nối với mũi xe
 - **Vạch tím** = chân trời
+- **Mảng tím mờ** = vùng cháy sáng (đèn trần phản chiếu trên cao su bóng); vạch mất ở đây là do lóa, không phải lỗi detector
 - Chữ: `2 LANES` / `1 LANE (L|R)` / `LOST`, dấu `*` = frame bị chặn nhảy
 - Thanh trên: `dev` (px ảnh 640 + cm tương đương), `w` bề rộng làn đã học, `v` hệ số tốc
   độ, `k` độ cong (1/m), `ctr` độ tương phản mask, `lines` số vạch ứng viên
@@ -26,11 +27,34 @@ fusion.launch.py <tên>=<giá trị>` hoặc `./run.sh <tên>:=<giá trị>`).
 | `MIN_LINE_LEN_M` | 0.15 | vạch (sau khi nối) ngắn hơn thì bỏ; vết bẩn ngắn bị nhận là vạch thì tăng |
 | `MIN_SEG_LEN_M` | 0.06 | đoạn vạch ngắn hơn thì bỏ trước khi nối |
 | `LINK_GAP_M` / `LINK_ANGLE_DEG` | 0.35 / 40 | nối đoạn đứt do lóa: khoảng hở / lệch hướng tối đa |
-| `LANE_W_MIN_M` / `LANE_W_MAX_M` | 0.35 / 0.85 | bề rộng làn chấp nhận được |
+| `LINK_GAP_GLARE_M` | 0.60 | khoảng hở cho phép khi điểm giữa khoảng hở nằm trong vùng cháy sáng |
+| `LANE_W_MIN_M` / `LANE_W_MAX_M` | 0.50 / 0.85 | bề rộng làn chấp nhận được |
 | `PRIOR_MATCH_M` | 0.12 | vạch cách vạch frame trước ít hơn mức này thì giữ nhãn trái/phải cũ |
-| `MIN_BLOB_PX` | 10 | thành phần liên thông nhỏ hơn thì coi là nhiễu |
+| `MIN_BLOB_PX` | 10 | thành phần liên thông nhỏ hơn thì coi là nhiễu (tự nhân tỉ lệ theo `WORK_W`) |
+| `WORK_W` | 960 | bề ngang khung xử lý; **960 = đúng ảnh giải mã (1920×1080→960×540), không resample**. Máy yếu hạ về 640/320 (mọi hằng số px tự nhân tỉ lệ) |
 
-## 1b. Chân trời — chỉnh ĐẦU TIÊN
+## 1a. Từ chối vật thể không phải vạch (chống lao vào chân ghế / gầm bàn)
+
+| Hằng số | Mặc định | Khi nào chỉnh |
+|---|---|---|
+| `TAPE_THICK_RATIO_MAX` | 1.8 | bề dày (mặt đất) xa/gần tối đa; **chân ghế / vật đứng** vượt mức này ⇒ loại. Vạch thật bị loại oan thì tăng (2.2–2.5) |
+| `TAPE_ASPECT_MIN` | 3.5 | dài/bề dày tối thiểu; vết bẩn bầu bị loại oan thì giảm |
+| `TAPE_SIDE_BRIGHT_MARGIN` | 8 | hai bên pháp tuyến phải sáng hơn lõi vạch bao nhiêu mức xám; nền tối ⇒ giảm |
+| `TAPE_SIDE_PASS_FRAC` | 0.60 | tỉ lệ điểm phải đạt phép thử hai bên; vạch bị lóa nhiều ⇒ giảm (0.4) |
+
+Muốn **tắt hẳn** bước từ chối để so sánh: đặt `TAPE_THICK_RATIO_MAX` lớn (vd `9.0`),
+`TAPE_ASPECT_MIN = 0.0`, `TAPE_SIDE_PASS_FRAC = 0.0`.
+
+## 1b. Tăng cường ảnh (thay cho `GaussianBlur` cũ)
+
+| Hằng số | Mặc định | Khi nào chỉnh |
+|---|---|---|
+| `USE_DENOISE` / `DENOISE_D` / `DENOISE_SIGMA_COLOR` | 1 / 5 / 30 | khử nhiễu giữ cạnh; nhiễu nền nhiều ⇒ tăng `DENOISE_SIGMA_COLOR`, giảm nếu vạch mờ |
+| `USE_CLAHE` / `CLAHE_CLIP` / `CLAHE_TILE` | 1 / 2.0 / 8 | cân bằng sáng cục bộ; vùng lóa/bóng vẫn mất vạch ⇒ tăng `CLAHE_CLIP` (3–4) |
+| `USE_UNSHARP` / `UNSHARP_AMOUNT` | 1 / 0.5 | làm nét bù hạ mẫu; nhiễu lấm tấm trong mask ⇒ giảm (0.2) hoặc tắt |
+| `GLARE_V_MIN` / `GLARE_S_MAX` | 225 / 40 | ngưỡng nhận "vùng cháy sáng" (V cao, bão hòa thấp) |
+
+## 1c. Chân trời — chỉnh ĐẦU TIÊN
 
 `horizon_frac` (launch, mặc định `0.20`) là hàng chân trời theo tỉ lệ chiều cao ảnh. Mọi
 phép đổi pixel ↔ mét (bề rộng làn, bề dày vạch, toạ độ mặt đất) dựa vào nó; sai ⇒ bề rộng

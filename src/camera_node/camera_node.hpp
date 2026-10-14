@@ -13,14 +13,16 @@
 // CAMERA LANE - bam vach lan MOI HUONG tren mat dat (khong warp IPM)
 // ----------------------------------------------------------------------------
 // Camera doc MJPG (mac dinh 1920x1080), tu giai ma bang libjpeg-turbo o 1/2
-// kich thuoc. Detector cat ROI roi thu ve WORK_W = 320 cot; chieu cao khung lam
-// viec GIU DUNG TI LE anh goc (1920x1080 -> 320x180) nen tieu cu doc = ngang.
+// kich thuoc. Detector cat ROI roi thu ve WORK_W cot; chieu cao khung lam viec
+// GIU DUNG TI LE anh goc (1920x1080 -> 640x360) nen tieu cu doc = ngang.
 //
 // ROI la HINH CHU NHAT PHU HET BE NGANG anh (khong con hinh thang): xe lech
 // sat 1 vach hay vao cua gat thi vach van nam trong vung xu ly.
 //
 // Quy trinh moi frame:
-//   1. cat ROI -> xam -> blur
+//   1. cat ROI -> thu nho (INTER_AREA) -> TANG CUONG ANH: khu nhieu giu canh
+//      (bilateral), can bang sang cuc bo (CLAHE), lam net nhe (unsharp). Dong
+//      thoi tinh mat na MAU (ghe/vat mau) va mat na CHAY SANG (den tran).
 //   2. TRU NEN chong loa: nen = dong hinh thai hoc bang kernel VUONG-ish (lap
 //      ca vach doc, cheo lan NGANG), diff = nen - anh
 //   3. BU LOA: vung nen sang (den tran) bi camera nen tuong phan -> nhan diff
@@ -28,7 +30,10 @@
 //   4. Thanh phan lien thong -> doi tung pixel sang toa do MAT DAT (met) ->
 //      PCA -> chia doan doc truc chinh -> duong tam vach + be day vach.
 //      Khong phu thuoc huong: vach doc, cheo, nam ngang (cua gat) deu bam duoc.
-//   5. Noi cac doan vach bi dut (loa, mon bang keo) neu thang hang tren mat dat
+//      TU CHOI vat the gia (chan ghe, gam ban, bong): vach phai thon/dai, be
+//      day tren mat dat gan nhu khong doi theo khoang cach, 2 ben sang hon loi.
+//   5. Noi cac doan vach bi dut (loa, mon bang keo) neu thang hang tren mat dat;
+//      cho ho nam trong VUNG CHAY SANG duoc noi dai hon.
 //   6. Gan nhan TRAI/PHAI (uu tien khop vach frame truoc, khong thi xet xe
 //      nam ben nao cua vach) -> chon cap gan xe nhat, kiem tra be rong lan
 //   7. Duong tam lan = vach doi vao trong nua be rong lan theo PHAP TUYEN
@@ -89,14 +94,30 @@ public:
   // Kich thuoc xu ly
   // ------------------------------------------------------------------------
 
-  // Be ngang khung lam viec. Chieu cao = WORK_W * frame_h / frame_w.
-  static constexpr int WORK_W = 320;
+  // Be ngang khung lam viec. Chieu cao work_h_ = WORK_W * frame_h / frame_w,
+  // tinh luc chay o update_geometry() -> LUON GIU DUNG TI LE anh goc.
+  // Camera 1920x1080 giai ma o 1/2 = 960x540 -> WORK_W=960 cho khung lam viec
+  // 960x540 DUNG BANG anh giai ma: khong con buoc resample nao -> net nhat.
+  // Cong thuc pinhole khong doi vi (x - cx) va (y - horizon) cung nhan ti le
+  // theo -> met khong doi. Nhe may hon: dat 640 (van decode 960) hoac 320.
+  static constexpr int WORK_W = 960;
+
+  // Cac hang so PIXEL ben duoi duoc hieu chinh o anh THAM CHIEU be ngang nay.
+  // Code tu nhan ti le khi WORK_W khac (xem scaled_px()).
+  static constexpr int WORK_REF_W = 320;
 
   // Anh tham chieu cho dev_px (xem dau file)
   static constexpr int DEV_REF_W = 640;
 
   // Anh quan sat gui cho GUI duoc thu ve be ngang nay
   static constexpr int VIS_W = 640;
+
+  // Be ngang toi thieu khi giai ma MJPG: giai ma 2^k lan sao cho rong >= muc
+  // nay. Lay max(WORK_W, VIS_W): vua du cho detector, vua du net cho overlay,
+  // va QUAN TRONG la khong bao gio phai PHONG TO (upscale) khung lam viec.
+  // Vi du camera 1920x1080: WORK_W=640 -> giai ma 960; WORK_W=960 -> 960 (dung
+  // luon anh giai ma, khong resample); WORK_W=1920 -> giai ma full 1920.
+  static constexpr int DECODE_MIN_W = WORK_W > VIS_W ? WORK_W : VIS_W;
 
   // ROI it nhat bay nhieu hang
   static constexpr int ROI_MIN_ROWS = 16;
@@ -108,13 +129,32 @@ public:
   // Tien xu ly anh
   // ------------------------------------------------------------------------
 
-  static constexpr int BLUR_KSIZE = 5;
+  // ---- Khu nhieu giu canh (bilateral) thay Gaussian ----------------------
+  // Gaussian mo deu tay lam vach xa / vach mong bien mat; bilateral giu canh
+  // vach (den <-> san) trong khi lam phang nhieu san.
+  static constexpr bool USE_DENOISE = true;
+  static constexpr int DENOISE_D = 5;
+  static constexpr double DENOISE_SIGMA_COLOR = 30.0;
+  static constexpr double DENOISE_SIGMA_SPACE = 6.0;
+
+  // ---- Can bang sang cuc bo (CLAHE) --------------------------------------
+  // Vung loa den tran / bong do lam vach mat tuong phan; CLAHE keo tuong phan
+  // cuc bo len ma khong khuech dai nhieu toan cuc nhu can bang histogram thuong.
+  static constexpr bool USE_CLAHE = true;
+  static constexpr double CLAHE_CLIP = 2.0;
+  static constexpr int CLAHE_TILE = 8;
+
+  // ---- Lam net nhe (unsharp) bu mo do ha mau -----------------------------
+  static constexpr bool USE_UNSHARP = true;
+  static constexpr double UNSHARP_AMOUNT = 0.5;
+  static constexpr double UNSHARP_SIGMA = 1.0;
 
   // Chenh lech toi thieu giua nhom "vach" va nhom "nen" (Otsu tren diff)
   static constexpr double MIN_CONTRAST = 12.0;
 
   // TRU NEN: kernel dong phai lon hon BE DAY vach theo MOI huong. Vach doc
-  // sat xe rong toi ~40 px, vach NGANG (cua gat) day toi ~20 hang -> 45x25.
+  // sat xe rong toi ~40 px, vach NGANG (cua gat) day toi ~20 hang -> 45x25
+  // (px THAM CHIEU o WORK_REF_W=320; scaled_px() tu nhan ti le khi WORK_W khac).
   // Kernel cu 61x5 chi lap duoc vach doc: vach nam ngang day hon 5 hang bi
   // coi la nen -> mat sach o anh nhi phan dung luc vao cua gat.
   static constexpr int BG_KERNEL_W = 45;
@@ -129,6 +169,12 @@ public:
   // duoc keo len ngang vach ngoai vung loa.
   static constexpr float GLARE_GAIN_MAX = 2.5f;
 
+  // VUNG CHAY SANG (den tran phan chieu tren cao su bong): V cao, bao hoa thap.
+  // Vach bi lóa -> mat o mask tao ra cho ho; cho nay duoc phep NOI DAI hon
+  // (xem LINK_GAP_GLARE_M) va duoc ve tim tren overlay de biet cho thieu vach.
+  static constexpr int GLARE_V_MIN = 225;
+  static constexpr int GLARE_S_MAX = 40;
+
   // So dai ngang khi khoet khoi day (ban kinh doi theo phoi canh)
   static constexpr int THICK_BANDS = 4;
   static constexpr bool THICK_REMOVE = true;
@@ -140,8 +186,20 @@ public:
   static constexpr int COLOR_MAX_SAT = 100;
   static constexpr int COLOR_MIN_V = 60;
 
-  // Thanh phan lien thong nho hon so pixel nay la nhieu
+  // Thanh phan lien thong nho hon so pixel nay la nhieu (nhan ti le theo WORK_W)
   static constexpr int MIN_BLOB_PX = 10;
+
+  // ---- Tu choi vat the KHONG phai vach (chan ghe, gam ban, bong, mep ban) --
+  // Vach thuc la mot SOI cao su: thon, dai, BE DAY TREN MAT DAT GAN NHU KHONG
+  // DOI theo khoang cach, va co SAN SANG 2 BEN. Vat the dung (chan ghe) khi
+  // chieu xuong mat dat se co be day TANG dan theo xa -> bi loai boi
+  // TAPE_THICK_RATIO_MAX. Vung toi lon (gam ban, bong) co be day > TAPE_MAX_M.
+  static constexpr float TAPE_THICK_RATIO_MAX = 1.8f; // be day xa / be day gan
+  static constexpr float TAPE_ASPECT_MIN = 3.5f;      // dai / day toi thieu
+  // San sang 2 ben phap tuyen cua vach phai hon loi it nhat muc xam nay
+  static constexpr int TAPE_SIDE_BRIGHT_MARGIN = 8;
+  // Ti le diem tren vach dat duoc phep kiem tra 2 ben (0..1)
+  static constexpr float TAPE_SIDE_PASS_FRAC = 0.60f;
 
   // ------------------------------------------------------------------------
   // Bam vach tren mat dat (met)
@@ -162,12 +220,14 @@ public:
   static constexpr float MIN_SEG_LEN_M = 0.06f;
   static constexpr float MIN_LINE_LEN_M = 0.15f;
 
-  // Noi doan vach dut: khoang ho toi da, goc lech huong toi da (do)
+  // Noi doan vach dut: khoang ho toi da, goc lech huong toi da (do).
+  // Cho ho nam trong VUNG CHAY SANG (lóa den tran) duoc noi dai hon.
   static constexpr float LINK_GAP_M = 0.35f;
+  static constexpr float LINK_GAP_GLARE_M = 0.60f;
   static constexpr float LINK_ANGLE_DEG = 40.0f;
 
   // Be rong lan chap nhan / mac dinh (tu hoc lai khi du 2 vach)
-  static constexpr float LANE_W_MIN_M = 0.35f;
+  static constexpr float LANE_W_MIN_M = 0.50f;
   static constexpr float LANE_W_MAX_M = 0.85f;
   static constexpr float LANE_W_DEFAULT_M = 0.55f;
   static constexpr float LANE_W_ALPHA = 0.2f;
@@ -346,21 +406,31 @@ private:
 
   bool detect(const cv::Mat &frame, LaneOutput &out, bool draw);
 
-  // Buoc 2-3: anh xam ROI co le (gray_ext) -> mask nhi phan 0/1 cua ROI
+  // Nhan ti le hang so pixel hieu chinh o WORK_REF_W sang WORK_W hien tai
+  static int scaled_px(int v);
+
+  // Buoc 2: BGR (da ha mau, co le) -> xam + mat na mau + mat na chay sang.
+  // Khu nhieu giu canh, can bang sang cuc bo (CLAHE), lam net nhe.
+  void enhance(const cv::Mat &small_bgr, cv::Mat &gray, cv::Mat &colored,
+               cv::Mat &glare) const;
+
+  // Buoc 3: anh xam ROI co le (gray_ext) -> mask nhi phan 0/1 cua ROI
   // (rows hang, bat dau tu hang row0 cua gray_ext)
-  void build_mask(const cv::Mat &gray_ext, int row0, int rows, int top,
+  void build_mask(const cv::Mat &gray_ext, int row0, int rows,
                   cv::Mat &bin, double &contrast) const;
 
   // Khoet khoi toi DAY hon vach (ghe, vat can, bong) dinh vao vach
   void remove_thick(cv::Mat &bin, int top) const;
 
-  // Buoc 4: thanh phan lien thong -> doan vach tren mat dat
-  void extract_segments(const cv::Mat &bin, int top,
+  // Buoc 4: thanh phan lien thong -> doan vach tren mat dat.
+  // gray_roi: anh xam dung bang ROI (hang 0 = hang `top` cua khung lam viec),
+  // dung de kiem tra "2 ben vach sang hon loi" (loai chan ghe / bong).
+  void extract_segments(const cv::Mat &bin, const cv::Mat &gray_roi, int top,
                         std::vector<LinePath> &segs) const;
 
-  // Buoc 5: noi doan vach dut thanh vach dai
-  void link_segments(std::vector<LinePath> &segs,
-                     std::vector<LinePath> &lines) const;
+  // Buoc 5: noi doan vach dut thanh vach dai. Vung chay sang duoc noi dai hon.
+  void link_segments(std::vector<LinePath> &segs, std::vector<LinePath> &lines,
+                     const cv::Mat &glare_roi, int top) const;
 
   // Xe nam ben nao cua vach (xet doan gan xe), < 0: xe ben phai vach
   float car_side(const LinePath &line) const;

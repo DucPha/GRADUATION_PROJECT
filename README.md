@@ -217,12 +217,22 @@ Các topic ảnh chỉ được phát khi có subscriber.
 
 **Camera 1920x1080 MJPG** → tự giải mã bằng libjpeg-turbo ở **1/2 kích thước** (960x540,
 ~7 ms thay vì ~15 ms, và tắt cảnh báo `Corrupt JPEG data` mà camera này gây ra mỗi frame)
-→ cắt ROI **hình chữ nhật phủ hết bề ngang ảnh** (không còn hình thang) → xám → thu về
-**320 cột, giữ đúng tỉ lệ 16:9 (320x180)** → Gaussian blur(5,5) → **trừ nền + bù lóa** →
-Otsu + **ngưỡng trễ** → bám vạch.
+→ cắt ROI **hình chữ nhật phủ hết bề ngang ảnh** (không còn hình thang) → **tăng cường
+ảnh**: khử nhiễu giữ cạnh (**bilateral**), cân bằng sáng cục bộ (**CLAHE**), làm nét nhẹ
+(**unsharp**), giữ khung làm việc **960 cột, đúng tỉ lệ 16:9 (960x540)** → **trừ nền + bù
+lóa** → Otsu + **ngưỡng trễ** → **từ chối vật thể không phải vạch** → bám vạch.
 
-Khung làm việc giữ đúng tỉ lệ ảnh gốc (1920x1080 → 320x180, 640x480 → 320x240), nên
-tiêu cự dọc = tiêu cự ngang và công thức pinhole đúng với mọi độ phân giải.
+**Tăng cường ảnh (`enhance`)** thay cho `GaussianBlur(5,5)` cũ (Gaussian mờ đều tay làm
+vạch xa / vạch mỏng mất): bilateral làm phẳng nhiễu sàn nhưng giữ cạnh đen↔sáng của vạch;
+CLAHE kéo tương phản **cục bộ** nên vùng lóa đèn trần / bóng đổ vẫn nổi vạch; unsharp bù
+mờ do bước hạ mẫu. `WORK_W` mặc định **960** = đúng bề ngang ảnh đã giải mã (960x540) nên
+**không còn bước resample nào**. Máy yếu: hạ về **640** (vẫn giải mã 960) hoặc **320** —
+mọi hằng số pixel tự nhân tỉ lệ (`scaled_px`), `dev_px` không đổi.
+
+Khung làm việc luôn giữ đúng tỉ lệ ảnh gốc: `work_h = WORK_W × frame_h / frame_w`
+(1920x1080 → 960x540), nên tiêu cự dọc = tiêu cự ngang và công thức pinhole đúng với mọi
+độ phân giải. Chỉ cần `WORK_W ≤` bề ngang ảnh giải mã (nếu không sẽ phóng to — có cảnh báo
+lúc khởi động).
 
 **Bám vạch trên mặt đất, thay cho cửa sổ trượt theo hàng.** Cửa sổ trượt cũ chia ROI thành
 6 dải ngang và tìm 1 đỉnh cột trong mỗi dải, nên vạch nằm ngang / chéo màn hình ở cua gắt
@@ -231,16 +241,23 @@ tiêu cự dọc = tiêu cự ngang và công thức pinhole đúng với mọi 
 1. Thành phần liên thông trên mask → đổi **từng pixel** sang toạ độ mặt đất (X sang phải,
    Z về phía trước, mét) bằng pinhole.
 2. PCA tìm trục chính → chia đoạn 3 cm dọc trục → điểm tâm vạch từng đoạn + bề dày vạch.
-   Bề dày trung vị > 12 cm (bóng, vật cản) ⇒ loại. Không giả định vạch chạy dọc ảnh: vạch
-   dọc, chéo, nằm ngang đều bám như nhau. Overlay vẽ các ô vuông dọc theo vạch.
-3. **Nối đoạn đứt** (lóa, băng keo mòn): đoạn sau nằm trên đường kéo dài của đoạn trước
-   (khoảng hở ≤ 35 cm, lệch hướng ≤ 40°) thì nối.
-4. **Nhãn trái/phải:** ưu tiên khớp vạch của frame trước (≤ 12 cm); không khớp thì xét xe
+   Không giả định vạch chạy dọc ảnh: vạch dọc, chéo, nằm ngang đều bám như nhau. Overlay
+   vẽ các ô vuông dọc theo vạch.
+3. **Từ chối vật thể không phải vạch** (gầm bàn, chân ghế, bóng đổ — nguyên nhân xe lao vào
+   vật cản). Vạch thật là một **sợi cao su**: (a) bề dày trung vị > 12 cm ⇒ loại (mảng tối
+   rộng); (b) **dài/thon** — `dài/bề dày ≥ 3.5`; (c) **bề dày trên mặt đất gần như không đổi
+   theo khoảng cách** — vật thể đứng (chân ghế) khi chiếu xuống mặt đất có bề dày **tăng dần
+   theo xa**, tỉ lệ xa/gần > 1.8 ⇒ loại; (d) **hai bên pháp tuyến sáng hơn lõi** ≥ 8 mức xám
+   trên ≥ 60% số điểm (mép bóng / vùng tối rộng chỉ sáng 1 bên ⇒ loại).
+4. **Nối đoạn đứt** (lóa, băng keo mòn): đoạn sau nằm trên đường kéo dài của đoạn trước
+   (khoảng hở ≤ 35 cm, lệch hướng ≤ 40°) thì nối. Nếu điểm giữa khoảng hở nằm trong **vùng
+   cháy sáng** (đèn trần phản chiếu) thì cho nối xa hơn (≤ 60 cm).
+5. **Nhãn trái/phải:** ưu tiên khớp vạch của frame trước (≤ 12 cm); không khớp thì xét xe
    nằm bên nào của vạch (hướng vạch = gần xe → xa xe). Ở cua phải gắt, vạch trái chạy từ
    trái-gần sang phải-xa nhưng xe vẫn ở bên phải nó ⇒ vẫn là vạch trái.
-5. Chọn vạch trái/phải gần xe nhất, đo **bề rộng làn bằng khoảng cách vuông góc trên mặt
-   đất** (35–85 cm) ⇒ `2 LANES`; chỉ 1 vạch dùng được ⇒ `1 LANE`.
-6. **Đường tâm** = vạch dời vào trong nửa bề rộng làn theo **pháp tuyến** (phía có xe), nên
+6. Chọn vạch trái/phải gần xe nhất, đo **bề rộng làn bằng khoảng cách vuông góc trên mặt
+   đất** (50–85 cm) ⇒ `2 LANES`; chỉ 1 vạch dùng được ⇒ `1 LANE`.
+7. **Đường tâm** = vạch dời vào trong nửa bề rộng làn theo **pháp tuyến** (phía có xe), nên
    vẫn đúng khi chỉ còn 1 vạch nằm ngang trước mũi xe.
 
 **`dev_px` của camera** (dùng khi `steer_mode:=camera`): pure pursuit tới điểm cách chân

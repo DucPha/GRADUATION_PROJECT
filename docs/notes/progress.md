@@ -52,3 +52,41 @@ Giai đoạn 1 — sửa `camera_node` — **đã xong**.
 - Mask ROI hình thang dùng `half_top = WORK_W/6` — chưa đo lại trên ảnh thật.
 - Chưa đổi firmware. `dev_px` giữ nguyên đơn vị pixel nên protocol không đổi.
 - Yêu cầu dọn code thừa trong `.ino` vẫn chưa làm (hoãn, ngoài phạm vi camera).
+
+---
+
+## 2026-10-15 — Nâng cấp pipeline detector (tăng cường ảnh + chống vật thể giả + độ phân giải)
+
+Bối cảnh: vạch băng keo cao su **đen** bị **lóa đèn trần**, mất vạch ở cua, và các **mảng tối
+(gầm bàn, chân ghế)** bị nhận nhầm thành vạch ⇒ xe lao vào vật cản. `GaussianBlur(5,5)` cũ làm
+mờ vạch mỏng/xa.
+
+### Thay đổi
+- **`WORK_W` 320 → 960** (khung xử lý 960×540 cho 16:9, đúng bằng ảnh giải mã 1/2 của
+  camera 1920×1080 nên không còn bước resample). Mọi hằng số pixel ghi theo ảnh tham
+  chiếu 320 và tự nhân tỉ lệ qua `CameraLane::scaled_px()`; đặt lại 320/640 là quay về nhẹ hơn.
+  Công thức pinhole không đổi (đã kiểm tra: `(x−cx)` và `(y−horizon)` cùng nhân tỉ lệ).
+- **`enhance()` mới** thay `GaussianBlur` trong `detect()`: bilateral (giữ cạnh) → CLAHE
+  (tương phản cục bộ) → unsharp (bù mờ hạ mẫu). Đồng thời sinh **mặt nạ màu** và **mặt nạ
+  cháy sáng** (`GLARE_V_MIN`/`GLARE_S_MAX`).
+- **Từ chối vật thể giả** trong `extract_segments()`: (a) bề dày trung vị > `TAPE_MAX_M`;
+  (b) dài/thon `≥ TAPE_ASPECT_MIN`; (c) **bề dày mặt đất xa/gần ≤ `TAPE_THICK_RATIO_MAX`**
+  → loại vật thể đứng (chân ghế); (d) **hai bên pháp tuyến sáng hơn lõi** ≥ `TAPE_SIDE_BRIGHT_MARGIN`
+  trên ≥ `TAPE_SIDE_PASS_FRAC` số điểm → loại mép bóng / vùng tối rộng.
+- **Nối qua vùng lóa**: `link_segments()` nhận mặt nạ cháy sáng; nếu điểm giữa khoảng hở nằm
+  trong vùng cháy sáng thì cho hở ≤ `LINK_GAP_GLARE_M` (0.60 m) thay vì `LINK_GAP_M` (0.35 m).
+- Overlay `/lane/vis` thêm **mảng tím mờ** = vùng cháy sáng, để phân biệt lỗi lóa với lỗi detector.
+
+### Đã kiểm chứng
+- `g++ -std=c++17 -fsyntax-only -Wall -Wextra` (thêm `-DJCS_EXT_BGR=JCS_RGB` vì libjpeg
+  MinGW thiếu enum): `camera_node.cpp` exit 0, **0 cảnh báo** từ file của mình; `path_tracker.cpp` exit 0.
+- Đo chi phí bằng `cv2` Python 640×220: đóng hình thái 90×50 = 0.17 ms, bilateral = 0.39 ms,
+  CLAHE = 0.08 ms, `connectedComponentsWithStats` = 1.28 ms ⇒ pipeline mới ước ~3–5 ms/frame,
+  còn xa ngưỡng 38 ms (26 fps).
+
+### Cần kiểm chứng trên Mini PC
+- `colcon build` + chạy ảnh thật; xem `/lane/vis` để chỉnh các ngưỡng mới (mục 1a/1b trong
+  `docs/TUNING.md`). Nếu vạch thật bị loại oan ⇒ tăng `TAPE_THICK_RATIO_MAX` / giảm `TAPE_SIDE_PASS_FRAC`.
+- Có thể đặt camera 640×480 để decode rẻ hơn (decode thẳng 640, không qua 960×540).
+- Chưa thêm cue **Canny/cạnh tường minh** (hiện cạnh được tăng cường gián tiếp nhờ CLAHE +
+  unsharp + phép thử hai bên); cân nhắc nếu vẫn thiếu vạch ở vùng tương phản thấp.
