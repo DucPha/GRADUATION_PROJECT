@@ -17,6 +17,8 @@
 // van bi day len 95 (~1.55 km/h). Tin hieu dung that su la emg = 1.
 //
 // LiDAR: subscribe /scan de quan sat va bao cao, KHONG dua vao quyet dinh lai.
+//
+// FOXGLOVE (laptop, chi de xem): quy dao + TF trong foxglove_viz.hpp.
 // ============================================================================
 
 #include <rclcpp/rclcpp.hpp>
@@ -34,6 +36,7 @@
 #include "esp32s3_node.hpp"
 #include "lidar_node.hpp"
 #include "lane_keeping.hpp"
+#include "foxglove_viz.hpp"
 
 #include <opencv2/imgproc.hpp>
 
@@ -380,6 +383,9 @@ public:
                 "/autocar/dbg/lane_bin/compressed", 1);
         }
 
+        // Quy dao xe + TF cho Foxglove (chi de xem, xem foxglove_viz.hpp)
+        foxglove_ = std::make_unique<FoxgloveViz>(*this, lidar_offset_deg_);
+
         if (enable_lidar) {
             lidar_.set_mount_offset_deg(lidar_offset_deg_);
             lidar_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
@@ -525,6 +531,13 @@ private:
             }
             const double v_mps = v_odom_x10_ / 36.0 * odom_speed_scale_;
             tracker_.predict(v_mps, wheel, t_now);
+            wheel_now_deg_ = wheel;
+            // TF odom -> base_link 50 Hz: slam_toolbox can TF dung luc moi scan
+            if (++tf_tick_ % 2 == 0) {
+                double px = 0.0, pz = 0.0, th = 0.0;
+                tracker_.pose(px, pz, th);
+                foxglove_->publish_tf(px, pz, th);
+            }
             // Camera du doan vi tri vach giua 2 frame theo cung odometry
             camera_->set_motion(static_cast<float>(v_mps), static_cast<float>(wheel));
             if (camera_ok && lane.frame_id != last_obs_frame_) {
@@ -944,6 +957,14 @@ private:
         msg.data = buf;
         status_pub_->publish(msg);
 
+        {
+            const double v_mps = v_odom_x10_ / 36.0 * odom_speed_scale_;
+            const auto& vp = tracker_.params();
+            const double yaw_rate = -v_mps / std::max(0.05, vp.wheelbase_m) *
+                std::tan(std::clamp(wheel_now_deg_, -vp.max_steer_deg, vp.max_steer_deg) * M_PI / 180.0);
+            foxglove_->publish_paths(v_mps, yaw_rate);
+        }
+
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "%s", buf);
     }
 
@@ -971,6 +992,11 @@ private:
     bool armed_ = false;
 
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+
+    // ---- Foxglove: quy dao / TF (cung nhom ctrl) ----
+    std::unique_ptr<FoxgloveViz> foxglove_;
+    double wheel_now_deg_ = 0.0;    // goc banh dang ap dung (do)
+    long tf_tick_ = 0;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr vis_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr vis_jpg_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr raw_pub_;

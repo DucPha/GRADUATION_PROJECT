@@ -14,6 +14,10 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 
 # Local package dependencies (exported via ament)
@@ -23,6 +27,7 @@ find_package(sllidar_ros2_node REQUIRED)
 
 add_executable(fusion_node
   fusion_viz_node.cpp
+  foxglove_viz.cpp
 )
 
 # fusion_viz_node.cpp include opencv2/core/mat.hpp -> can truc tiep OpenCV_INCLUDE_DIRS
@@ -36,6 +41,10 @@ ament_target_dependencies(fusion_node
   rclcpp
   sensor_msgs
   std_msgs
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
   camera_node
   esp32s3_node
   sllidar_ros2_node
@@ -47,7 +56,7 @@ ament_target_dependencies(fusion_node
 target_link_libraries(fusion_node ${OpenCV_LIBS})
 
 # Export dependencies for downstream packages (if any)
-ament_export_dependencies(rclcpp sensor_msgs std_msgs camera_node esp32s3_node sllidar_ros2_node OpenCV)
+ament_export_dependencies(rclcpp sensor_msgs std_msgs geometry_msgs nav_msgs tf2 tf2_ros camera_node esp32s3_node sllidar_ros2_node OpenCV)
 
 install(TARGETS fusion_node
   DESTINATION lib/${PROJECT_NAME}

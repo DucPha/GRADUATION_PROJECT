@@ -82,6 +82,10 @@ trap cleanup EXIT INT TERM
 set -m
 
 echo "==== KHOI DONG XE (camera + ESP32 /dev/ttyUSB0 + LiDAR /dev/ttyUSB1) ===="
+# Laptop cung WiFi: Foxglove -> Open connection -> Foxglove WebSocket -> dia chi duoi
+for ip in $(hostname -I); do
+	case "$ip" in *:*) ;; *) echo "  Foxglove: ws://$ip:8765" ;; esac
+done
 ros2 launch fusion_node fusion.launch.py "${ARGS[@]}" &
 VEHICLE_PID=$!
 

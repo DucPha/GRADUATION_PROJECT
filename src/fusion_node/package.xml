@@ -12,6 +12,10 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
   <depend>libopencv-dev</depend>
 
   <depend>camera_node</depend>
@@ -21,6 +25,8 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rplidar_ros</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
   <!-- launch dung pyserial de do cong ESP32 khi /dev/ttyUSB0 khong ton tai -->
   <exec_depend>python3-serial</exec_depend>
   <!-- dashboard src/gui/gui.py -->

@@ -17,7 +17,10 @@ import os
 import time
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
+from ament_index_python.packages import get_package_share_directory
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription,
+                            LogInfo, OpaqueFunction)
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -110,6 +113,15 @@ def is_true(value):
     return str(value).strip().lower() in ('true', '1', 'yes', 'on')
 
 
+FOXGLOVE_PORT = 8765
+
+
+def port_busy(port):
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+
 def setup(context, *args, **kwargs):
     esp, lidar, note = resolve_ports(
         LaunchConfiguration('serial_port').perform(context),
@@ -135,6 +147,45 @@ def setup(context, *args, **kwargs):
         ))
     elif enable_lidar:
         actions.append(LogInfo(msg='[fusion] Khong co cong LiDAR: xe van chay, chi khong co /scan.'))
+
+    # Foxglove tren laptop cung mang: Open connection -> Foxglove WebSocket ->
+    # ws://<IP mini PC>:8765 (run.sh in san dia chi). Tat cung launch.
+    # Laptop KHONG duoc publish /autocar/run (khong cho chay xe tu xa).
+    # 12/10: foxglove_bridge chay tay o user khac (ROS_DOMAIN_ID khac) giu
+    # cong -> laptop ket noi duoc nhung khong thay topic nao cua xe.
+    if is_true(LaunchConfiguration('foxglove').perform(context)):
+        if port_busy(FOXGLOVE_PORT):
+            actions.append(LogInfo(msg='[fusion] CANH BAO: cong %d dang bi chuong trinh khac giu '
+                                       '(foxglove_bridge chay tay?). Tat no roi chay lai, neu khong '
+                                       'Foxglove tren laptop co the khong thay topic cua xe.' % FOXGLOVE_PORT))
+        else:
+            actions.append(Node(
+                package='foxglove_bridge',
+                executable='foxglove_bridge',
+                name='foxglove_bridge',
+                output='log',
+                parameters=[{
+                    'port': FOXGLOVE_PORT,
+                    'address': '0.0.0.0',
+                    'client_topic_whitelist': ['^(?!/autocar/run$).*'],
+                }],
+            ))
+
+    # slam_toolbox: ban do LiDAR + TF map -> odom -> /autocar/path_map khong
+    # troi (odometry lenh ga + goc lai troi ~30 m sau vai vong, 12/10)
+    if is_true(LaunchConfiguration('slam').perform(context)):
+        if enable_lidar and lidar:
+            actions.append(IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(
+                    get_package_share_directory('slam_toolbox'), 'launch', 'online_async_launch.py')),
+                launch_arguments={
+                    'use_sim_time': 'false',
+                    'slam_params_file': os.path.join(os.path.dirname(os.path.abspath(__file__)), 'slam.yaml'),
+                }.items(),
+            ))
+        else:
+            actions.append(LogInfo(msg='[fusion] Khong co LiDAR -> khong chay slam_toolbox '
+                                       '(chi co /autocar/path theo odometry).'))
 
     def arg(name):
         return LaunchConfiguration(name)
@@ -275,6 +326,10 @@ def generate_launch_description():
         DeclareLaunchArgument('status_hz', default_value='10'),
         DeclareLaunchArgument('enable_viz', default_value='true'),
         DeclareLaunchArgument('enable_lidar', default_value='true'),
+        DeclareLaunchArgument('foxglove', default_value='true',
+                              description='Chay foxglove_bridge (ws://<IP mini PC>:8765) de xem tren laptop'),
+        DeclareLaunchArgument('slam', default_value='true',
+                              description='Chay slam_toolbox: ban do LiDAR + quy dao /autocar/path_map (frame map)'),
         DeclareLaunchArgument('lidar_mount_offset_deg', default_value='90.0',
                               description='Goc lech lap LiDAR (do): goc_xe = goc_scan + offset, '
                                           '0=truoc 90=trai (REP-103). +90 = goc 0 tho cua RPLIDAR '
