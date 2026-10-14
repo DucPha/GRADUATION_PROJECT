@@ -303,14 +303,6 @@ public:
 
   const VehicleParams &params() const { return p_; }
 
-  // Vi tri truc sau theo odometry (m, goc = luc khoi dong node; X phai, Z
-  // truoc) va huong th (rad, > 0 = da quay sang phai). Chi de ve / debug.
-  void pose(double &x, double &z, double &th) const {
-    x = pose_.x;
-    z = pose_.z;
-    th = pose_.th;
-  }
-
 private:
   struct Pose {
     double x = 0.0, z = 0.0, th = 0.0;

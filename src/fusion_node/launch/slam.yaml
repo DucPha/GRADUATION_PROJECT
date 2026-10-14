@@ -1,6 +1,6 @@
 # slam_toolbox cho Foxglove: ve ban do LiDAR + vi tri xe trong frame map
-# (TF map -> odom) de quy dao /autocar/path_map khong troi nhu odometry
-# lenh ga + goc lai. Chi de XEM, khong dua vao dieu khien xe.
+# (TF map -> odom = vi tri xe, xem foxglove_viz.hpp). Chi de XEM, khong dua
+# vao dieu khien xe.
 # Goc: /opt/ros/jazzy/share/slam_toolbox/config/mapper_params_online_async.yaml
 slam_toolbox:
   ros__parameters:
@@ -12,7 +12,7 @@ slam_toolbox:
     ceres_loss_function: None
     odom_frame: odom
     map_frame: map
-    base_frame: base_link          # fusion_node: odom -> base_link (truc sau)
+    base_frame: base_link          # truc sau xe; odom -> base_link co dinh
     scan_topic: /scan
     use_map_saver: false
     mode: mapping
@@ -31,10 +31,11 @@ slam_toolbox:
     enable_interactive_mode: false
     use_scan_matching: true
     use_scan_barycenter: true
-    # Xe nho, cham (~0.5 m/s that): them nut ban do moi 15 cm / 9 do
-    # (mac dinh 0.5 m / 29 do -> qua thua, quy dao gay khuc)
-    minimum_travel_distance: 0.15
-    minimum_travel_heading: 0.15
+    # odom -> base_link CO DINH (foxglove_viz.cpp: khong dung odometry lenh
+    # ga) -> odom khong bao gio "di chuyen" -> phai xu ly MOI scan (0 / 0),
+    # cach nhau minimum_time_interval; so khop scan tu tim chuyen dong
+    minimum_travel_distance: 0.0
+    minimum_travel_heading: 0.0
     check_min_dist_and_heading_precisely: false
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 8.0

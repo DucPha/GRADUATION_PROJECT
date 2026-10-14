@@ -171,8 +171,8 @@ def setup(context, *args, **kwargs):
                 }],
             ))
 
-    # slam_toolbox: ban do LiDAR + TF map -> odom -> /autocar/path_map khong
-    # troi (odometry lenh ga + goc lai troi ~30 m sau vai vong, 12/10)
+    # slam_toolbox: vi tri xe THAT tu LiDAR (so khop scan voi phong), goc
+    # (0, 0) = cho dat xe luc chay run.sh -> /autocar/pose, /autocar/path
     if is_true(LaunchConfiguration('slam').perform(context)):
         if enable_lidar and lidar:
             actions.append(IncludeLaunchDescription(
@@ -329,7 +329,7 @@ def generate_launch_description():
         DeclareLaunchArgument('foxglove', default_value='true',
                               description='Chay foxglove_bridge (ws://<IP mini PC>:8765) de xem tren laptop'),
         DeclareLaunchArgument('slam', default_value='true',
-                              description='Chay slam_toolbox: ban do LiDAR + quy dao /autocar/path_map (frame map)'),
+                              description='Chay slam_toolbox: vi tri xe tu LiDAR -> /autocar/pose, /autocar/path (frame map)'),
         DeclareLaunchArgument('lidar_mount_offset_deg', default_value='90.0',
                               description='Goc lech lap LiDAR (do): goc_xe = goc_scan + offset, '
                                           '0=truoc 90=trai (REP-103). +90 = goc 0 tho cua RPLIDAR '
