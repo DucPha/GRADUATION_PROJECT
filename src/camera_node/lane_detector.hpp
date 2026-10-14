@@ -31,7 +31,9 @@
 // CAMERA LANE - chi tiet thuat toan (port tu lane_bev.py da chay tren xe)
 // ----------------------------------------------------------------------------
 // Camera doc MJPG (mac dinh 1920x1080), tu giai ma bang libjpeg-turbo o 1/2
-// kich thuoc, thu ve khung lam viec WORK_W = 320 cot (giu dung ti le anh).
+// kich thuoc (960x540), thu ve khung lam viec WORK_W = 960 cot (giu dung ti le
+// anh). WORK_W trung be ngang anh giai ma -> khong con thu nho them lan nua
+// (ban cu 320: 960 -> 320 lam nhoe mep vach). Giam ve 640/320 neu may yeu.
 //
 // HINH HOC CAMERA (do tren anh that cua xe, log Python 2026-10-07/08):
 //   - camera CUI XUONG ~42 do, cao ~0.30 m -> chan troi nam TREN mep anh, mat
@@ -91,8 +93,9 @@ struct CameraProfile {
   // Goc nhin DOC (do). Tieu cu 250 px o anh 320x240 (lane_bev.py) = 51 do.
   float vfov_deg = 51.0f;
 
-  // Be rong lan, tam vach toi tam vach (m). Tu hoc lai khi chay.
-  float lane_width_m = 0.42f;
+  // Be rong lan, tam vach toi tam vach (m). Tu hoc lai khi chay. Gia tri ban
+  // dau nam trong khoang LANE_W_MIN_M..LANE_W_MAX_M (nay 50-85 cm).
+  float lane_width_m = 0.60f;
 
   // Hinh hoc xe (du doan vach giua 2 frame, pure pursuit tu truc sau)
   float cam_to_rear_m = 0.18f; // chan camera nam truoc truc sau (do lai tren xe 2026-10-08)
@@ -111,7 +114,10 @@ public:
   // ------------------------------------------------------------------------
 
   // Be ngang khung lam viec. Chieu cao = WORK_W * frame_h / frame_w.
-  static constexpr int WORK_W = 320;
+  // 960 = be ngang anh giai ma (1920/2) -> khung lam viec 960x540: khong thu
+  // nho them, mep vach sac hon. BEV van 1 cm/o nen chi phi them rat nho (cac
+  // buoc nang chay tren luoi BEV ~160x150 chu khong tren khung lam viec).
+  static constexpr int WORK_W = 960;
 
   // Anh tham chieu cho dev_px (xem dau file)
   static constexpr int DEV_REF_W = 640;
@@ -120,6 +126,10 @@ public:
 
   // Anh quan sat gui cho GUI duoc thu ve be ngang nay
   static constexpr int VIS_W = 960;
+
+  // Be ngang toi thieu khi giai ma MJPG: khong nho hon khung lam viec (neu nho
+  // hon thi resize len = nhoe) va khong nho hon anh quan sat.
+  static constexpr int DECODE_MIN_W = (WORK_W > VIS_W ? WORK_W : VIS_W);
 
   // ------------------------------------------------------------------------
   // Luoi mat san (BEV)
@@ -262,8 +272,9 @@ public:
   // (khong theo be rong da hoc: hoc 0.36 m o doan hep roi toi doan 0.52 m la
   // loai ca cap dung). 13/10: 0.70 -> 0.80: goc camera lech vai do thi be rong o xa
   // vuot 0.70, vach thu 2 bi loai -> chay 1 vach ca doan thang.
-  static constexpr float LANE_W_MIN_M = 0.28f;
-  static constexpr float LANE_W_MAX_M = 0.80f;
+  // 15/10: lan dan lai 50-85 cm -> MIN 0.28 -> 0.50.
+  static constexpr float LANE_W_MIN_M = 0.50f;
+  static constexpr float LANE_W_MAX_M = 0.85f;
   // Be rong lan TAI CHO: do moi frame thay du 2 vach (EMA), dung khi chi
   // thay 1 vach (doi tam nua be rong nay). Lau khong thay 2 vach thi tro ve
   // be rong hoc dai han.
@@ -662,8 +673,8 @@ private:
 
   Track left_;
   Track right_;
-  float lane_w_m_ = 0.42f;     // be rong hoc dai han (trung vi doan thang)
-  float lane_w_local_ = 0.42f; // be rong tai cho (frame 2 vach gan nhat)
+  float lane_w_m_ = 0.60f;     // be rong hoc dai han (trung vi doan thang)
+  float lane_w_local_ = 0.60f; // be rong tai cho (frame 2 vach gan nhat)
   float lane_w_local_age_ = 0.0f;
   std::deque<float> width_samples_;
   std::deque<float> pitch_samples_;

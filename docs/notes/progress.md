@@ -3,6 +3,25 @@
 ## Trạng thái
 Giai đoạn 1 — sửa `camera_node` — **đã xong**.
 
+## 2026-10-15 — nhánh `lane-keeping-fixes` (refactor `lane_detector` + MPC)
+Chuyển sang nhánh mới `lane-keeping-fixes` (14/10: `lane_detector.cpp` BEV + `lane_keeping.cpp` MPC)
+và port các cải tiến detector từ `main`:
+- `WORK_W` 320 → **960**: trùng bề ngang ảnh giải mã (1920/2 = 960) → khung làm việc 960x540,
+  **không thu nhỏ thêm một lần nữa** nên mép vạch sắc hơn. BEV vẫn 1 cm/ô nên chi phí thêm rất nhỏ
+  (các bước nặng chạy trên lưới BEV ~160x150, không trên khung làm việc). Hình học scale-invariant
+  (`f_px_`, `cx`, `vx` đều suy từ `WORK_W`).
+- Thêm `DECODE_MIN_W = max(WORK_W, VIS_W)`: libjpeg không bao giờ giải mã nhỏ hơn khung làm việc
+  (tránh nội suy lên), và in cảnh báo lúc mở camera nếu ảnh giải mã < `WORK_W`.
+- Bề rộng làn: `LANE_W_MIN_M` 0.28 → **0.50**, `LANE_W_MAX_M` 0.80 → **0.85**; `lane_width_m`
+  (giá trị ban đầu) 0.42 → **0.60**; cập nhật `fusion.launch.py`.
+- Các cải tiến khác của `main` (CLAHE + bilateral + unsharp, mask lóa, từ chối vật thể giả, nối
+  qua vùng lóa) **đã có sẵn** trên nhánh này ở dạng đầy đủ hơn (`line_mask` + `filter_clutter` +
+  `GLARE_BRIDGE_STEPS`), nên không port lại.
+
+Kiểm chứng: `g++ -std=c++17 -fsyntax-only -Wall -Wextra -DJCS_EXT_BGR=JCS_RGB` trên
+`lane_detector.cpp` và `lane_keeping.cpp`: exit 0, 0 cảnh báo từ file của mình (chỉ 1 cảnh báo từ
+header OpenCV `exposure_compensate.hpp`). Chưa `colcon build` (phải chạy trên Mini PC).
+
 ## Đã xong
 - Đọc `.agent/skills/karpathy-guidelines`, `.agent/skills/planning-with-files`,
   `.agent/skills/superpowers`, `README.md`.

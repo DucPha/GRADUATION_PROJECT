@@ -4,7 +4,7 @@
 
 | Package | Loại | Vai trò |
 |---|---|---|
-| `camera_node` | thư viện C++ (OpenCV + libjpeg) | `CameraLane`: đọc + giải mã MJPG, nhận làn bằng bám vạch mọi hướng trên mặt đất, vẽ overlay; `PathTracker`: nhớ đường + odometry + pure pursuit từ trục sau. Không phụ thuộc rclcpp |
+| `camera_node` | thư viện C++ (OpenCV + libjpeg) | `CameraLane`: đọc + giải mã MJPG, nhận làn trên lưới mặt sàn (BEV 1 cm) — mask vạch tối (CLAHE + black-hat) + lọc vật thể + bám vạch mọi hướng, vẽ overlay; `lane_keeping`: nhớ đường + odometry + **MPC** giữ làn (pure pursuit dự phòng) + học tỉ số lái. Không phụ thuộc rclcpp |
 | `esp32s3_node` | thư viện C++ | `SerialESP32`: UART 11/7 byte, tự dò cổng bằng telemetry, tự kết nối lại |
 | `sllidar_ros2_node` | thư viện C++ | `LidarModule` + `ObstacleAvoidance` (chưa nối vào phase 1) |
 | `fusion_node` | node ROS 2 | node điều khiển duy nhất: nối 3 thư viện trên + timer + publisher |
@@ -19,7 +19,7 @@ Ba thư viện C++ được `ament_export_libraries` + `ament_export_include_dir
 ```
 USB camera MJPG 1920x1080
       │  CameraLane::capture_loop()   luồng riêng: đọc gói MJPG → libjpeg 1/2 (960x540)
-      │                               → detect() → (vẽ overlay 640x360 nếu có người xem)
+      │                               → detect() → (vẽ overlay 960x540 nếu có người xem)
       ▼
   LaneOutput { state, dev_px (ảnh 640), dev_cm, width, curvature, speed_scale, ... }
       │

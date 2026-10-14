@@ -32,7 +32,7 @@ fusion.launch.py <tên>=<giá trị>` hoặc `./run.sh <tên>:=<giá trị>`).
 | `RADIAL_LINE_DEG` / `RADIAL_LINE_MIN_M` / `RADIAL_KINK_DEG` | 12 / 0.12 / 30 | lọc chân bàn/ghế trên từng VẠCH: đoạn đầu vạch chĩa về camera (chân ghế dính bóng thành chữ V) ⇒ bỏ vạch; đoạn sau góc gập ≥ 30° chĩa về camera (đi dọc băng keo rồi rẽ vào chân ghế đứng sát) ⇒ cắt bỏ đoạn đó |
 | `ZIGZAG_DEG` / `ZIGZAG_GAP_M` | 35 / 0.12 | 2 góc gập ngược chiều sát nhau (răng cưa: mép bóng, rẽ vào hộp giấy) ⇒ cắt vạch tại đó |
 | `LINE_MIN_CONTRAST_FRAC` | 0.75 | độ tối trung vị dọc vạch phải ≥ 0.75 × độ tối của chính vạch đó ở frame trước (vạch mới: so với vạch đang bám nhạt hơn) ⇒ không bám sang vệt bóng. Vạch thật bị bỏ khi đi qua vùng tối ⇒ giảm (0.6) |
-| `LANE_W_MIN_M` / `LANE_W_MAX_M` | 0.28 / 0.70 | khoảng bề rộng làn chấp nhận khi ghép cặp — **tuyệt đối**, không theo bề rộng đã học (làn dán tay rộng hẹp từng đoạn) |
+| `LANE_W_MIN_M` / `LANE_W_MAX_M` | 0.50 / 0.85 | khoảng bề rộng làn chấp nhận khi ghép cặp — **tuyệt đối**, không theo bề rộng đã học (làn dán tay rộng hẹp từng đoạn) |
 | `LANE_W_LOCAL_ALPHA` / `LANE_W_LOCAL_HOLD_SEC` | 0.35 / 3 | bề rộng làn **tại chỗ** (đo mỗi frame thấy 2 vạch); chỉ thấy 1 vạch thì dời tâm nửa bề rộng này |
 
 Vạch trái / phải không bao giờ được trùng hay đổi chỗ cho nhau: vạch bám lại được phải nằm
@@ -50,7 +50,7 @@ phép đổi pixel ↔ mét dựa vào 3 số trong launch:
 | `camera_height_m` | 0.30 | tâm ống kính cách sàn |
 | `camera_vfov_deg` | 51.0 | góc nhìn **dọc**. Chế độ 1920×1080 và 640×480 của cam này cùng góc dọc (4:3 chỉ cắt 2 bên) |
 | `camera_auto_pitch` | false | tự hiệu chỉnh góc cúi khi chạy thẳng thấy 2 vạch (±8° quanh `camera_pitch_deg`). Mặc định TẮT: thử vòng kín, ước lượng nhảy 42 → 44.5 → 42.7° dù góc thật cố định, mỗi lần đổi > 2° còn xoá vạch đang bám. Bật để đo 1 lần: log in `Tu hieu chinh goc cui camera: ... -> X` ⇒ điền X vào `camera_pitch_deg` rồi tắt lại |
-| `lane_width_m` | 0.42 | bề rộng làn **ban đầu** (tâm vạch – tâm vạch). Không cố định: mỗi frame thấy 2 vạch đo lại bề rộng tại chỗ, ghép cặp chấp nhận 0.28–0.70 m |
+| `lane_width_m` | 0.60 | bề rộng làn **ban đầu** (tâm vạch – tâm vạch). Không cố định: mỗi frame thấy 2 vạch đo lại bề rộng tại chỗ, ghép cặp chấp nhận 0.50–0.85 m |
 
 Kiểm tra: đặt xe giữa 2 vạch thẳng, overlay phải hiện `2 LANES` và `w` ≈ bề rộng làn thật.
 Camera cúi ~42° nên **không thấy chân trời** trong ảnh; mặt sàn nhìn thấy từ ~0.13 m tới
@@ -60,6 +60,7 @@ Camera cúi ~42° nên **không thấy chân trời** trong ảnh; mặt sàn nh
 
 | Tham số | Mặc định | Ý nghĩa |
 |---|---|---|
+| `WORK_W` (`lane_detector.hpp`) | 960 | bề ngang **khung làm việc** (= bề ngang ảnh giải mã 1920/2 nên **không thu nhỏ thêm**, mép vạch sắc hơn). Giảm về 640 / 320 nếu Mini PC yếu — hình học scale-invariant, **không đổi** kết quả đo mét |
 | `roi_top_frac` (launch) | 0.0 | bỏ qua phần trên cùng của ảnh (mặc định dùng hết, ~1.1 m) |
 | `roi_bottom_frac` (`CameraProfile`) | 0.98 | đáy ROI; nếu thấy cản/mũi xe trong ảnh thì giảm |
 
@@ -91,7 +92,7 @@ Log khởi động in `geometry: ... BEV 160xN (1 cm), Z gần..xa m` = vùng m�
 
 `tốc độ = corner + (speed − corner) × hệ số` (`speed` = `speed_x10` khi 2 vạch, `speed_one_x10`
 khi 1 vạch). Hệ số = nhỏ nhất của: `speed_scale` camera, độ cong đường đã nhớ phía trước, và
-**xe giữa làn** (lệch ≤ 3 cm ⇒ 1, ≥ 7 cm ⇒ 0: xe 25 cm trong làn 0.42 m chỉ còn ~5 cm mỗi bên).
+**xe giữa làn** (lệch ≤ 3 cm ⇒ 1, ≥ 7 cm ⇒ 0: xe 25 cm trong làn 0.60 m còn ~14 cm mỗi bên).
 `speed_scale` (camera) = 1
 trên đường thẳng, về 0 khi hướng đường tâm ở đầu xa lệch ≥ 50° (`CURVE_HEADING_*_DEG`),
 độ cong ≥ 1.5 1/m (`CURVE_K_*`), hoặc góc gập cách trục sau ≤ 0.7 m (`CORNER_SLOW_*`).
@@ -159,7 +160,7 @@ mặt bàn S < 10. Góc cúi: xem §1b (`camera_pitch_deg`, tự hiệu chỉnh)
 | `lookahead_min_m` / `lookahead_gain_s` / `lookahead_max_m` | 0.35 / 0.20 / 0.80 | tầm nhìn = min + gain·v. Xe lắc trên đường thẳng ⇒ tăng `min` (0.45); cắt cua ⇒ giảm `min` (0.30) |
 | `actuator_latency_s` | 0.08 | xe vào cua trễ, văng ra ngoài ⇒ tăng (0.12) |
 | `camera_latency_s` | 0.04 | tương tự, cho trễ camera |
-| `car_half_width_m` / `tape_half_m` / `line_margin_m` | 0.125 / 0.035 / 0.02 | rào chắn vạch: nửa bề ngang xe (xe rộng 25 cm) / nửa bề rộng băng keo / khoảng hở tối thiểu tới MÉP băng keo. Xe ở giữa làn 0.42 m chỉ còn ~5 cm mỗi bên nên rào chắn bắt đầu đẩy khi xe lệch ~3 cm |
+| `car_half_width_m` / `tape_half_m` / `line_margin_m` | 0.125 / 0.035 / 0.02 | rào chắn vạch: nửa bề ngang xe (xe rộng 25 cm) / nửa bề rộng băng keo / khoảng hở tối thiểu tới MÉP băng keo. Xe ở giữa làn 0.60 m còn ~14 cm mỗi bên nên rào chắn bắt đầu đẩy khi xe lệch ~12 cm |
 | `odom_speed_scale` | 1.0 | tốc độ thật / tốc độ lệnh. Đo: cho chạy 2 m thẳng, bấm giờ |
 | `lost_memory_ms` | 1500 | mất cả 2 vạch: chạy tiếp theo đường đã nhớ tối đa bao lâu |
 

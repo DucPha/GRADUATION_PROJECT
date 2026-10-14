@@ -201,7 +201,7 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_pitch_deg` | `42.0` | **Góc cúi camera** (đo trên ảnh thật). `camera_auto_pitch:=true` để tự hiệu chỉnh (mặc định tắt: ước lượng nhảy 1–2°) |
 | `camera_height_m` | `0.30` | Độ cao camera so với mặt sàn (m) |
 | `camera_vfov_deg` | `51.0` | Góc nhìn dọc của camera (giống nhau ở 1080p và 640×480) |
-| `lane_width_m` | `0.42` | Bề rộng làn tâm vạch – tâm vạch (tự học lại) |
+| `lane_width_m` | `0.60` | Bề rộng làn tâm vạch – tâm vạch (giá trị ban đầu, tự học lại; khoảng chấp nhận 50–85 cm) |
 | `roi_top_frac` | `0.0` | Bỏ qua phần trên cùng ảnh (mặc định dùng hết) |
 | `speed_x10` | `66` | MỨC THẲNG (≈ 1562.5 µs) khi đường thẳng hẳn và xe giữa làn; còn lại là mức cua `speed_corner_x10` (1543 µs). Chỉ 2 mức, không nội suy |
 | `speed_one_x10` | `66` | Chỉ thấy 1 vạch trên đường thẳng, xe giữa làn (= mức thẳng); cua / xe lệch về `speed_corner_x10` |
@@ -231,38 +231,44 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `lidar_mount_offset_deg` | `90.0` | Góc lệch lắp LiDAR, `0` = trước, `90` = trái (REP-103); +90 = 0° thô chĩa sang phải xe |
 | `log_level` | `info` | `debug` để in nhiều hơn |
 
-## Detector làn (bám vạch mọi hướng trên mặt đất)
+## Detector làn (nhận làn trên mặt sàn — BEV)
 
 **Camera 1920x1080 MJPG** → tự giải mã bằng libjpeg-turbo ở **1/2 kích thước** (960x540,
 ~7 ms thay vì ~15 ms, và tắt cảnh báo `Corrupt JPEG data` mà camera này gây ra mỗi frame)
-→ cắt ROI **hình chữ nhật phủ hết bề ngang ảnh** (không còn hình thang) → xám → thu về
-**320 cột, giữ đúng tỉ lệ 16:9 (320x180)** → Gaussian blur(5,5) → **trừ nền + bù lóa** →
-Otsu + **ngưỡng trễ** → bám vạch.
+→ **khung làm việc 960 cột, giữ đúng tỉ lệ 16:9 (960x540)** → **chiếu xuống lưới mặt sàn
+(BEV) 1 cm/ô** bằng `remap` + bảng tra tính sẵn (pinhole với `camera_pitch_deg`,
+`camera_height_m`, `camera_vfov_deg`).
 
-Khung làm việc giữ đúng tỉ lệ ảnh gốc (1920x1080 → 320x180, 640x480 → 320x240), nên
-tiêu cự dọc = tiêu cự ngang và công thức pinhole đúng với mọi độ phân giải.
+Khung làm việc giữ đúng tỉ lệ ảnh gốc và trùng bề ngang ảnh giải mã (960) nên **không bị thu
+nhỏ thêm một lần nữa** (bản cũ thu về 320 cột ⇒ nhòe mép vạch). Hình học scale-invariant: đổi
+`WORK_W` không đổi kết quả đo mét. Máy yếu thì giảm `WORK_W` về 640 / 320.
 
-**Bám vạch trên mặt đất, thay cho cửa sổ trượt theo hàng.** Cửa sổ trượt cũ chia ROI thành
-6 dải ngang và tìm 1 đỉnh cột trong mỗi dải, nên vạch nằm ngang / chéo màn hình ở cua gắt
-(1 vạch trải hết bề ngang dải) bị loại. Bản mới quét **toàn bộ ROI**:
+**Mask vạch tối** (`line_mask`) trên ảnh BEV:
+1. **CLAHE** (cân bằng tương phản cục bộ — phòng tối, vignetting phía xa) + Gaussian blur 3x3.
+2. Nền = **đóng hình thái 13 cm** (lấp vạch, giữ vệt sáng lớn); `rel = (nền − ảnh)/nền`: vạch
+   tối hơn nền theo **tỉ lệ** (không theo hiệu tuyệt đối — đèn mạnh thì camera giảm phơi sáng).
+3. **Mức sàn** = phân vị 40% từng khối 40x20 cm; vạch phải tối hơn mức sàn xung quanh 25% ⇒
+   loại khe sàn giữa 2 vệt chiếu sáng (nguyên nhân chính sinh vạch giả khi đèn mạnh).
+4. **Lóa đèn trần**: pixel gần bão hòa (≥ 245) hoặc sáng hơn mức sàn 20% → vùng lóa; đi dọc
+   vạch gặp vùng lóa thì nối xa hơn (8 bước × 3 cm) thay vì đứt.
+5. **Lọc màu**: pixel đủ sáng mà bão hòa màu cao (ghế cam, vật màu) không phải băng keo đen.
 
-1. Thành phần liên thông trên mask → đổi **từng pixel** sang toạ độ mặt đất (X sang phải,
-   Z về phía trước, mét) bằng pinhole.
-2. PCA tìm trục chính → chia đoạn 3 cm dọc trục → điểm tâm vạch từng đoạn + bề dày vạch.
-   Bề dày trung vị > 12 cm (bóng, vật cản) ⇒ loại. Không giả định vạch chạy dọc ảnh: vạch
-   dọc, chéo, nằm ngang đều bám như nhau. Overlay vẽ các ô vuông dọc theo vạch.
-3. **Nối đoạn đứt** (lóa, băng keo mòn): đoạn sau nằm trên đường kéo dài của đoạn trước
-   (khoảng hở ≤ 35 cm, lệch hướng ≤ 40°) thì nối.
-4. **Nhãn trái/phải:** ưu tiên khớp vạch của frame trước (≤ 12 cm); không khớp thì xét xe
-   nằm bên nào của vạch (hướng vạch = gần xe → xa xe). Ở cua phải gắt, vạch trái chạy từ
-   trái-gần sang phải-xa nhưng xe vẫn ở bên phải nó ⇒ vẫn là vạch trái.
-5. Chọn vạch trái/phải gần xe nhất, đo **bề rộng làn bằng khoảng cách vuông góc trên mặt
-   đất** (35–85 cm) ⇒ `2 LANES`; chỉ 1 vạch dùng được ⇒ `1 LANE`.
-6. **Đường tâm** = vạch dời vào trong nửa bề rộng làn theo **pháp tuyến** (phía có xe), nên
-   vẫn đúng khi chỉ còn 1 vạch nằm ngang trước mũi xe.
+**Lọc đồ vật** (`filter_clutter`):
+1. Xóa phần **dày** của mask (hình thái học) để vạch dính vào vật tách ra khỏi vật.
+2. **Vật dựng đứng** (chân bàn/ghế, khung cửa): cạnh thẳng đứng chiếu xuống sàn thành vệt chĩa
+   thẳng về camera, bắt đầu từ chỗ nó chạm sàn (không kéo tới mép dưới tầm nhìn như vạch) ⇒ loại.
+3. **Bề dày**: vùng dày hơn `TAPE_MAX_THICK_M` mà không thuôn dài, hoặc dày hơn `BLOB_THICK_M`
+   (túi, giày, ghế) ⇒ vật.
+4. **Nét quá mảnh và nhạt** (khe gạch, vết nứt) ⇒ loại.
 
-**`dev_px` của camera** (dùng khi `steer_mode:=camera`): pure pursuit tới điểm cách chân
-camera 0.70 m, cộng `0.4 × lệch ngang` gần xe, chặn nhảy 90 px, EMA 0.70 / 0.50.
+**Bám vạch** trên BEV: bám lại 2 vạch frame trước (dự đoán theo odometry) → đi dọc vạch bằng
+cửa sổ trượt, theo được **góc gập** (vạch ngang / chéo ở cua gắt vẫn bám) → ghép cặp theo **bề
+rộng làn đo vuông góc trên mặt đất (50–85 cm)** ⇒ `2 LANES`; chỉ 1 vạch dùng được ⇒ `1 LANE`.
+**Đường tâm** = vạch dời vào trong **nửa bề rộng làn** theo **pháp tuyến** (nối góc kiểu mitre).
+Góc cúi camera tự hiệu chỉnh từ điểm tụ của 2 vạch thẳng (`camera_auto_pitch`).
+
+**`dev_px` của camera** (dùng khi `steer_mode:=camera`): pure pursuit từ **trục sau** tới điểm
+nhìn trước 0.55 m (0.80 m khi thấy góc gập phía trước), chặn nhảy 90 px, EMA 0.70 / 0.50.
 
 ## Lái theo đường đã nhớ (`PathTracker`, mặc định `steer_mode:=track`)
 
@@ -280,8 +286,9 @@ thì tới cua vạch đã ra khỏi khung hình.
 2. **Căn chỉnh tại mối nối:** đoạn nhớ được xoay + tịnh tiến cho khớp vị trí và hướng của
    frame mới ⇒ sai số odometry (tốc độ, tỉ số lái) được camera sửa mỗi frame, không tích
    luỹ. Frame lệch hẳn đường đã nhớ (nhận nhầm) bị bỏ, lệch 3 frame liền mới tin.
-3. **Pure pursuit từ trục sau**, tầm nhìn `0.35 + 0.20·v` m (kẹp 0.35–0.80), có dự đoán trước
-   trễ servo 80 ms ⇒ xe bẻ lái đúng lúc tới cua.
+3. **MPC giữ làn** (mô hình xe đạp tương đối với làn, dự đoán 1.2 s, bù trễ servo) + **học online**
+   hệ số lái thật / độ lệch lái (LBMPC, `lane_keeping.hpp`); **pure pursuit** tầm nhìn `0.35 + 0.20·v`
+   m (kẹp 0.35–0.80) chỉ là **dự phòng**.
 4. **Vạch ảo + rào chắn:** vạch ra khỏi khung (vạch trong của cua gắt) vẫn được nhớ. Mép
    thân xe cách vạch (thật hoặc ảo) < 4 cm tại bánh trước hoặc 25 cm trước đó ⇒ cộng góc đẩy
    ra (tối đa 15°) ⇒ chạy 1 vạch mà không đè vạch còn lại.

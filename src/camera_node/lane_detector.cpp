@@ -257,7 +257,7 @@ bool CameraLane::open_camera() {
     }
     // Driver tra anh da giai ma (nhieu hang, 3 kenh) -> khong phai goi nen
     raw_mjpg_ = probe_raw.rows == 1 && probe_raw.type() == CV_8UC1;
-    if (raw_mjpg_ && !decode_mjpg(probe_raw, VIS_W, probe, cam_w_, cam_h_)) {
+    if (raw_mjpg_ && !decode_mjpg(probe_raw, DECODE_MIN_W, probe, cam_w_, cam_h_)) {
       // Khong giai ma duoc -> tra lai cho OpenCV tu giai ma
       raw_mjpg_ = false;
       cap_.set(cv::CAP_PROP_CONVERT_RGB, 1);
@@ -305,6 +305,11 @@ bool CameraLane::open_camera() {
       std::cout << "[CameraLane] Requested " << req_w_ << "x" << req_h_
                 << " but camera gives " << cam_w_ << "x" << cam_h_
                 << ". Geometry was recomputed for the real size.\n";
+    }
+    if (probe.cols < WORK_W) {
+      std::cout << "[CameraLane] Canh bao: anh giai ma rong " << probe.cols
+                << " < WORK_W " << WORK_W
+                << " -> khung lam viec bi NOI len (nhoe). Giam WORK_W.\n";
     }
 
     return true;
@@ -404,7 +409,7 @@ bool CameraLane::grab_frame(cv::Mat &raw, cv::Mat &bgr) {
     bgr = raw;
     return true;
   }
-  return decode_mjpg(raw, VIS_W, bgr, cam_w_, cam_h_);
+  return decode_mjpg(raw, DECODE_MIN_W, bgr, cam_w_, cam_h_);
 }
 
 // Luong camera: doc frame -> detect() -> cap nhat ket qua moi nhat (latest_)

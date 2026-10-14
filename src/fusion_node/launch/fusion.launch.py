@@ -297,8 +297,9 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_auto_pitch', default_value='false',
                               description='Tu hieu chinh goc cui tu diem tu 2 vach thang (+-8 do). Mac '
                                           'dinh tat: uoc luong nhay 1-2 do lam xe mat vach giua duong'),
-        DeclareLaunchArgument('lane_width_m', default_value='0.42',
-                              description='Be rong lan tam vach - tam vach (m), tu hoc lai khi chay'),
+        DeclareLaunchArgument('lane_width_m', default_value='0.60',
+                              description='Be rong lan tam vach - tam vach (m), gia tri ban dau; tu hoc '
+                                          'lai khi chay (khoang chap nhan 0.50-0.85 m)'),
         DeclareLaunchArgument('speed_min_x10', default_value='44',
                               description='Toc do nho nhat khi chay (km/h x10); BLDC keu o toc do thap thi tang'),
         DeclareLaunchArgument('roi_top_frac', default_value='0.0',
