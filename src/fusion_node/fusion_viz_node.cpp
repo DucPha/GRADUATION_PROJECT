@@ -384,7 +384,8 @@ public:
         }
 
         // Quy dao xe + TF cho Foxglove (chi de xem, xem foxglove_viz.hpp)
-        foxglove_ = std::make_unique<FoxgloveViz>(*this, lidar_offset_deg_);
+        foxglove_ = std::make_unique<FoxgloveViz>(*this, lidar_offset_deg_, tracker_.params().wheelbase_m,
+                                                  tracker_.params().car_half_width_m);
 
         if (enable_lidar) {
             lidar_.set_mount_offset_deg(lidar_offset_deg_);

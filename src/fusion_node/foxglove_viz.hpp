@@ -8,6 +8,9 @@
 // Topic / TF:
 //   TF odom -> base_link (truc sau)  odometry PathTracker (lenh ga + goc lai)
 //   TF base_link -> laser (tinh)     goc lap LiDAR (lidar_mount_offset_deg)
+//   /autocar/car       visualization_msgs/MarkerArray: than xe + mui ten huong
+//                      gan vao base_link (xe dung yen thi base_link trung
+//                      goc toa do, chi co truc TF thi khong nhin thay xe)
 //   /autocar/odom      nav_msgs/Odometry 10 Hz
 //   /autocar/path      nav_msgs/Path, frame odom: TROI dan (12/10: ~30 m
 //                      sau vai vong, heading tu goc lai khong du chinh xac)
@@ -29,13 +32,16 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <memory>
 
 class FoxgloveViz {
 public:
-  // lidar_offset_deg: goc khung xe = goc scan + offset (lidar_node.hpp)
-  FoxgloveViz(rclcpp::Node &node, double lidar_offset_deg);
+  // lidar_offset_deg: goc khung xe = goc scan + offset (lidar_node.hpp);
+  // wheelbase_m / half_width_m: kich thuoc ve than xe
+  FoxgloveViz(rclcpp::Node &node, double lidar_offset_deg, double wheelbase_m,
+              double half_width_m);
 
   // Vi tri truc sau theo PathTracker (X phai, Z truoc, th > 0 = quay phai)
   // -> TF odom -> base_link. Goi ~50 Hz (slam_toolbox can TF luc moi scan).
@@ -53,6 +59,8 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_map_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr car_pub_;
+  visualization_msgs::msg::MarkerArray car_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_pub_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_pub_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;

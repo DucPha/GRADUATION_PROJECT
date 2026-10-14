@@ -5,10 +5,46 @@
 
 #include <cmath>
 
-FoxgloveViz::FoxgloveViz(rclcpp::Node &node, double lidar_offset_deg) : node_(node) {
+FoxgloveViz::FoxgloveViz(rclcpp::Node &node, double lidar_offset_deg, double wheelbase_m,
+                         double half_width_m)
+    : node_(node) {
   path_pub_ = node.create_publisher<nav_msgs::msg::Path>("/autocar/path", 1);
   path_map_pub_ = node.create_publisher<nav_msgs::msg::Path>("/autocar/path_map", 1);
   odom_pub_ = node.create_publisher<nav_msgs::msg::Odometry>("/autocar/odom", 10);
+  car_pub_ = node.create_publisher<visualization_msgs::msg::MarkerArray>("/autocar/car", 1);
+
+  // Than xe: hop tu sau truc sau 5 cm toi truoc truc truoc 5 cm, rong 2 x
+  // half_width; mui ten do tu truc sau ra truoc 0.4 m = huong xe
+  visualization_msgs::msg::Marker body;
+  body.header.frame_id = "base_link";
+  body.ns = "car";
+  body.id = 0;
+  body.type = visualization_msgs::msg::Marker::CUBE;
+  body.action = visualization_msgs::msg::Marker::ADD;
+  body.frame_locked = true;
+  body.pose.position.x = 0.5 * wheelbase_m;
+  body.pose.position.z = 0.04;
+  body.pose.orientation.w = 1.0;
+  body.scale.x = wheelbase_m + 0.10;
+  body.scale.y = 2.0 * half_width_m;
+  body.scale.z = 0.08;
+  body.color.r = 0.1f;
+  body.color.g = 0.5f;
+  body.color.b = 1.0f;
+  body.color.a = 0.85f;
+  visualization_msgs::msg::Marker arrow = body;
+  arrow.id = 1;
+  arrow.type = visualization_msgs::msg::Marker::ARROW;
+  arrow.pose.position.x = 0.0;
+  arrow.pose.position.z = 0.10;
+  arrow.scale.x = 0.40;   // dai
+  arrow.scale.y = 0.05;   // rong
+  arrow.scale.z = 0.05;
+  arrow.color.r = 1.0f;
+  arrow.color.g = 0.15f;
+  arrow.color.b = 0.1f;
+  arrow.color.a = 1.0f;
+  car_.markers = {body, arrow};
   tf_pub_ = std::make_unique<tf2_ros::TransformBroadcaster>(node);
   static_tf_pub_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(node);
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node.get_clock());
@@ -69,6 +105,11 @@ void FoxgloveViz::publish_paths(double v_mps, double yaw_rate) {
   od.twist.twist.linear.x = v_mps;
   od.twist.twist.angular.z = yaw_rate;
   odom_pub_->publish(od);
+
+  for (auto &m : car_.markers) {
+    m.header.stamp = od.header.stamp;
+  }
+  car_pub_->publish(car_);
 
   geometry_msgs::msg::PoseStamped ps;
   ps.header = od.header;
