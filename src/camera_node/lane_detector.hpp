@@ -260,9 +260,10 @@ public:
   // Be rong lan KHONG co dinh: bang keo dan tay, moi doan rong / hep khac
   // nhau. Ghep cap / kiem tra cap chi doi be rong trong khoang tuyet doi nay
   // (khong theo be rong da hoc: hoc 0.36 m o doan hep roi toi doan 0.52 m la
-  // loai ca cap dung). lane_width_m chi la gia tri ban dau.
+  // loai ca cap dung). 13/10: 0.70 -> 0.80: goc camera lech vai do thi be rong o xa
+  // vuot 0.70, vach thu 2 bi loai -> chay 1 vach ca doan thang.
   static constexpr float LANE_W_MIN_M = 0.28f;
-  static constexpr float LANE_W_MAX_M = 0.70f;
+  static constexpr float LANE_W_MAX_M = 0.80f;
   // Be rong lan TAI CHO: do moi frame thay du 2 vach (EMA), dung khi chi
   // thay 1 vach (doi tam nua be rong nay). Lau khong thay 2 vach thi tro ve
   // be rong hoc dai han.
@@ -271,6 +272,12 @@ public:
   // Chua du WIDTH_MIN_SAMPLES mau doan thang: be rong dai han EMA (moi frame
   // du 2 vach) voi he so nay
   static constexpr float LANE_W_SEED_ALPHA = 0.05f;
+  // Tu hieu chinh goc cui (calibrate_pitch): khoang tim / buoc (do), vach toi
+  // thieu, sai lech be rong xa-gan con lai toi da (ti le)
+  static constexpr double PITCH_SEARCH_DEG = 8.0;
+  static constexpr double PITCH_SEARCH_STEP_DEG = 0.2;
+  static constexpr float PITCH_MIN_LINE_M = 0.6f;
+  static constexpr double PITCH_MAX_RESID = 0.08;
   // Ghep cap moi: vach trai duoc lan sang phai chan camera toi da bay nhieu
   // (va nguoc lai) - xe phai nam giua 2 vach
   static constexpr float CAR_SIDE_SLACK_M = 0.05f;
@@ -561,9 +568,8 @@ private:
   bool straight_head(const Poly &pts, float length, cv::Point2f &a,
                      cv::Point2f &b) const;
   void learn_width(const Poly &left, const Poly &right);
-  bool pitch_from_pair(const cv::Point2f ha[2], const cv::Point2f hb[2],
-                       double &pitch) const;
-  void calibrate_pitch(const std::vector<const Poly *> &lines);
+  bool pitch_from_width(const Poly &left, const Poly &right, double &pitch_deg) const;
+  void calibrate_pitch(const Poly &left, const Poly &right);
   void adapt_threshold(const cv::Mat &rel, const std::vector<const Poly *> &obs);
 
   bool target_on(const Poly &path, float L, cv::Point2f &target,

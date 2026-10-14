@@ -244,7 +244,7 @@ struct VehicleParams {
   double mpc_tau_s = 0.15;     // tre servo + loc (s)
   double mpc_horizon_s = 1.2;  // tam du doan (s)
   double mpc_zone_m = 0.05;    // |e_y| tu muc nay uu tien keo ve tam
-  double mpc_rd = 8.0;        // phat thay doi goc lai giua 2 buoc. 13/10: 1 -> 8 giat p90 6.7 -> 4.9 do/frame, het lai 38 -> 21 %
+  double mpc_rd = 30.0;       // phat thay doi goc lai giua 2 buoc (em). 13/10 du lieu that: 1 -> 8 -> 30: giat p90 6.7 -> 4.9 -> 4.6 do/frame, het lai 38 -> 23 -> 18 %; mo phong: giu lan khong kem di
   // Ti so lai that / khai bao va do lech lai ban dau (do 10/10: 0.42 / 0.6)
   double mpc_g0 = 0.70;
   double mpc_b0_deg = 0.0;

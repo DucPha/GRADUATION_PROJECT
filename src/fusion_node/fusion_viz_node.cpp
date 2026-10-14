@@ -215,7 +215,7 @@ public:
         // thap hon 59 la ESC 101 = toc do cua)
         const auto speed_one_x10 = declare_parameter<int>("speed_one_x10", 60);
         const auto speed_hold_x10 = declare_parameter<int>("speed_hold_x10", 50);
-        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 52);
+        const auto speed_corner_x10 = declare_parameter<int>("speed_corner_x10", 44);
         const auto speed_ramp_x10 = declare_parameter<int>("speed_ramp_x10", 30);
         // Toc do nho nhat khi xe CHAY (km/h x10). Dong co BLDC chay cham (ESC
         // 100, ~3.6 km/h) keu cot ket -> san 5.0 km/h (ESC 101).
@@ -749,6 +749,12 @@ private:
         trk_guard_deg_ = trk.guard_deg;
         trk_xte_m_ = trk.xte_m;
         trk_xte_i_deg_ = trk.xte_i_deg;
+        trk_mpc_ = trk.mpc && use_trk;
+        trk_mpc_ey_m_ = trk.mpc_ey_m;
+        trk_mpc_epsi_deg_ = trk.mpc_epsi_deg;
+        trk_mpc_g_ = trk.mpc_g;
+        trk_mpc_b_deg_ = trk.mpc_b_deg;
+        trk_mpc_n_ = trk.mpc_learn_n;
 
         // ---- Gui xuong ESP32, tu mo lai cong khi mat ket noi ----
         const bool ok = serial_->is_open() && !serial_->is_broken() &&
@@ -891,7 +897,8 @@ private:
             "right=%.0fcm rear=%.0fcm alert=%s lofs=%.1f serial=%s w=%.0fcm "
             "devm=%.1fcm curv=%.3f scale=%.2f spd=%.1f kmh=%.2f fbage=%ld "
             "servo=%.1f hz=%.2f pitch=%.1f esc=%d fwemg=%d fwwd=%d fwcmd=%d "
-            "mode=%s turn=%c mem=%.2f la=%.2f wheel=%.1f guard=%.1f xte=%.1fcm xi=%.1f corner=%.2f vest=%.1f",
+            "mode=%s turn=%c mem=%.2f la=%.2f wheel=%.1f guard=%.1f xte=%.1fcm xi=%.1f corner=%.2f vest=%.1f "
+            "mpc=%d ey=%.1fcm epsi=%.1f g=%.2f b=%.1f learn=%d",
             two_lanes_ ? 1 : 0,
             kTrack[(track_ >= 0 && track_ <= 2) ? track_ : 0],
             last_dev_px_,
@@ -930,7 +937,8 @@ private:
             trk_valid_ ? "track" : "camera",
             trk_turn_ > 0 ? 'R' : (trk_turn_ < 0 ? 'L' : 'S'),
             trk_ahead_m_, trk_la_m_, trk_wheel_deg_, trk_guard_deg_,
-            trk_xte_m_ * 100.0, trk_xte_i_deg_, trk_corner_m_, v_odom_x10_ / 10.0);
+            trk_xte_m_ * 100.0, trk_xte_i_deg_, trk_corner_m_, v_odom_x10_ / 10.0,
+            trk_mpc_ ? 1 : 0, trk_mpc_ey_m_ * 100.0, trk_mpc_epsi_deg_, trk_mpc_g_, trk_mpc_b_deg_, trk_mpc_n_);
 
         std_msgs::msg::String msg;
         msg.data = buf;
@@ -974,12 +982,12 @@ private:
     rclcpp::TimerBase::SharedPtr viz_timer_;
     rclcpp::TimerBase::SharedPtr status_timer_;
 
-    int speed_x10_ = 66;
-    int speed_one_x10_ = 66;
-    int speed_hold_x10_ = 50;
-    int speed_corner_x10_ = 52;
-    float speed_ramp_x10_ = 30.0f;   // don vi x10 moi giay (30 = 3 km/h/s)
-    int speed_min_x10_ = 50;         // toc do nho nhat khi dang chay
+    int speed_x10_ = 62;
+    int speed_one_x10_ = 62;
+    int speed_hold_x10_ = 44;
+    int speed_corner_x10_ = 44;
+    float speed_ramp_x10_ = 8.0f;   // don vi x10 moi giay (30 = 3 km/h/s)
+    int speed_min_x10_ = 44;         // toc do nho nhat khi dang chay
     float speed_cur_x10_f_ = 0.0f;   // lenh hien tai, tang dan khi ramp
     float dt_control_s_ = 0.01f;     // 1 / control_hz
     double steer_filter_s_ = 0.08;   // loc goc banh (s)
@@ -1042,6 +1050,13 @@ private:
     double trk_guard_deg_ = 0.0;
     double trk_xte_m_ = 0.0;
     double trk_xte_i_deg_ = 0.0;
+    // MPC: dang lai bang MPC, lech ngang / huong o truc sau, g / b da hoc
+    bool trk_mpc_ = false;
+    double trk_mpc_ey_m_ = 0.0;
+    double trk_mpc_epsi_deg_ = 0.0;
+    double trk_mpc_g_ = 1.0;
+    double trk_mpc_b_deg_ = 0.0;
+    int trk_mpc_n_ = 0;
 
     double fps_ = 0.0;
     long fps_window_frame_ = 0;

@@ -27,6 +27,15 @@ DEFAULT_LIDAR_PORT = '/dev/ttyUSB1'
 ESP_BAUD = 230400
 
 
+
+def saved_pitch():
+    """Goc cui camera da do bang tools/calibrate_pitch.py, chua do thi 32.0."""
+    try:
+        with open(os.path.expanduser('~/.autocar/camera_pitch_deg')) as fh:
+            return '%.1f' % float(fh.read().strip())
+    except (OSError, ValueError):
+        return '32.0'
+
 def _serial_ports():
     return sorted(glob.glob('/dev/ttyUSB*')) + sorted(glob.glob('/dev/ttyACM*'))
 
@@ -229,9 +238,9 @@ def generate_launch_description():
                                           'den tran lam nhay sang toi); >0 = co dinh (100 us); -1 = camera tu dong'),
         DeclareLaunchArgument('camera_height_m', default_value='0.30',
                               description='Do cao tam ong kinh so voi mat san (m)'),
-        DeclareLaunchArgument('camera_pitch_deg', default_value='32.0',
-                              description='Goc cui camera (do), co dinh. 13/10 18:40 do lai tu diem tu 2 canh dai cua ban lab '
-                                          '(xe dat tren ban): 31.6-32.5 -> 32.0 (truoc do 35.5). Doi goc camera thi do lai'),
+        DeclareLaunchArgument('camera_pitch_deg', default_value=saved_pitch(),
+                              description='Goc cui camera (do). Mac dinh = gia tri do bang tools/calibrate_pitch.py (luu o '
+                                          '~/.autocar/camera_pitch_deg), chua do thi 32.0. Doi goc camera -> do lai'),
         DeclareLaunchArgument('camera_vfov_deg', default_value='51.0',
                               description='Goc nhin DOC cua camera (do), giong nhau o 1080p va 640x480'),
         DeclareLaunchArgument('camera_auto_pitch', default_value='false',
@@ -239,23 +248,23 @@ def generate_launch_description():
                                           'dinh tat: uoc luong nhay 1-2 do lam xe mat vach giua duong'),
         DeclareLaunchArgument('lane_width_m', default_value='0.42',
                               description='Be rong lan tam vach - tam vach (m), tu hoc lai khi chay'),
-        DeclareLaunchArgument('speed_min_x10', default_value='50',
+        DeclareLaunchArgument('speed_min_x10', default_value='44',
                               description='Toc do nho nhat khi chay (km/h x10); BLDC keu o toc do thap thi tang'),
         DeclareLaunchArgument('roi_top_frac', default_value='0.0',
                               description='0.0-1.0, phan anh tren cung bo qua; camera cui ~42 do nen ca '
                                           'anh deu la mat san (~0.13-1.1 m), mac dinh dung het'),
-        DeclareLaunchArgument('speed_x10', default_value='66',
+        DeclareLaunchArgument('speed_x10', default_value='62',
                               description='Toc do du 2 vach + duong thang + xe giua lan (lech <= 3 cm), '
-                                          'km/h x 10. CHI 2 MUC: thang = muc nay (66 = 1562.5 us), con lai = speed_corner_x10 (50 = 1543 us)'),
-        DeclareLaunchArgument('speed_one_x10', default_value='66',
+                                          'km/h x 10. CHI 2 MUC: thang = muc nay (62 ~ 1560 us), con lai = speed_corner_x10 (44 ~ 1548 us)'),
+        DeclareLaunchArgument('speed_one_x10', default_value='62',
                               description='Toc do chi thay 1 vach tren duong thang + xe giua lan, km/h x 10 '
-                                          '(66 = 1562.5 us, = speed_x10); cua / xe lech -> speed_corner_x10'),
-        DeclareLaunchArgument('speed_hold_x10', default_value='50',
+                                          '(62 ~ 1560 us, = speed_x10); cua / xe lech -> speed_corner_x10'),
+        DeclareLaunchArgument('speed_hold_x10', default_value='44',
                               description='Toc do giu huong khi mat ca 2 vach, km/h x 10'),
-        DeclareLaunchArgument('speed_corner_x10', default_value='52',
+        DeclareLaunchArgument('speed_corner_x10', default_value='44',
                               description='Toc do vao cua (1 vach, hoac 2 vach cong gat nhat), km/h x 10'),
-        DeclareLaunchArgument('speed_ramp_x10', default_value='30',
-                              description='Muc tang toc, x10 moi giay (giam toc luon tuc thi)'),
+        DeclareLaunchArgument('speed_ramp_x10', default_value='8',
+                              description='Muc tang toc, x10 moi giay (8: cua 44 -> thang 62 trong ~2.3 s, em). Giam toc theo khoang cach toi cua (corner_margin_m)'),
         DeclareLaunchArgument('dev_sign', default_value='1',
                               description='-1 neu servo lap nguoc'),
         DeclareLaunchArgument('lane_lost_stop_ms', default_value='2500',
@@ -304,7 +313,7 @@ def generate_launch_description():
         DeclareLaunchArgument('coast_decel_mps2', default_value='0.7',
                               description='Gia toc giam khi nha ga (m/s^2): thay cua cach d m -> toc do '
                                           'sqrt(v_cua^2 + 2*a*(d - corner_margin_m)). Van vot cua -> giam'),
-        DeclareLaunchArgument('corner_margin_m', default_value='0.20',
+        DeclareLaunchArgument('corner_margin_m', default_value='0.30',
                               description='Phai xuong toc do cua truoc khi toi cua bay nhieu m'),
         DeclareLaunchArgument('odom_speed_scale', default_value='0.30',
                               description='Toc do that / toc do lenh (odometry)'),
@@ -337,7 +346,7 @@ def generate_launch_description():
         DeclareLaunchArgument('mpc_horizon_s', default_value='1.2', description='Tam du doan MPC (s)'),
         DeclareLaunchArgument('mpc_zone_m', default_value='0.05',
                               description='Lech ngang tu muc nay: uu tien keo ve tam; gan tam: uu tien giu huong (lai em)'),
-        DeclareLaunchArgument('mpc_rd', default_value='8.0',
+        DeclareLaunchArgument('mpc_rd', default_value='30.0',
                               description='Phat thay doi goc lai (em). Lai giat -> tang; vao cua cham -> giam'),
         DeclareLaunchArgument('mpc_g0', default_value='0.70',
                               description='Ti so lai that / steer_ratio ban dau (do 10/10: 0.42 / 0.6); oracle tu hoc tiep'),

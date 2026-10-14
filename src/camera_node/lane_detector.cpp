@@ -1879,115 +1879,121 @@ void CameraLane::learn_width(const Poly &left, const Poly &right) {
   }
 }
 
-// Goc cui camera suy tu 2 doan vach thang (gia thiet song song tren san).
-// Diem tu cua 2 duong song song tren san nam tren duong chan troi -> ra goc
-// cui. Kiem tra cheo: o goc do 2 vach phai cach nhau dung ~1 lan va nam 2 ben
-// xe -> loai cap nhieu / 2 mau cua cung 1 vach.
-bool CameraLane::pitch_from_pair(const cv::Point2f ha[2], const cv::Point2f hb[2],
-                                 double &pitch) const {
-  const double cx = WORK_W / 2.0;
-  cv::Vec3d img[4];
-  const cv::Point2f g4[4] = {ha[0], ha[1], hb[0], hb[1]};
-  double v_min = std::numeric_limits<double>::max();
-  for (int i = 0; i < 4; ++i) {
-    double u = 0.0, v = 0.0;
-    if (!to_image(pitch_, f_px_, h_, cx, cy_, g4[i].x, g4[i].y, u, v)) {
-      return false;
+
+
+// ---- Tu hieu chinh goc cui camera tu do SONG SONG cua 2 vach ----
+// Mat san phang + lan rong khong doi: goc cui DUNG thi 2 vach song song tren
+// anh chieu mat san (be rong lan o xa = o gan). Sai goc: lan toe ra (goc khai
+// bao lon hon that) hoac chum lai phia xa. Cach nay dung ca doan vach gap
+// khuc (do khoang cach vuong goc toi vach kia), khac cach diem tu 2 doan
+// thang cu (13/10: troi 35.5 -> 39-41 do tren duong gap khuc).
+// Tham khao: hieu chinh pitch sao cho vach song song tren anh IPM (US
+// 10922843); rang buoc be rong lan (Huang et al., ISPRS Archives 2022).
+// Mot mau / frame du 2 vach: chieu nguoc 2 vach ve anh, thu goc p trong
+// +-PITCH_SEARCH_DEG, chon p cho be rong o xa = o gan.
+bool CameraLane::pitch_from_width(const Poly &left, const Poly &right, double &pitch_deg) const {
+  auto img_of = [&](const Poly &g, std::vector<cv::Point2d> &out) {
+    for (const auto &q : g) {
+      cv::Point2d p;
+      if (ground_to_img(q, p)) {
+        out.push_back(p);
+      }
     }
-    img[i] = cv::Vec3d(u, v, 1.0);
-    v_min = std::min(v_min, v);
-  }
-  const cv::Vec3d la = img[0].cross(img[1]);
-  const cv::Vec3d lb = img[2].cross(img[3]);
-  const cv::Vec3d vp = la.cross(lb);
-  if (std::fabs(vp[2]) < 1e-9) {
+  };
+  std::vector<cv::Point2d> il, ir;
+  img_of(left, il);
+  img_of(right, ir);
+  if (il.size() < 8 || ir.size() < 8) {
     return false;
   }
-  const double u_h = vp[0] / vp[2];
-  const double v_h = vp[1] / vp[2];
-  if (!(u_h > -2.0 * WORK_W && u_h < 3.0 * WORK_W) || v_h > v_min - 5.0) {
+  // Phan GAN / XA chon theo hang anh cua vach phai (khong doi khi thu goc)
+  std::vector<float> rows;
+  for (const auto &p : ir) {
+    rows.push_back(static_cast<float>(p.y));
+  }
+  const float v_far = percentile(rows, 0.30f);
+  const float v_near = percentile(rows, 0.70f);
+  const double cx = WORK_W / 2.0;
+  const double p0 = pitch_ * 180.0 / CV_PI;
+  double best_p = 0.0, best_c = std::numeric_limits<double>::max(), best_wn = 0.0;
+  for (double p = p0 - PITCH_SEARCH_DEG; p <= p0 + PITCH_SEARCH_DEG + 1e-9; p += PITCH_SEARCH_STEP_DEG) {
+    const double pr = p * CV_PI / 180.0;
+    Poly gl;
+    for (const auto &q : il) {
+      gl.push_back(to_ground(pr, f_px_, h_, cx, cy_, q.x, q.y));
+    }
+    std::vector<float> wn, wf;
+    for (const auto &q : ir) {
+      const cv::Point2f g = to_ground(pr, f_px_, h_, cx, cy_, q.x, q.y);
+      bool in = false;
+      const float d = dist_to_polyline(g, gl, &in);
+      if (!in) {
+        continue; // ngoai 2 dau vach trai: khoang cach khong phai be rong
+      }
+      if (q.y >= v_near) {
+        wn.push_back(d);
+      } else if (q.y <= v_far) {
+        wf.push_back(d);
+      }
+    }
+    if (wn.size() < 3 || wf.size() < 3) {
+      continue;
+    }
+    const double a = median_of(wn), b = median_of(wf);
+    const double c = std::fabs(b - a) / std::max(0.05, a);
+    if (c < best_c) {
+      best_c = c;
+      best_p = p;
+      best_wn = a;
+    }
+  }
+  // Toi uu o bien khoang tim / be rong vo ly / van lech nhieu -> bo mau
+  if (best_c > PITCH_MAX_RESID || best_wn < LANE_W_MIN_M || best_wn > LANE_W_MAX_M + 0.15 ||
+      std::fabs(best_p - p0) > PITCH_SEARCH_DEG - PITCH_SEARCH_STEP_DEG) {
     return false;
   }
-  const double p_deg = std::atan2(cy_ - v_h, f_px_) * 180.0 / CV_PI;
-  if (std::fabs(p_deg - profile_.pitch_deg) > profile_.pitch_max_dev_deg) {
-    return false;
-  }
-  const double p_rad = p_deg * CV_PI / 180.0;
-  cv::Point2f g[4];
-  for (int i = 0; i < 4; ++i) {
-    g[i] = to_ground(p_rad, f_px_, h_, cx, cy_, img[i][0], img[i][1]);
-  }
-  const cv::Point2f ab = g[1] - g[0];
-  const float n = std::max(1e-9f, norm2(ab));
-  const float s2 = cross2(ab, g[2] - g[0]) / n;
-  const float s3 = cross2(ab, g[3] - g[0]) / n;
-  const float w = 0.5f * std::fabs(s2 + s3);
-  const float cfg = profile_.lane_width_m;
-  if (w < 0.75f * cfg || w > 1.3f * cfg) {
-    return false;
-  }
-  // Xe (diem duoi camera) phai nam GIUA 2 vach
-  const float car = cross2(ab, cv::Point2f(0.0f, 0.0f) - g[0]) / n;
-  if (car * s2 < 0.0f || std::fabs(car) > std::fabs(s2) + 0.05f) {
-    return false;
-  }
-  pitch = p_deg;
+  pitch_deg = best_p;
   return true;
 }
 
-// (Mac dinh TAT) tu chinh goc cui tu 2 vach thang song song - khong on dinh tren duong gap khuc
-void CameraLane::calibrate_pitch(const std::vector<const Poly *> &lines) {
-  std::vector<std::array<cv::Point2f, 2>> heads;
-  for (size_t i = 0; i < lines.size() && i < 8; ++i) {
-    cv::Point2f a, b;
-    if (straight_head(*lines[i], 0.35f, a, b)) {
-      heads.push_back({a, b});
-    }
-  }
-  std::vector<float> found;
-  for (size_t i = 0; i < heads.size(); ++i) {
-    for (size_t j = i + 1; j < heads.size(); ++j) {
-      if (norm2(heads[i][0] - heads[j][0]) < 0.1f) {
-        continue;
-      }
-      double p = 0.0;
-      if (pitch_from_pair(heads[i].data(), heads[j].data(), p)) {
-        found.push_back(static_cast<float>(p));
-      }
-    }
-  }
-  if (found.empty()) {
+// Gom mau pitch_from_width (moi frame du 2 vach dai), trung vi 15 mau gan
+// nhat on dinh (IQR <= 1.5 do) va lech goc dang dung > 0.5 do -> doi goc
+// (ap dung o dau frame sau). Gioi han +-pitch_max_dev_deg quanh goc khai bao.
+void CameraLane::calibrate_pitch(const Poly &left, const Poly &right) {
+  if (poly_len(left) < PITCH_MIN_LINE_M || poly_len(right) < PITCH_MIN_LINE_M) {
     return;
   }
-  pitch_samples_.push_back(median_of(found)); // 1 mau / frame
+  double p = 0.0;
+  if (!pitch_from_width(left, right, p) ||
+      std::fabs(p - profile_.pitch_deg) > profile_.pitch_max_dev_deg) {
+    return;
+  }
+  pitch_samples_.push_back(static_cast<float>(p));
   if (pitch_samples_.size() > 40) {
     pitch_samples_.pop_front();
   }
-  if (pitch_samples_.size() < 10) {
+  if (pitch_samples_.size() < 15) {
     return;
   }
-  const std::vector<float> recent(
-      pitch_samples_.end() - std::min<long>(15, static_cast<long>(pitch_samples_.size())),
-      pitch_samples_.end());
+  const std::vector<float> recent(pitch_samples_.end() - 15, pitch_samples_.end());
   const float q1 = percentile(recent, 0.25f);
   const float med = percentile(recent, 0.50f);
   const float q3 = percentile(recent, 0.75f);
-  if (q3 - q1 > 2.0f) {
+  if (q3 - q1 > 1.5f) {
     return;
   }
   pitch_confirmed_ = true;
   const double old = pitch_ * 180.0 / CV_PI;
   const double diff = std::fabs(med - old);
-  if (diff > 0.7) {
-    // Ap dung o dau frame sau: luoi BEV doi kich thuoc, phan con lai cua frame
-    // nay van dung anh BEV cu
+  if (diff > 0.5) {
+    // Ap dung o dau frame sau: luoi BEV doi, phan con lai cua frame nay van
+    // dung anh BEV cu
     pending_pitch_ = med;
     pending_reset_ = diff > 2.0; // vach dang bam tinh theo goc cu sai nhieu -> do lai
     pitch_samples_.clear();
     width_samples_.clear();
     std::cout << "[CameraLane] Tu hieu chinh goc cui camera: " << old << " -> "
-              << med << " do (dat camera_pitch_deg:=" << med
-              << " de lan sau khoi dong dung ngay)\n";
+              << med << " do\n";
   }
 }
 
@@ -2494,12 +2500,8 @@ bool CameraLane::detect(const cv::Mat &frame, LaneOutput &out, bool draw,
   if (obs_r) {
     seen.push_back(&right_.pts);
   }
-  if (profile_.auto_pitch) {
-    std::vector<const Poly *> all = seen;
-    for (const auto &c : cands) {
-      all.push_back(&c);
-    }
-    calibrate_pitch(all);
+  if (profile_.auto_pitch && both_ok) {
+    calibrate_pitch(left_.pts, right_.pts);
   }
   adapt_threshold(rel, seen);
 

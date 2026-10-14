@@ -69,6 +69,18 @@ constexpr int ESC_START_FWD = 101;
 constexpr int ESC_KICK_FWD = 106;
 constexpr uint32_t ESC_KICK_MS = 300;
 constexpr int ESC_BRAKE = 20;
+// XUNG ESC MIN (13/10): ESP32Servo mac dinh timer 10 bit -> xung chi co buoc
+// 19.53 us: 101 -> 1543 us, 102..104 -> 1562.5, 105..106 -> 1582 (chi 3 nac
+// toc do, khong tang / giam toc tu tu duoc). Nay ESC dung timer 16 bit (0.3 us
+// / buoc). Cac muc cu (neutral, phanh, de-pa, cac diem ESC_LUT) giu DUNG xung
+// that cu (escLegacyUs) -> toc do cu khong doi; phan GIUA cac muc noi suy
+// theo us (vd lenh 4.6 km/h ~ 1550 us, 6.6 km/h ~ 1563 us).
+constexpr int ESC_TIMER_BITS = 16;
+constexpr float ESC_US_PER_TICK = 20000.0f / (1 << ESC_TIMER_BITS);
+// San ga khi chay = xung that cu cua ESC_START_FWD (1543 us, da chay on 09/10)
+// Chi de-pa khi ESC da neutral lau hon muc nay (xe dung yen that): node co the
+// ha lenh ve 0 vai tram ms ma xe van lan -> khong vot 1582 us giua duong.
+constexpr uint32_t ESC_KICK_IDLE_MS = 600;
 
 constexpr float MAX_SPEED_KMH = 15.0f;
 constexpr float MAX_VALID_SPEED_KMH = 18.0f;
@@ -163,7 +175,9 @@ bool got_packet = false;   // da nhan it nhat 1 goi hop le tu Mini PC
 uint32_t next_pid_us = 0;
 bool pid_timer_init = false;
 
-int last_esc = ESC_NEUTRAL;
+int last_esc = ESC_NEUTRAL;      // goc tuong duong cua xung ESC THAT (telemetry)
+int last_esc_ticks = -1;         // xung dang phat (tick timer 16 bit)
+float last_esc_us = 0.0f;        // xung dang phat (us)
 int last_steer = STEER_CENTER;
 
 struct EscMap {
@@ -241,19 +255,37 @@ void readUART() {
   }
 }
 
-int getBasePWM(float spd) {
-  if (spd < 0.5f) return ESC_NEUTRAL;
-  if (spd < ESC_LUT[2].spd) return ESC_MIN_FWD;
+// Xung THAT (us) ma ban cu (Servo.write(goc), timer 10 bit) phat cho goc deg
+float escLegacyUs(int deg) {
+  constexpr float tick10 = 20000.0f / 1024.0f;
+  const long us = 1000L + (long)deg * 1000L / 180L;
+  return (float)(long)(us / tick10) * tick10;
+}
 
+// Ghi xung ESC (us, cho phep le) neu khac xung dang phat
+void escWriteUs(float us) {
+  const int ticks = (int)lroundf(us / ESC_US_PER_TICK);
+  if (ticks == last_esc_ticks) return;
+  motor_esc.writeTicks(ticks);
+  last_esc_ticks = ticks;
+  last_esc_us = ticks * ESC_US_PER_TICK;
+  last_esc = (int)lroundf((last_esc_us - 1000.0f) * 0.18f);
+}
+
+// Toc do (km/h) -> xung (us): noi suy ESC_LUT theo xung THAT cua tung diem
+float getBaseUs(float spd) {
+  if (spd < 0.5f) return escLegacyUs(ESC_NEUTRAL);
+  if (spd < ESC_LUT[2].spd) return escLegacyUs(ESC_MIN_FWD);
   for (size_t i = 0; i + 1 < LUT_SIZE; ++i) {
     if (spd >= ESC_LUT[i].spd && spd < ESC_LUT[i + 1].spd) {
-      float dSpd = ESC_LUT[i + 1].spd - ESC_LUT[i].spd;
-      if (dSpd <= 0.0f) return ESC_LUT[i].pwm;
-      float ratio = (spd - ESC_LUT[i].spd) / dSpd;
-      return roundf(ESC_LUT[i].pwm + ratio * (ESC_LUT[i + 1].pwm - ESC_LUT[i].pwm));
+      const float u0 = escLegacyUs(ESC_LUT[i].pwm);
+      const float u1 = escLegacyUs(ESC_LUT[i + 1].pwm);
+      const float dSpd = ESC_LUT[i + 1].spd - ESC_LUT[i].spd;
+      if (dSpd <= 0.0f) return u0;
+      return u0 + (spd - ESC_LUT[i].spd) / dSpd * (u1 - u0);
     }
   }
-  return ESC_LUT[LUT_SIZE - 1].pwm;
+  return escLegacyUs(ESC_LUT[LUT_SIZE - 1].pwm);
 }
 
 // Tính góc servo từ dev (px ảnh tham chiếu 640, dev < 0 = tâm làn lệch trái).
@@ -306,23 +338,23 @@ void runPID(uint32_t now) {
     static uint32_t kick_until_ms = 0;
     const uint32_t now_ms = millis();
 
-    int target_pwm = getBasePWM(car.target_spd);
-    if (target_pwm > ESC_NEUTRAL) {
-      // Dang chay: khong de ga roi vao vung chet cua ESC
-      target_pwm = max(target_pwm, ESC_START_FWD);
-      // Vua tu dung yen (ESC dang neutral) chuyen sang chay -> de-pa
-      if (last_esc <= ESC_NEUTRAL) kick_until_ms = now_ms + ESC_KICK_MS;
-      if ((int32_t)(kick_until_ms - now_ms) > 0) target_pwm = max(target_pwm, ESC_KICK_FWD);
-      car.esc_cmd = constrain(target_pwm, ESC_MIN_FWD, ESC_MAX_FWD);
-    } else {
-      // Lenh toc do ~0 nhung khong EMG: dung (truoc day bi kep len 95 -> bo)
-      car.esc_cmd = ESC_NEUTRAL;
+    static uint32_t last_drive_ms = 0;  // lan cuoi ESC chay toi
+    const float neutral_us = escLegacyUs(ESC_NEUTRAL);
+    float us = neutral_us;
+    if (car.target_spd >= 0.5f) {
+      // Dang chay: khong de ga xuong duoi san (vung chet ESC / BLDC keu)
+      us = max(getBaseUs(car.target_spd), escLegacyUs(ESC_START_FWD));
+      // De-pa chi khi xe vua tu DUNG YEN (neutral > ESC_KICK_IDLE_MS)
+      if (last_esc_us <= neutral_us + 1.0f && now_ms - last_drive_ms > ESC_KICK_IDLE_MS) {
+        kick_until_ms = now_ms + ESC_KICK_MS;
+      }
+      if ((int32_t)(kick_until_ms - now_ms) > 0) us = max(us, escLegacyUs(ESC_KICK_FWD));
+      us = constrain(us, escLegacyUs(ESC_MIN_FWD), escLegacyUs(ESC_MAX_FWD));
+      last_drive_ms = now_ms;
     }
-
-    if (car.esc_cmd != last_esc) {
-      motor_esc.write(car.esc_cmd);
-      last_esc = car.esc_cmd;
-    }
+    // Lenh toc do ~0 nhung khong EMG: tha ga (neutral, xe lan)
+    escWriteUs(us);
+    car.esc_cmd = last_esc;
   }
 
   calcSteer(DT_SEC);
@@ -343,10 +375,10 @@ void processBrake() {
   if (!car.braking) { car.braking = true; phase = 0; start_ms = now; }
 
   if (phase == 0) {
-    if (last_esc != ESC_BRAKE) { motor_esc.write(ESC_BRAKE); last_esc = ESC_BRAKE; }
+    escWriteUs(escLegacyUs(ESC_BRAKE));
     if (now - start_ms >= BRAKE_HOLD_MS) { phase = 1; start_ms = now; }
   } else {
-    if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
+    escWriteUs(escLegacyUs(ESC_NEUTRAL));
     car.esc_cmd = ESC_NEUTRAL;
     car.braking = false;
   }
@@ -360,7 +392,7 @@ void checkSafety() {
   if (!car.emg_stop) {
     if (car.braking) {
       car.braking = false;
-      if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
+      escWriteUs(escLegacyUs(ESC_NEUTRAL));
       car.esc_cmd = ESC_NEUTRAL; 
     }
     return;
@@ -370,7 +402,7 @@ void checkSafety() {
   
   if (car.cur_spd > STOPPED_KMH) { processBrake(); return; }
 
-  if (last_esc != ESC_NEUTRAL) { motor_esc.write(ESC_NEUTRAL); last_esc = ESC_NEUTRAL; }
+  escWriteUs(escLegacyUs(ESC_NEUTRAL));
   car.esc_cmd = ESC_NEUTRAL;
 }
 
@@ -414,7 +446,9 @@ void setup() {
   servo_steer.write(STEER_CENTER);
 
   motor_esc.attach(PIN_ESC, 1000, 2000);
-  motor_esc.write(ESC_NEUTRAL);
+  // attach() luon dat lai timer 10 bit -> doi sang 16 bit SAU attach
+  motor_esc.setTimerWidth(ESC_TIMER_BITS);
+  escWriteUs(escLegacyUs(ESC_NEUTRAL));
 
   last_packet_ms = millis();
   next_pid_us = micros() + PID_DT_US;
