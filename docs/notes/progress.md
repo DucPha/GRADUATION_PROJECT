@@ -3,6 +3,31 @@
 ## Trạng thái
 Giai đoạn 1 — sửa `camera_node` — **đã xong**.
 
+## 2026-10-15 (tiếp) — MPC + tích phân LQI: hết lệch dư, chạy nhanh hơn
+Hiện tượng người dùng báo: **xe không bám giữa làn / lệch dần**. Nguyên nhân: MPC hiện tại
+(không có tích phân) chỉ là kiểu-2 với nhiễu vào *khớp*; sai số mô hình dạng **lệch lái** (`b`,
+`g` sai, deadband servo, camera lắp lệch) làm xe đứng lệch *dư* tại trục.
+
+Kiểm chứng bằng mô phỏng (`mpc_sim.py`, port trung thực `lk_mpc_solve` + mô hình xe):
+- MPC cũ, `b` lệch 3° chưa học ⇒ lệch dư **+3.9 cm**; tỉ số lái sai (0.42 vs 0.70) ⇒ **+4.9 cm**.
+- Thêm **tích phân LQI** `q_i≈60` ⇒ lệch về **~0** trong mọi trường hợp, hội tụ < 2 s, vẫn êm
+  khi có nhiễu detector và trong cua (q_i=0..240 đều ổn định; q_i nhỏ như 5–20 chỉ giảm một phần).
+
+Thay đổi `lane_keeping.hpp/.cpp`:
+- `LkMpcCfg` + `lk_mpc_solve(..., double s0=0.0)`: thêm trạng thái tích phân `s=∫e_y dt`,
+  phạt `q_i·s²`; `s0=0`/`q_i=0` ⇒ **giữ nguyên hành vi cũ** (an toàn).
+- `VehicleParams`: `mpc_qi` (mặc định 60), `mpc_i_max` (0.06, chống wind-up).
+- `PathTracker`: `mpc_s_int_` cập nhật mỗi chu kỳ trong `mpc_steer` (chỉ khi đường hợp lệ, xe
+  chạy, `|e_y|<0.15`); xả dần khi mất đường / MPC không chạy. Khi MPC chạy, tích phân dự phòng
+  `xte_i_deg_` vẫn = 0 (không cộng dồn hai lần).
+- `fusion.launch.py`: `mpc_qi=60`, `mpc_i_max=0.06`; `speed_x10`/`speed_one_x10` 62 → **70**
+  (giữ giữa làn tốt hơn ⇒ chạy nhanh hơn; tốc độ vốn đã tự hạ khi `xte>3 cm`).
+- `docs/TUNING.md`: §4 sửa lại đúng mặc định launch; thêm **§8 MPC + LQI**.
+
+Kiểm chứng: `g++ -std=c++17 -fsyntax-only -Wall -Wextra` trên `lane_keeping.cpp`: exit 0,
+0 cảnh báo. `python -m py_compile fusion.launch.py`: exit 0. Mô phỏng: `mpc_sim.py`/`mpc_sim2.py`.
+Chưa `colcon build` (phải chạy trên Mini PC). Đổi hành vi ⇒ nên thử `mpc_qi:=0` để so sánh.
+
 ## 2026-10-15 — nhánh `lane-keeping-fixes` (refactor `lane_detector` + MPC)
 Chuyển sang nhánh mới `lane-keeping-fixes` (14/10: `lane_detector.cpp` BEV + `lane_keeping.cpp` MPC)
 và port các cải tiến detector từ `main`:

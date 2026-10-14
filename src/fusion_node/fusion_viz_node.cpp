@@ -269,6 +269,10 @@ public:
         vp.mpc_g0 = declare_parameter<double>("mpc_g0", vp.mpc_g0);
         vp.mpc_b0_deg = declare_parameter<double>("mpc_b0_deg", vp.mpc_b0_deg);
         vp.mpc_learn = declare_parameter<bool>("mpc_learn", vp.mpc_learn);
+        // LQI: tich phan lech ngang trong MPC -> khu lech du tai truc (xe luon ve
+        // giua lan). mpc_qi = 0 = tat (MPC cu).
+        vp.mpc_qi = declare_parameter<double>("mpc_qi", vp.mpc_qi);
+        vp.mpc_i_max = declare_parameter<double>("mpc_i_max", vp.mpc_i_max);
         // do banh / do servo: servo quay 30 do ma banh chi quay ~20 do -> 0.65.
         // Chay that 08/10 voi 0.8: xe bat ve phia ngoai cua, cua nho be lai
         // khong du (banh quay it hon khai bao). Thu vong kin: khai bao 0.65 ben

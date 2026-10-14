@@ -81,12 +81,12 @@ Log khởi động in `geometry: ... BEV 160xN (1 cm), Z gần..xa m` = vùng m�
 
 | Tham số (launch) | Mặc định | Ý nghĩa |
 |---|---|---|
-| `speed_x10` | 66 | MỨC THẲNG: đường thẳng hẳn + xe giữa làn ⇒ 1562.5 µs. CHỈ 2 MỨC (13/10): còn lại (cua, sắp tới cua, xe lệch) là `speed_corner_x10` 52 ⇒ 1543 µs, không nội suy |
-| `speed_one_x10` | 66 | chỉ thấy 1 vạch, đường thẳng, xe giữa làn (= mức thẳng 1562.5 µs) |
-| `speed_corner_x10` | 52 | 1 vạch, hoặc 2 vạch ở cua gắt nhất (5.0 km/h ≈ ESC 101 = `ESC_CURVE` 1561 µs) |
-| `speed_hold_x10` | 50 | mất cả 2 vạch, đang giữ hướng |
-| `speed_min_x10` | 50 | sàn tốc độ khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
-| `speed_ramp_x10` | 30 | tăng tốc 3 km/h mỗi giây; giảm tốc luôn tức thì |
+| `speed_x10` | 70 | MỨC THẲNG: đường thẳng hẳn + xe giữa làn ⇒ 1562.5 µs. CHỈ 2 MỨC (15/10): còn lại (cua, sắp tới cua, xe lệch) là `speed_corner_x10` 44 ⇒ 1548 µs, không nội suy. 15/10: 62 → 70 (MPC có tích phân LQI giữ giữa làn tốt hơn). Muốn nhanh hơn: 78–90 |
+| `speed_one_x10` | 70 | chỉ thấy 1 vạch, đường thẳng, xe giữa làn (= mức thẳng 1562.5 µs) |
+| `speed_corner_x10` | 44 | 1 vạch, hoặc 2 vạch ở cua gắt nhất (≈ ESC 101) |
+| `speed_hold_x10` | 44 | mất cả 2 vạch, đang giữ hướng |
+| `speed_min_x10` | 44 | sàn tốc độ khi đang chạy — BLDC dưới mức này kêu cọt kẹt |
+| `speed_ramp_x10` | 8 | tăng tốc 0.8 km/h mỗi giây; giảm tốc luôn tức thì |
 | `coast_decel_mps2` | 0.7 | xe nhả ga (ESC không phanh) giảm tốc cỡ bấy nhiêu m/s². Dùng để **giảm tốc trước cua** và cho odometry khi giảm tốc. Vẫn vọt cua ⇒ giảm (0.5) |
 | `corner_margin_m` | 0.20 | phải xuống tốc độ cua trước khi tới cua bấy nhiêu m |
 
@@ -172,3 +172,34 @@ Kiểm tra trên bản đồ nhỏ góc phải ảnh overlay:
   `guard` ≠ 0 thường xuyên ⇒ xe hay sát vạch ⇒ kiểm tra `steer_ratio`, giảm tốc cua.
 
 Muốn quay lại cách lái cũ để so sánh: `./run.sh steer_mode:=camera`.
+
+## 8. MPC giữ làn + tích phân LQI (`steer_mode:=track`, mặc định)
+
+Khi có đường tâm phủ tới trục sau, `lane_keeping` lái bằng **MPC** (mô hình xe đạp tương đối
+với làn: `e_y, e_psi, d_act`, xem trước độ cong 1.2 s, bù trễ servo) thay cho pure pursuit +
+phản hồi lệch ngang. Pure pursuit / `xte_*` chỉ còn là **dự phòng** khi MPC không chạy được.
+Tham số trong launch (tiền tố `mpc_`):
+
+| Tham số | Mặc định | Ý nghĩa |
+|---|---|---|
+| `mpc_enable` | true | bật MPC. false = lái như bản 09/10 (pure pursuit + lệch ngang) |
+| `mpc_tau_s` | 0.15 | trễ servo + lọc (s) trong mô hình |
+| `mpc_horizon_s` | 1.2 | tầm dự đoán (s) |
+| `mpc_zone_m` | 0.05 | \|e_y\| từ mức này coi là "xa tâm": ưu tiên kéo về tâm; gần tâm ưu tiên giữ hướng cho êm |
+| `mpc_rd` | 30 | phạt thay đổi góc lái (êm). Lái giật ⇒ tăng; vào cua chậm ⇒ giảm |
+| `mpc_g0` / `mpc_b0_deg` | 0.70 / 0.0 | tỉ số lái thật và độ lệch lái thật ban đầu; oracle tự học tiếp |
+| `mpc_learn` | true | học `g` / `b` online từ độ cong đo bằng camera |
+| **`mpc_qi`** | **60** | **LQI: trọng số tích phân lệch ngang** `s = ∫e_y dt`. MPC thường (không tích phân) để **lệch dư tại trục** khi mô hình sai (`b`, `g`, deadband servo, camera lệch). **0 = tắt (MPC cũ)** |
+| **`mpc_i_max`** | **0.06** | chặn tích phân (m·s) — chống wind-up khi vừa mất làn / lệch lớn |
+
+**Vì sao thêm LQI (15/10):** mô phỏng cho thấy MPC cũ đứng lệch dư ~3.9 cm khi `b` lệch 3° chưa
+học, ~4.9 cm khi tỉ số lái sai (0.42 so với 0.70) — đúng hiện tượng "xe không bám giữa làn /
+lệch dần". Thêm tích phân (`mpc_qi≈60`) đưa lệch về ~0 trong mọi trường hợp, hội tụ < 2 s, vẫn
+ổn định khi có nhiễu detector và trong cua. Vì tốc độ đã tự hạ khi `xte` > 3 cm, giữ giữa làn
+tốt cũng làm xe **chạy nhanh hơn** (ít khi rớt về mức cua).
+
+Chỉnh nhanh: còn lệch dư một bên ⇒ tăng `mpc_qi` (80–120); xe dao/lắc quanh tâm ⇒ giảm
+(30–40) hoặc giảm `mpc_i_max`. `mpc_qi:=0` để quay lại MPC cũ.
+
+> `xte_ki` (§7) chỉ tác dụng khi MPC **không** chạy; lúc MPC chạy, tích phân do `mpc_qi` đảm
+> nhiệm (không cộng dồn hai lần).

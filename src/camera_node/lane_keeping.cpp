@@ -193,6 +193,7 @@ void PathTracker::reset() {
   last_compute_ = {};
   // Giu g, b da hoc (dac tinh xe, khong doi khi mat duong)
   d_est_rad_ = 0.0;
+  mpc_s_int_ = 0.0;
   cmd_hist_.clear();
   obs_hist_.clear();
 }
@@ -554,6 +555,7 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   if (c.size() < 2) {
     // Khong con duong: xa dan khau I (khong giu sai lech cu qua lau)
     xte_i_deg_ *= std::exp(-dt_c / 2.0);
+    mpc_s_int_ *= std::exp(-dt_c / 2.0);
     return o;
   }
   const double L = p_.wheelbase_m;
@@ -639,10 +641,13 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
   // ---- MPC giu lan (thay pure pursuit + lech ngang) ----
   if (p_.mpc_enable) {
     double ms = 0.0;
-    if (mpc_steer(c, v, o, ms)) {
+    if (mpc_steer(c, v, dt_c, o, ms)) {
       steer = ms;
       xte_i_deg_ = 0.0;
       o.xte_i_deg = 0.0;
+    } else {
+      // MPC khong chay duoc (duong chua phu toi truc sau...): xa dan tich phan
+      mpc_s_int_ *= std::exp(-dt_c / 1.0);
     }
   }
   o.mpc_g = oracle_.g;
@@ -761,8 +766,8 @@ PathTracker::Output PathTracker::compute(double v, double bias_m) {
 // MPC (lk_mpc_solve, lane_keeping.hpp): trang thai tuong doi voi duong tam tai TRUC SAU, do cong
 // duong theo quang duong xe se di trong tam du doan.
 // ============================================================================
-bool PathTracker::mpc_steer(const std::vector<cv::Point2f> &c, double v, Output &o,
-                            double &steer_deg) const {
+bool PathTracker::mpc_steer(const std::vector<cv::Point2f> &c, double v, double dt_c,
+                            Output &o, double &steer_deg) {
   if (c.size() < 2) {
     return false;
   }
@@ -796,6 +801,15 @@ bool PathTracker::mpc_steer(const std::vector<cv::Point2f> &c, double v, Output 
   cfg.max_steer = p_.max_steer_deg * kDeg;
   cfg.zone_m = p_.mpc_zone_m;
   cfg.rd = p_.mpc_rd;
+  cfg.q_i = p_.mpc_qi;
+  cfg.i_max = p_.mpc_i_max;
+  // LQI: tich phan lech ngang (m.s). Chi tich luy khi duong hop le, xe dang chay
+  // va lech con nho (chong wind-up khi vua mat lan / lech lon).
+  if (p_.mpc_qi > 0.0 && v > 0.15 && std::fabs(ey) < 0.15) {
+    mpc_s_int_ = std::clamp(mpc_s_int_ + ey * dt_c, -p_.mpc_i_max, p_.mpc_i_max);
+  } else {
+    mpc_s_int_ *= std::exp(-dt_c / 1.0);
+  }
   const double vm = std::max(0.15, v);
   std::vector<double> rho(static_cast<size_t>(cfg.n), 0.0);
   for (int k = 0; k < cfg.n; ++k) {
@@ -808,7 +822,8 @@ bool PathTracker::mpc_steer(const std::vector<cv::Point2f> &c, double v, Output 
   // Goc banh luc lenh nay toi servo (sau actuator_latency_s)
   const double dact = d_est_rad_ + (last_steer_rad_ - d_est_rad_) *
                                        (1.0 - std::exp(-p_.actuator_latency_s / std::max(1e-3, p_.mpc_tau_s)));
-  const double u = lk_mpc_solve(ey, epsi, dact, last_steer_rad_, vm, rho, oracle_.g, oracle_.b, cfg);
+  const double u = lk_mpc_solve(ey, epsi, dact, last_steer_rad_, vm, rho, oracle_.g, oracle_.b,
+                                cfg, mpc_s_int_);
   steer_deg = u / kDeg;
   o.mpc = true;
   o.mpc_ey_m = ey;

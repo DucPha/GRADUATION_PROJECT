@@ -62,13 +62,20 @@ struct LkMpcCfg {
   double q_psi_near = 3.0;
   double r = 0.05;            // trong so goc lai
   double rd = 8.0;            // trong so thay doi goc lai giua 2 buoc
+  // LQI (tich phan lech ngang): them trang thai s = ∫ e_y dt vao bai toan, phat
+  // q_i * s^2. MPC thuong (khong co tich phan) chi la kieu-2 voi NHIEU vao khop;
+  // sai so mo hinh dang LECH LAI (b, g sai, deadband servo, camera lech) lam xe
+  // dung o lech du tai truc (do bang mo phong: b lech 3 do -> lech ~3.9 cm).
+  // Tich phan khu dung lech do -> xe luon ve giua lan. q_i = 0 = tat (nhu cu).
+  double q_i = 0.0;           // trong so tich phan (m.s)
+  double i_max = 0.06;        // chan tich phan, chong wind-up (m.s)
 };
 
 // Goc banh lenh u0 (rad) toi uu cho trang thai hien tai. rho[k]: do cong duong
 // tai buoc k (thieu thi lay phan tu cuoi). u_prev: lenh chu ky truoc.
 inline double lk_mpc_solve(double ey, double epsi, double dact, double u_prev, double v,
                            const std::vector<double> &rho, double g, double b,
-                           const LkMpcCfg &c) {
+                           const LkMpcCfg &c, double s0 = 0.0) {
   const int n = std::max(2, c.n);
   const double vdt = std::max(0.05, v) * c.dt;
   const double a_tau = std::clamp(c.dt / std::max(1e-3, c.tau), 0.0, 1.0);
@@ -102,14 +109,35 @@ inline double lk_mpc_solve(double ey, double epsi, double dact, double u_prev, d
   }
 
   // Cost = sum_k qy*ey_k^2 + qp*epsi_k^2 + r*u_k^2 + rd*(u_k - u_{k-1})^2
+  //        + q_i * s_k^2   (s_k = tich phan lech ngang toi buoc k, LQI)
   cv::Mat H = cv::Mat::zeros(n, n, CV_64F);
   cv::Mat f = cv::Mat::zeros(n, 1, CV_64F);
+  // Trang thai tich phan khong anh huong e_y/e_psi/d_act nen phan lan truyen
+  // free/su van dung: s_k = si + dt * sum_{j<=k} ey_j, tuyen tinh theo u.
+  const double si = std::clamp(s0, -c.i_max, c.i_max);
+  const bool use_i = c.q_i > 0.0;
+  double cum_free = 0.0;
+  std::vector<double> cum_su(n, 0.0);
   for (int k = 0; k < n; ++k) {
     for (int i = 0; i < n; ++i) {
       const double yi = su[k][i][0], pi = su[k][i][1];
       f.at<double>(i) += qy * yi * free[k][0] + qp * pi * free[k][1];
       for (int j = i; j < n; ++j) {
         H.at<double>(i, j) += qy * yi * su[k][j][0] + qp * pi * su[k][j][1];
+      }
+    }
+    if (use_i) {
+      cum_free += free[k][0];
+      for (int i = 0; i < n; ++i) {
+        cum_su[i] += su[k][i][0];
+      }
+      const double cc = si + c.dt * cum_free;
+      for (int i = 0; i < n; ++i) {
+        const double gi = c.dt * cum_su[i];
+        f.at<double>(i) += c.q_i * gi * cc;
+        for (int j = i; j < n; ++j) {
+          H.at<double>(i, j) += c.q_i * gi * (c.dt * cum_su[j]);
+        }
       }
     }
   }
@@ -249,6 +277,10 @@ struct VehicleParams {
   double mpc_g0 = 0.70;
   double mpc_b0_deg = 0.0;
   bool mpc_learn = true;       // hoc g, b online tu do cong that (camera)
+  // LQI: tich phan lech ngang e_y trong MPC -> khu lech du tai truc (sai so b/g,
+  // deadband servo, camera lech). q_i = 0 = tat (kieu MPC cu). Xem lane_keeping.hpp.
+  double mpc_qi = 60.0;        // trong so tich phan (m.s)
+  double mpc_i_max = 0.06;     // chan tich phan, chong wind-up (m.s)
 };
 
 
@@ -326,7 +358,8 @@ private:
   double line_clearance(const std::vector<cv::Point2f> &line_v, double z,
                         double x_wheel, int side, bool &found) const;
 
-  bool mpc_steer(const std::vector<cv::Point2f> &c, double v, Output &o, double &steer_deg) const;
+  bool mpc_steer(const std::vector<cv::Point2f> &c, double v, double dt_c, Output &o,
+                 double &steer_deg);
   void learn_from(const std::vector<cv::Point2f> &centre_cam, std::chrono::steady_clock::time_point stamp);
 
   VehicleParams p_;
@@ -348,6 +381,9 @@ private:
   // MPC + oracle
   LkOracle oracle_;
   double d_est_rad_ = 0.0; // goc banh lenh sau tre + loc (uoc luong goc dang co)
+  // LQI: tich phan lech ngang e_y (m.s) dua vao MPC; cap nhat moi chu ky khi MPC
+  // dang chay (xem mpc_steer). xa dan khi mat duong / MPC khong chay.
+  double mpc_s_int_ = 0.0;
   std::deque<std::pair<std::chrono::steady_clock::time_point, double>> cmd_hist_;
   struct ObsRec {
     std::chrono::steady_clock::time_point t;

@@ -111,11 +111,11 @@ Khi khởi động, xe **luôn đứng yên** (gửi EMG) cho tới khi người
    vạch bám ổn định) `lane_start_frames` frame là **tự chạy lại**.
 4. Cổng ESP32 mở (`serial=open`) và ESP32 nhận gói đều (watchdog 500 ms).
 
-Khi đủ, lệnh tốc độ: đủ 2 vạch thì nội suy từ `speed_x10` (7.0 km/h ≈ ESC 103, đường thẳng, xe
-lệch ≤ 3 cm) về `speed_corner_x10` (5.0 km/h ≈ ESC 101, cua gắt / xe lệch ≥ 7 cm); 1 vạch thì
-tương tự nhưng tối đa `speed_one_x10` (6.0 km/h ≈ ESC 102); thấy cua phía trước thì nhả ga sớm
-(`coast_decel_mps2`, `corner_margin_m`, xem `docs/TUNING.md` §4);
-**không thấp hơn `speed_min_x10`** (mặc định 5.0 km/h ≈ ESC 101). Lý do: động cơ BLDC chạy
+Khi đủ, lệnh tốc độ có **2 mức**: đủ 2 vạch và **đường thẳng + xe giữa làn** (lệch ≤ 3 cm) ⇒
+`speed_x10` (7.0 km/h ≈ ESC 104); còn lại (cua, sắp tới cua, xe lệch ≥ 7 cm) ⇒ `speed_corner_x10`
+(4.4 km/h ≈ ESC 101). 1 vạch thì mức thẳng là `speed_one_x10` (7.0 km/h). Thấy cua phía trước thì
+nhả ga sớm (`coast_decel_mps2`, `corner_margin_m`, xem `docs/TUNING.md` §4);
+**không thấp hơn `speed_min_x10`** (mặc định 4.4 km/h ≈ ESC 101). Lý do: động cơ BLDC chạy
 chậm (ESC 100, ~3.6 km/h) kêu cọt kẹt và dễ không đủ lực thắng ma sát.
 
 Dashboard gửi `std_msgs/Bool` lên `/autocar/run` 10 lần/giây. Không có dashboard vẫn cho
@@ -203,12 +203,12 @@ Các topic ảnh chỉ được phát khi có subscriber.
 | `camera_vfov_deg` | `51.0` | Góc nhìn dọc của camera (giống nhau ở 1080p và 640×480) |
 | `lane_width_m` | `0.60` | Bề rộng làn tâm vạch – tâm vạch (giá trị ban đầu, tự học lại; khoảng chấp nhận 50–85 cm) |
 | `roi_top_frac` | `0.0` | Bỏ qua phần trên cùng ảnh (mặc định dùng hết) |
-| `speed_x10` | `66` | MỨC THẲNG (≈ 1562.5 µs) khi đường thẳng hẳn và xe giữa làn; còn lại là mức cua `speed_corner_x10` (1543 µs). Chỉ 2 mức, không nội suy |
-| `speed_one_x10` | `66` | Chỉ thấy 1 vạch trên đường thẳng, xe giữa làn (= mức thẳng); cua / xe lệch về `speed_corner_x10` |
-| `speed_hold_x10` | `50` | Tốc độ giữ hướng khi mất cả 2 vạch |
-| `speed_corner_x10` | `52` | Tốc độ vào cua: 1 vạch, hoặc 2 vạch cong gắt nhất (≈ ESC 101) |
-| `speed_ramp_x10` | `30` | Mức tăng tốc, x10 mỗi giây (`30` = 3 km/h/s); giảm tốc luôn tức thì |
-| `speed_min_x10` | `50` | Tốc độ nhỏ nhất khi đang chạy; BLDC kêu ở tốc độ thấp thì tăng |
+| `speed_x10` | `70` | MỨC THẲNG (≈ 1562 µs) khi đường thẳng hẳn và xe giữa làn; còn lại là mức cua `speed_corner_x10` (1548 µs). Chỉ 2 mức, không nội suy. 15/10: 62 → 70 (MPC + LQI giữ giữa làn tốt hơn) |
+| `speed_one_x10` | `70` | Chỉ thấy 1 vạch trên đường thẳng, xe giữa làn (= mức thẳng); cua / xe lệch về `speed_corner_x10` |
+| `speed_hold_x10` | `44` | Tốc độ giữ hướng khi mất cả 2 vạch |
+| `speed_corner_x10` | `44` | Tốc độ vào cua: 1 vạch, hoặc 2 vạch cong gắt nhất (≈ ESC 101) |
+| `speed_ramp_x10` | `8` | Mức tăng tốc, x10 mỗi giây (`8` = 0.8 km/h/s); giảm tốc luôn tức thì |
+| `speed_min_x10` | `44` | Tốc độ nhỏ nhất khi đang chạy; BLDC kêu ở tốc độ thấp thì tăng |
 | `coast_decel_mps2` / `corner_margin_m` | `0.7` / `0.20` | Giảm tốc trước cua: thấy cua cách d m ⇒ tốc độ ≤ √(v_cua² + 2·a·(d − margin)). Vẫn vọt cua ⇒ giảm `coast_decel_mps2` |
 | `lane_lost_stop_ms` | `2500` | Mất 2 làn quá lâu thì dừng (thấy lại làn thì tự chạy) |
 | `lane_start_frames` | `3` | Bấm chạy / mất làn đã dừng: chạy khi thấy làn (2 vạch hoặc 1 vạch ổn định) bấy nhiêu frame liên tiếp (`LANE_START_FRAMES` bản Python) |
@@ -286,9 +286,11 @@ thì tới cua vạch đã ra khỏi khung hình.
 2. **Căn chỉnh tại mối nối:** đoạn nhớ được xoay + tịnh tiến cho khớp vị trí và hướng của
    frame mới ⇒ sai số odometry (tốc độ, tỉ số lái) được camera sửa mỗi frame, không tích
    luỹ. Frame lệch hẳn đường đã nhớ (nhận nhầm) bị bỏ, lệch 3 frame liền mới tin.
-3. **MPC giữ làn** (mô hình xe đạp tương đối với làn, dự đoán 1.2 s, bù trễ servo) + **học online**
-   hệ số lái thật / độ lệch lái (LBMPC, `lane_keeping.hpp`); **pure pursuit** tầm nhìn `0.35 + 0.20·v`
-   m (kẹp 0.35–0.80) chỉ là **dự phòng**.
+3. **MPC giữ làn** (mô hình xe đạp tương đối với làn, dự đoán 1.2 s, bù trễ servo) + **tích phân
+   LQI** `∫e_y dt` khu **lệch dư** khi mô hình sai (tỉ số lái / độ lệch lái / deadband servo /
+   camera lệch) ⇒ xe luôn về giữa làn (không "lệch dần") + **học online** hệ số lái thật / độ lệch
+   lái (LBMPC, `lane_keeping.hpp`); **pure pursuit** tầm nhìn `0.35 + 0.20·v`
+   m (kẹp 0.35–0.80) chỉ là **dự phòng**. `mpc_qi` = trọng số tích phân (mặc định 60, `0` = MPC cũ).
 4. **Vạch ảo + rào chắn:** vạch ra khỏi khung (vạch trong của cua gắt) vẫn được nhớ. Mép
    thân xe cách vạch (thật hoặc ảo) < 4 cm tại bánh trước hoặc 25 cm trước đó ⇒ cộng góc đẩy
    ra (tối đa 15°) ⇒ chạy 1 vạch mà không đè vạch còn lại.

@@ -258,6 +258,8 @@ def setup(context, *args, **kwargs):
         'mpc_g0': real('mpc_g0'),
         'mpc_b0_deg': real('mpc_b0_deg'),
         'mpc_learn': ParameterValue(LaunchConfiguration('mpc_learn'), value_type=bool),
+        'mpc_qi': real('mpc_qi'),
+        'mpc_i_max': real('mpc_i_max'),
     }
 
     actions.append(Node(
@@ -305,12 +307,13 @@ def generate_launch_description():
         DeclareLaunchArgument('roi_top_frac', default_value='0.0',
                               description='0.0-1.0, phan anh tren cung bo qua; camera cui ~42 do nen ca '
                                           'anh deu la mat san (~0.13-1.1 m), mac dinh dung het'),
-        DeclareLaunchArgument('speed_x10', default_value='62',
+        DeclareLaunchArgument('speed_x10', default_value='70',
                               description='Toc do du 2 vach + duong thang + xe giua lan (lech <= 3 cm), '
-                                          'km/h x 10. CHI 2 MUC: thang = muc nay (62 ~ 1560 us), con lai = speed_corner_x10 (44 ~ 1548 us)'),
-        DeclareLaunchArgument('speed_one_x10', default_value='62',
+                                          'km/h x 10. CHI 2 MUC: thang = muc nay (70 ~ 1562 us), con lai = speed_corner_x10 (44 ~ 1548 us). '
+                                          '15/10: 62 -> 70 (MPC co tich phan LQI giu giua lan tot hon). Muon nhanh hon: 78-90'),
+        DeclareLaunchArgument('speed_one_x10', default_value='70',
                               description='Toc do chi thay 1 vach tren duong thang + xe giua lan, km/h x 10 '
-                                          '(62 ~ 1560 us, = speed_x10); cua / xe lech -> speed_corner_x10'),
+                                          '(70 ~ 1562 us, = speed_x10); cua / xe lech -> speed_corner_x10'),
         DeclareLaunchArgument('speed_hold_x10', default_value='44',
                               description='Toc do giu huong khi mat ca 2 vach, km/h x 10'),
         DeclareLaunchArgument('speed_corner_x10', default_value='44',
@@ -408,6 +411,12 @@ def generate_launch_description():
                               description='Ti so lai that / steer_ratio ban dau (do 10/10: 0.42 / 0.6); oracle tu hoc tiep'),
         DeclareLaunchArgument('mpc_b0_deg', default_value='0.0', description='Do lech lai that ban dau (do banh); oracle tu hoc'),
         DeclareLaunchArgument('mpc_learn', default_value='true', description='Hoc g / b online tu do cong that do bang camera'),
+        DeclareLaunchArgument('mpc_qi', default_value='60.0',
+                              description='LQI: trong so tich phan lech ngang e_y -> khu lech du tai truc (sai so b/g, '
+                                          'deadband servo, camera lech). Do bang mo phong: b lech 3 do -> lech ~3.9 cm, '
+                                          'them tich phan ~60 -> ~0. 0 = tat (MPC cu). Tang neu con lech, giam neu lao dao'),
+        DeclareLaunchArgument('mpc_i_max', default_value='0.06',
+                              description='Chan tich phan LQI (m.s) - chong wind-up khi vua mat lan / lech lon'),
     ]
 
     return LaunchDescription(declare + [OpaqueFunction(function=setup)])
